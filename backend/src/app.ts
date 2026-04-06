@@ -1,8 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import healthRouter from './routes/health';
+import authRouter from './routes/auth';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -28,8 +30,10 @@ app.use(
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 app.use('/api/health', healthRouter);
+app.use('/api/auth', authRouter);
 
 app.use(errorHandler);
 
