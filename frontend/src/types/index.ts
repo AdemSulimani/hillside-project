@@ -14,8 +14,6 @@ export interface Tenant {
   niche: string;
   description: string | null;
   delivery_methods: string[];
-  country: string;
-  currency: string;
   logo_url: string | null;
   plan: string;
   created_at: string;

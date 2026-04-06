@@ -20,48 +20,8 @@ const STEPS = [
 ];
 
 const NICHES = [
-  'Restaurant',
-  'Retail',
   'E-commerce',
-  'Healthcare',
-  'Education',
-  'Professional Services',
-  'Technology',
-  'Real Estate',
-  'Beauty & Wellness',
-  'Fitness',
-  'Other',
-];
-
-const COUNTRIES = [
-  'United States',
-  'United Kingdom',
-  'Canada',
-  'Australia',
-  'Germany',
-  'France',
-  'India',
-  'Brazil',
-  'Mexico',
-  'Japan',
-  'South Korea',
-  'Nigeria',
-  'South Africa',
-  'United Arab Emirates',
-  'Singapore',
-];
-
-const CURRENCIES = [
-  { code: 'USD', label: 'USD — US Dollar' },
-  { code: 'EUR', label: 'EUR — Euro' },
-  { code: 'GBP', label: 'GBP — British Pound' },
-  { code: 'CAD', label: 'CAD — Canadian Dollar' },
-  { code: 'AUD', label: 'AUD — Australian Dollar' },
-  { code: 'INR', label: 'INR — Indian Rupee' },
-  { code: 'BRL', label: 'BRL — Brazilian Real' },
-  { code: 'JPY', label: 'JPY — Japanese Yen' },
-  { code: 'NGN', label: 'NGN — Nigerian Naira' },
-  { code: 'AED', label: 'AED — UAE Dirham' },
+  'Services',
 ];
 
 const DELIVERY_METHODS = [
@@ -74,8 +34,6 @@ const DELIVERY_METHODS = [
 interface OnboardingForm {
   name: string;
   niche: string;
-  country: string;
-  currency: string;
   description: string;
   deliveryMethods: string[];
   logo: File | null;
@@ -84,8 +42,6 @@ interface OnboardingForm {
 const INITIAL_FORM: OnboardingForm = {
   name: '',
   niche: '',
-  country: '',
-  currency: 'USD',
   description: '',
   deliveryMethods: [],
   logo: null,
@@ -99,8 +55,6 @@ function validateStep(step: number, form: OnboardingForm): FieldErrors {
   if (step === 1) {
     if (!form.name.trim()) errors.name = 'Business name is required';
     if (!form.niche) errors.niche = 'Please select a niche';
-    if (!form.country) errors.country = 'Please select a country';
-    if (!form.currency) errors.currency = 'Please select a currency';
   }
 
   if (step === 2) {
@@ -208,8 +162,6 @@ export default function OnboardingPage() {
       const body = new globalThis.FormData();
       body.append('name', form.name.trim());
       body.append('niche', form.niche);
-      body.append('country', form.country);
-      body.append('currency', form.currency);
       if (form.description.trim()) body.append('description', form.description.trim());
       form.deliveryMethods.forEach((m) => body.append('delivery_methods[]', m));
       if (form.logo) body.append('logo', form.logo);
@@ -297,40 +249,6 @@ export default function OnboardingPage() {
                 {errors.niche && <p className="text-xs text-destructive">{errors.niche}</p>}
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="country">Country</Label>
-                  <select
-                    id="country"
-                    value={form.country}
-                    onChange={(e) => updateField('country', e.target.value)}
-                    aria-invalid={!!errors.country}
-                    className={selectClasses}
-                  >
-                    <option value="" disabled>Select country</option>
-                    {COUNTRIES.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                  {errors.country && <p className="text-xs text-destructive">{errors.country}</p>}
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="currency">Currency</Label>
-                  <select
-                    id="currency"
-                    value={form.currency}
-                    onChange={(e) => updateField('currency', e.target.value)}
-                    aria-invalid={!!errors.currency}
-                    className={selectClasses}
-                  >
-                    {CURRENCIES.map((c) => (
-                      <option key={c.code} value={c.code}>{c.label}</option>
-                    ))}
-                  </select>
-                  {errors.currency && <p className="text-xs text-destructive">{errors.currency}</p>}
-                </div>
-              </div>
             </>
           )}
 
@@ -444,10 +362,6 @@ export default function OnboardingPage() {
                   <dd>{form.name}</dd>
                   <dt className="text-muted-foreground">Niche</dt>
                   <dd>{form.niche}</dd>
-                  <dt className="text-muted-foreground">Country</dt>
-                  <dd>{form.country}</dd>
-                  <dt className="text-muted-foreground">Currency</dt>
-                  <dd>{form.currency}</dd>
                   {form.description.trim() && (
                     <>
                       <dt className="text-muted-foreground">Description</dt>
