@@ -8,6 +8,8 @@ import PublicOnlyRoute from '@/components/auth/PublicOnlyRoute';
 import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
 import DashboardPage from '@/pages/dashboard/DashboardPage';
+import ProfilePage from '@/pages/profile/ProfilePage';
+import BusinessPage from '@/pages/business/BusinessPage';
 import PlaceholderPage from '@/pages/crm/PlaceholderPage';
 import {
   Inbox,
@@ -19,8 +21,6 @@ import {
   Bot,
   BarChart3,
   MessageSquareHeart,
-  Building2,
-  UserCircle,
 } from 'lucide-react';
 
 export default function App() {
@@ -48,8 +48,8 @@ export default function App() {
             <Route path="/chatbot-control" element={<PlaceholderPage title="Chatbot Control" description="Control your chatbot settings and responses." icon={Bot} />} />
             <Route path="/statistics" element={<PlaceholderPage title="Statistics" description="View analytics and performance metrics." icon={BarChart3} />} />
             <Route path="/feedback" element={<PlaceholderPage title="Feedback" description="Review customer feedback and ratings." icon={MessageSquareHeart} />} />
-            <Route path="/business" element={<PlaceholderPage title="My Business" description="Manage your business settings." icon={Building2} />} />
-            <Route path="/profile" element={<PlaceholderPage title="My Profile" description="Update your personal information." icon={UserCircle} />} />
+            <Route path="/business" element={<BusinessPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
           </Route>
         </Route>
       </Route>
