@@ -25,8 +25,14 @@ export function sendError(
     message,
   };
 
-  if (process.env.NODE_ENV === 'development' && error) {
-    payload.error = error instanceof Error ? error.message : String(error);
+  if (error) {
+    if (error instanceof Error) {
+      if (process.env.NODE_ENV === 'development') {
+        payload.error = error.message;
+      }
+    } else {
+      payload.error = error;
+    }
   }
 
   res.status(statusCode).json(payload);
