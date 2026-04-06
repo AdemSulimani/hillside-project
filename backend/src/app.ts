@@ -10,6 +10,7 @@ import onboardingRouter from './routes/onboarding';
 import dashboardRouter from './routes/dashboard';
 import profileRouter from './routes/profile';
 import businessRouter from './routes/business';
+import productsRouter from './routes/products';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -47,6 +48,7 @@ app.use('/api/onboarding', onboardingRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/business', businessRouter);
+app.use('/api/products', productsRouter);
 
 app.use(errorHandler);
 

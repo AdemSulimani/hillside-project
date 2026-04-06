@@ -4,6 +4,18 @@ import { sendError } from '../utils/response';
 
 type RequestField = 'body' | 'params' | 'query';
 
+declare global {
+  namespace Express {
+    interface Request {
+      validated?: {
+        body?: unknown;
+        params?: unknown;
+        query?: unknown;
+      };
+    }
+  }
+}
+
 interface ValidationTarget {
   body?: ZodSchema;
   params?: ZodSchema;
@@ -15,6 +27,8 @@ export function validate(schema: ValidationTarget) {
     const fields: RequestField[] = ['body', 'params', 'query'];
     const errors: Record<string, unknown> = {};
 
+    if (!req.validated) req.validated = {};
+
     for (const field of fields) {
       const fieldSchema = schema[field];
       if (!fieldSchema) continue;
@@ -23,7 +37,10 @@ export function validate(schema: ValidationTarget) {
       if (!result.success) {
         errors[field] = result.error.flatten().fieldErrors;
       } else {
-        req[field] = result.data;
+        req.validated[field] = result.data;
+        if (field === 'body') {
+          req.body = result.data;
+        }
       }
     }
 
