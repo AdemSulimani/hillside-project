@@ -3,19 +3,23 @@ export interface User {
   email: string;
   name: string;
   role: 'owner' | 'admin' | 'manager' | 'member';
-  tenantId: string;
-  avatarUrl?: string;
-  createdAt: string;
-  updatedAt: string;
+  tenant_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Tenant {
   id: string;
   name: string;
-  slug: string;
-  ownerId: string;
-  createdAt: string;
-  updatedAt: string;
+  niche: string;
+  description: string | null;
+  delivery_methods: string[];
+  country: string;
+  currency: string;
+  logo_url: string | null;
+  plan: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Message {
