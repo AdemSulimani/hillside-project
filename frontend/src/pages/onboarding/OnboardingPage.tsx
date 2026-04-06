@@ -4,6 +4,7 @@ import { AxiosError } from 'axios';
 import { Loader2, Upload, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuthStore } from '@/store/authStore';
+import { queryClient } from '@/lib/query-client';
 import api from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -72,7 +73,7 @@ const selectClasses =
 export default function OnboardingPage() {
   const navigate = useNavigate();
   const isOnboarded = useAuthStore((s) => s.isOnboarded);
-  const { setUser, setTenant, setOnboarded } = useAuthStore();
+  const { setUser, setTenant, setOnboarded, setAccessToken } = useAuthStore();
 
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<OnboardingForm>(INITIAL_FORM);
@@ -166,13 +167,13 @@ export default function OnboardingPage() {
       form.deliveryMethods.forEach((m) => body.append('delivery_methods[]', m));
       if (form.logo) body.append('logo', form.logo);
 
-      const { data } = await api.post<ApiResponse<{ user: User; tenant: Tenant }>>(
-        '/onboarding/complete',
-        body,
-        { headers: { 'Content-Type': 'multipart/form-data' } },
-      );
+      const { data } = await api.post<
+        ApiResponse<{ user: User; tenant: Tenant; accessToken: string }>
+      >('/onboarding/complete', body);
 
       const result = data.data!;
+      queryClient.clear();
+      setAccessToken(result.accessToken);
       setUser(result.user);
       setTenant(result.tenant);
       setOnboarded(true);

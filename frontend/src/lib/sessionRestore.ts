@@ -1,4 +1,5 @@
 import api from '@/lib/api';
+import { queryClient } from '@/lib/query-client';
 import { useAuthStore } from '@/store/authStore';
 import type { ApiResponse, Tenant, User } from '@/types';
 
@@ -29,6 +30,7 @@ export function restoreSessionOnce(): Promise<boolean> {
 
       if (!data.data?.user) return false;
 
+      queryClient.clear();
       useAuthStore.getState().setAuth(data.data.user, accessToken);
 
       try {

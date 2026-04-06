@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import pool from '../db/pool';
 import { createTenant } from '../db/models/tenant';
 import { toPublicUser } from '../db/models/user';
+import { generateAccessToken } from '../services/tokenService';
 import { sendSuccess, sendError } from '../utils/response';
 import { onboardingSchema } from '../validators/onboarding';
 import type { User } from '../db/models/user';
@@ -53,9 +54,16 @@ export async function complete(req: Request, res: Response): Promise<void> {
 
     await client.query('COMMIT');
 
+    const updatedUser = updatedUsers[0];
+    const accessToken = generateAccessToken(updatedUser.id, updatedUser.tenant_id);
+
     sendSuccess(
       res,
-      { user: toPublicUser(updatedUsers[0]), tenant },
+      {
+        user: toPublicUser(updatedUser),
+        tenant,
+        accessToken,
+      },
       'Onboarding completed successfully',
       201,
     );
