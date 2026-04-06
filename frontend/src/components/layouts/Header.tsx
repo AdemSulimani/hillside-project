@@ -4,7 +4,7 @@ import { useAuthStore } from '@/store/authStore';
 import { useAppStore } from '@/store/app';
 import { useAuth } from '@/hooks/useAuth';
 import { Bell, ChevronDown, LogOut, Building2, UserCircle, Menu } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, assetUrl } from '@/lib/utils';
 
 export default function Header() {
   const user = useAuthStore((s) => s.user);
@@ -49,7 +49,7 @@ export default function Header() {
       <div className="flex items-center gap-2.5 min-w-0">
         {tenant?.logo_url ? (
           <img
-            src={tenant.logo_url}
+            src={assetUrl(tenant.logo_url)}
             alt={tenant.name}
             className="size-7 shrink-0 rounded-md object-cover"
           />

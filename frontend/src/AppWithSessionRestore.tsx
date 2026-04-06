@@ -3,7 +3,7 @@ import { useAuthStore } from '@/store/authStore';
 import api from '@/lib/api';
 import { Spinner } from '@/components/ui/spinner';
 import App from './App';
-import type { User, ApiResponse } from '@/types';
+import type { User, Tenant, ApiResponse } from '@/types';
 
 export default function AppWithSessionRestore() {
   const [loading, setLoading] = useState(true);
@@ -34,7 +34,21 @@ export default function AppWithSessionRestore() {
                 '/onboarding/status',
               );
               if (!cancelled) {
-                useAuthStore.getState().setOnboarded(statusData.data?.completed ?? false);
+                const completed = statusData.data?.completed ?? false;
+                useAuthStore.getState().setOnboarded(completed);
+
+                if (completed) {
+                  try {
+                    const { data: bizData } = await api.get<ApiResponse<{ business: Tenant }>>(
+                      '/business',
+                    );
+                    if (!cancelled && bizData.data?.business) {
+                      useAuthStore.getState().setTenant(bizData.data.business);
+                    }
+                  } catch {
+                    // Tenant fetch failed — header will use fallback values
+                  }
+                }
               }
             } catch {
               // Onboarding status check failed — default to not onboarded

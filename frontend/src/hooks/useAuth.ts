@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
 import api from '@/lib/api';
-import type { User, ApiResponse } from '@/types';
+import type { User, Tenant, ApiResponse } from '@/types';
 
 interface AuthResponse {
   user: User;
@@ -48,6 +48,19 @@ export function useAuth() {
 
       const completed = await fetchOnboardingStatus();
       useAuthStore.getState().setOnboarded(completed);
+
+      if (completed) {
+        try {
+          const { data: bizData } = await api.get<ApiResponse<{ business: Tenant }>>(
+            '/business',
+          );
+          if (bizData.data?.business) {
+            useAuthStore.getState().setTenant(bizData.data.business);
+          }
+        } catch {
+          // Tenant fetch failed — header will use fallback values
+        }
+      }
 
       navigate(completed ? '/dashboard' : '/onboarding');
     },
