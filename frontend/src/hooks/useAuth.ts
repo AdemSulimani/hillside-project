@@ -9,6 +9,15 @@ interface AuthResponse {
   accessToken: string;
 }
 
+async function fetchOnboardingStatus(): Promise<boolean> {
+  try {
+    const { data } = await api.get<ApiResponse<{ completed: boolean }>>('/onboarding/status');
+    return data.data?.completed ?? false;
+  } catch {
+    return false;
+  }
+}
+
 export function useAuth() {
   const { user, isAuthenticated, setAuth, clearAuth } = useAuthStore();
   const navigate = useNavigate();
@@ -22,6 +31,7 @@ export function useAuth() {
       });
       const { user: newUser, accessToken } = data.data!;
       setAuth(newUser, accessToken);
+      useAuthStore.getState().setOnboarded(false);
       navigate('/onboarding');
     },
     [setAuth, navigate],
@@ -35,7 +45,11 @@ export function useAuth() {
       });
       const { user: loggedInUser, accessToken } = data.data!;
       setAuth(loggedInUser, accessToken);
-      navigate('/dashboard');
+
+      const completed = await fetchOnboardingStatus();
+      useAuthStore.getState().setOnboarded(completed);
+
+      navigate(completed ? '/dashboard' : '/onboarding');
     },
     [setAuth, navigate],
   );

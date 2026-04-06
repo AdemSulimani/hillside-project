@@ -25,8 +25,20 @@ export default function AppWithSessionRestore() {
           const { data } = await api.get<ApiResponse<{ user: User }>>('/auth/me', {
             _skipAuthRefresh: true,
           } as never);
+
           if (!cancelled && data.data?.user) {
             setAuth(data.data.user, accessToken);
+
+            try {
+              const { data: statusData } = await api.get<ApiResponse<{ completed: boolean }>>(
+                '/onboarding/status',
+              );
+              if (!cancelled) {
+                useAuthStore.getState().setOnboarded(statusData.data?.completed ?? false);
+              }
+            } catch {
+              // Onboarding status check failed — default to not onboarded
+            }
           }
         }
       } catch {
