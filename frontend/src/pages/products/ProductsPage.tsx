@@ -10,6 +10,7 @@ import {
 import { toast } from 'sonner';
 import { deleteProduct, fetchProducts } from '@/api/productsApi';
 import { cn } from '@/lib/utils';
+import { useAuthStore } from '@/store/authStore';
 import type { Product } from '@/types/product';
 import { ProductsUIProvider, useProductsUI } from '@/contexts/ProductsUIContext';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
@@ -40,6 +41,7 @@ const PAGE_SIZE = 12;
 
 function ProductsPageInner() {
   const queryClient = useQueryClient();
+  const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
   const {
     openManualCreate,
     openEdit,
@@ -61,8 +63,12 @@ function ProductsPageInner() {
 
   const listQueryKey = useMemo(
     () =>
-      ['products', { search: debouncedSearch, tags: tagFilter || undefined, page }] as const,
-    [debouncedSearch, tagFilter, page],
+      [
+        'products',
+        tenantId,
+        { search: debouncedSearch, tags: tagFilter || undefined, page },
+      ] as const,
+    [tenantId, debouncedSearch, tagFilter, page],
   );
 
   const { data, isLoading, isFetching, isError } = useQuery({
@@ -74,10 +80,11 @@ function ProductsPageInner() {
         page,
         limit: PAGE_SIZE,
       }),
+    enabled: Boolean(tenantId),
   });
 
   const { data: tagOptions = [] } = useQuery({
-    queryKey: ['product-tags'],
+    queryKey: ['product-tags', tenantId],
     queryFn: async () => {
       const { products } = await fetchProducts({ page: 1, limit: 200 });
       const s = new Set<string>();
@@ -85,14 +92,19 @@ function ProductsPageInner() {
       return Array.from(s).sort((a, b) => a.localeCompare(b));
     },
     staleTime: 60_000,
+    enabled: Boolean(tenantId),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteProduct(id),
     onMutate: async (id) => {
-      await queryClient.cancelQueries({ queryKey: ['products'] });
-      const previous = queryClient.getQueriesData<{ products: Product[]; pagination: { total: number; totalPages: number; page: number; limit: number } }>({
-        queryKey: ['products'],
+      if (!tenantId) return { previous: [] as [readonly unknown[], unknown][] };
+      await queryClient.cancelQueries({ queryKey: ['products', tenantId] });
+      const previous = queryClient.getQueriesData<{
+        products: Product[];
+        pagination: { total: number; totalPages: number; page: number; limit: number };
+      }>({
+        queryKey: ['products', tenantId],
       });
       previous.forEach(([key, cached]) => {
         if (!cached?.products) return;
@@ -126,13 +138,28 @@ function ProductsPageInner() {
       toast.success('Product removed');
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['products'] });
-      queryClient.invalidateQueries({ queryKey: ['product-tags'] });
+      if (tenantId) {
+        queryClient.invalidateQueries({ queryKey: ['products', tenantId] });
+        queryClient.invalidateQueries({ queryKey: ['product-tags', tenantId] });
+      }
     },
   });
 
   const products = data?.products ?? [];
   const pagination = data?.pagination;
+
+  if (!tenantId) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-8 w-48" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Skeleton key={i} className="h-80 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

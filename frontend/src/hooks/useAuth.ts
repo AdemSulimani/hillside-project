@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
+import { queryClient } from '@/lib/query-client';
 import api from '@/lib/api';
 import type { User, Tenant, ApiResponse } from '@/types';
 
@@ -31,6 +32,7 @@ export function useAuth() {
         rememberMe,
       });
       const { user: newUser, accessToken } = data.data!;
+      queryClient.clear();
       setAuth(newUser, accessToken);
       useAuthStore.getState().setOnboarded(false);
       navigate('/onboarding');
@@ -46,6 +48,7 @@ export function useAuth() {
         rememberMe,
       });
       const { user: loggedInUser, accessToken } = data.data!;
+      queryClient.clear();
       setAuth(loggedInUser, accessToken);
 
       const completed = await fetchOnboardingStatus();
@@ -73,6 +76,7 @@ export function useAuth() {
     try {
       await api.post('/auth/logout');
     } finally {
+      queryClient.clear();
       clearAuth();
       navigate('/login');
     }
