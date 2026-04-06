@@ -6,18 +6,20 @@ export interface RefreshToken {
   token_hash: string;
   expires_at: Date;
   created_at: Date;
+  persistent: boolean;
 }
 
 export async function createRefreshToken(
   userId: string,
   tokenHash: string,
   expiresAt: Date,
+  persistent: boolean,
 ): Promise<RefreshToken> {
   const { rows } = await pool.query<RefreshToken>(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-     VALUES ($1, $2, $3)
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, persistent)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [userId, tokenHash, expiresAt],
+    [userId, tokenHash, expiresAt, persistent],
   );
   return rows[0];
 }

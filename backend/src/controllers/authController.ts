@@ -12,7 +12,7 @@ import {
   verifyRefreshToken,
   hashToken,
   getRefreshTokenExpiryDate,
-  REFRESH_TOKEN_EXPIRY_MS,
+  getRefreshCookieMaxAgeMs,
 } from '../services/tokenService';
 import { sendSuccess, sendError } from '../utils/response';
 import type { RegisterInput, LoginInput } from '../validators/auth';
@@ -20,12 +20,13 @@ import type { RegisterInput, LoginInput } from '../validators/auth';
 const SALT_ROUNDS = 12;
 const COOKIE_NAME = 'refresh_token';
 
-function setRefreshCookie(res: Response, token: string): void {
+function setRefreshCookie(res: Response, token: string, persistent: boolean): void {
+  const maxAge = getRefreshCookieMaxAgeMs(persistent);
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'strict',
-    maxAge: REFRESH_TOKEN_EXPIRY_MS,
+    ...(maxAge !== undefined ? { maxAge } : {}),
     path: '/api/auth',
   });
 }
@@ -41,7 +42,8 @@ function clearRefreshCookie(res: Response): void {
 
 export async function register(req: Request, res: Response): Promise<void> {
   try {
-    const { name, email, password } = req.body as RegisterInput;
+    const { name, email, password, rememberMe } = req.body as RegisterInput;
+    const persistent = rememberMe === true;
 
     const existing = await findUserByEmail(email);
     if (existing) {
@@ -53,11 +55,16 @@ export async function register(req: Request, res: Response): Promise<void> {
     const user = await createUser(name, email, passwordHash);
 
     const accessToken = generateAccessToken(user.id, user.tenant_id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, persistent);
 
-    await createRefreshToken(user.id, hashToken(refreshToken), getRefreshTokenExpiryDate());
+    await createRefreshToken(
+      user.id,
+      hashToken(refreshToken),
+      getRefreshTokenExpiryDate(persistent),
+      persistent,
+    );
 
-    setRefreshCookie(res, refreshToken);
+    setRefreshCookie(res, refreshToken, persistent);
 
     sendSuccess(
       res,
@@ -72,7 +79,8 @@ export async function register(req: Request, res: Response): Promise<void> {
 
 export async function login(req: Request, res: Response): Promise<void> {
   try {
-    const { email, password } = req.body as LoginInput;
+    const { email, password, rememberMe } = req.body as LoginInput;
+    const persistent = rememberMe === true;
 
     const user = await findUserByEmail(email);
     if (!user) {
@@ -87,11 +95,16 @@ export async function login(req: Request, res: Response): Promise<void> {
     }
 
     const accessToken = generateAccessToken(user.id, user.tenant_id);
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user.id, persistent);
 
-    await createRefreshToken(user.id, hashToken(refreshToken), getRefreshTokenExpiryDate());
+    await createRefreshToken(
+      user.id,
+      hashToken(refreshToken),
+      getRefreshTokenExpiryDate(persistent),
+      persistent,
+    );
 
-    setRefreshCookie(res, refreshToken);
+    setRefreshCookie(res, refreshToken, persistent);
 
     sendSuccess(res, { user: toPublicUser(user), accessToken }, 'Login successful');
   } catch (err) {
@@ -158,16 +171,19 @@ export async function refresh(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const persistent = storedToken.persistent;
+
     const newAccessToken = generateAccessToken(user.id, user.tenant_id);
-    const newRefreshToken = generateRefreshToken(user.id);
+    const newRefreshToken = generateRefreshToken(user.id, persistent);
 
     await createRefreshToken(
       user.id,
       hashToken(newRefreshToken),
-      getRefreshTokenExpiryDate(),
+      getRefreshTokenExpiryDate(persistent),
+      persistent,
     );
 
-    setRefreshCookie(res, newRefreshToken);
+    setRefreshCookie(res, newRefreshToken, persistent);
 
     sendSuccess(res, { accessToken: newAccessToken }, 'Token refreshed');
   } catch (err) {

@@ -1,70 +1,22 @@
 import { useEffect, useState } from 'react';
-import { useAuthStore } from '@/store/authStore';
-import api from '@/lib/api';
+import { restoreSessionOnce } from '@/lib/sessionRestore';
 import { Spinner } from '@/components/ui/spinner';
 import App from './App';
-import type { User, Tenant, ApiResponse } from '@/types';
 
 export default function AppWithSessionRestore() {
   const [loading, setLoading] = useState(true);
-  const setAuth = useAuthStore((s) => s.setAuth);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function restoreSession() {
-      try {
-        const { data: refreshData } = await api.post<ApiResponse<{ accessToken: string }>>(
-          '/auth/refresh',
-        );
-        const accessToken = refreshData.data?.accessToken;
+    restoreSessionOnce().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
 
-        if (accessToken) {
-          useAuthStore.getState().setAccessToken(accessToken);
-
-          const { data } = await api.get<ApiResponse<{ user: User }>>('/auth/me', {
-            _skipAuthRefresh: true,
-          } as never);
-
-          if (!cancelled && data.data?.user) {
-            setAuth(data.data.user, accessToken);
-
-            try {
-              const { data: statusData } = await api.get<ApiResponse<{ completed: boolean }>>(
-                '/onboarding/status',
-              );
-              if (!cancelled) {
-                const completed = statusData.data?.completed ?? false;
-                useAuthStore.getState().setOnboarded(completed);
-
-                if (completed) {
-                  try {
-                    const { data: bizData } = await api.get<ApiResponse<{ business: Tenant }>>(
-                      '/business',
-                    );
-                    if (!cancelled && bizData.data?.business) {
-                      useAuthStore.getState().setTenant(bizData.data.business);
-                    }
-                  } catch {
-                    // Tenant fetch failed — header will use fallback values
-                  }
-                }
-              }
-            } catch {
-              // Onboarding status check failed — default to not onboarded
-            }
-          }
-        }
-      } catch {
-        // No valid session — user will see login page
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    restoreSession();
-    return () => { cancelled = true; };
-  }, [setAuth]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (loading) {
     return (
