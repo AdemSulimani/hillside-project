@@ -7,6 +7,7 @@ import rateLimit from 'express-rate-limit';
 import healthRouter from './routes/health';
 import authRouter from './routes/auth';
 import onboardingRouter from './routes/onboarding';
+import dashboardRouter from './routes/dashboard';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -41,6 +42,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/onboarding', onboardingRouter);
+app.use('/api/dashboard', dashboardRouter);
 
 app.use(errorHandler);
 
