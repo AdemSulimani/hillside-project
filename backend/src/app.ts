@@ -8,6 +8,8 @@ import healthRouter from './routes/health';
 import authRouter from './routes/auth';
 import onboardingRouter from './routes/onboarding';
 import dashboardRouter from './routes/dashboard';
+import profileRouter from './routes/profile';
+import businessRouter from './routes/business';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -43,6 +45,8 @@ app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/api/dashboard', dashboardRouter);
+app.use('/api/profile', profileRouter);
+app.use('/api/business', businessRouter);
 
 app.use(errorHandler);
 

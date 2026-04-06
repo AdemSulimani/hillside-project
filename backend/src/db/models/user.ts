@@ -63,6 +63,27 @@ export async function updateUser(
   return rows[0] ?? null;
 }
 
+export async function findUserByEmailExcluding(
+  email: string,
+  excludeUserId: string,
+): Promise<User | null> {
+  const { rows } = await pool.query<User>(
+    'SELECT * FROM users WHERE email = $1 AND id != $2',
+    [email, excludeUserId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function updatePasswordHash(
+  id: string,
+  passwordHash: string,
+): Promise<void> {
+  await pool.query(
+    'UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2',
+    [passwordHash, id],
+  );
+}
+
 export function toPublicUser(user: User): PublicUser {
   const { password_hash: _, ...publicUser } = user;
   return publicUser;
