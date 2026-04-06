@@ -7,8 +7,6 @@ export interface Tenant {
   niche: string;
   description: string | null;
   delivery_methods: string[];
-  country: string;
-  currency: string;
   logo_url: string | null;
   plan: string;
   created_at: Date;
@@ -20,8 +18,6 @@ export interface CreateTenantInput {
   niche: string;
   description?: string | null;
   delivery_methods: string[];
-  country: string;
-  currency?: string;
   logo_url?: string | null;
 }
 
@@ -31,16 +27,14 @@ export async function createTenant(
 ): Promise<Tenant> {
   const executor = client ?? pool;
   const { rows } = await executor.query<Tenant>(
-    `INSERT INTO tenants (name, niche, description, delivery_methods, country, currency, logo_url)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO tenants (name, niche, description, delivery_methods, logo_url)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
     [
       input.name,
       input.niche,
       input.description ?? null,
       JSON.stringify(input.delivery_methods),
-      input.country,
-      input.currency ?? 'USD',
       input.logo_url ?? null,
     ],
   );

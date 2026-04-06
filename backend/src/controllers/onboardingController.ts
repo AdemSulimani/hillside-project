@@ -41,8 +41,6 @@ export async function complete(req: Request, res: Response): Promise<void> {
         niche: parsed.data.niche,
         description: parsed.data.description ?? null,
         delivery_methods: parsed.data.delivery_methods,
-        country: parsed.data.country,
-        currency: parsed.data.currency,
         logo_url: logoUrl,
       },
       client,
