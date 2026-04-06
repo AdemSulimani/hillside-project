@@ -23,11 +23,12 @@ export function useAuth() {
   const navigate = useNavigate();
 
   const register = useCallback(
-    async (name: string, email: string, password: string) => {
+    async (name: string, email: string, password: string, rememberMe = false) => {
       const { data } = await api.post<ApiResponse<AuthResponse>>('/auth/register', {
         name,
         email,
         password,
+        rememberMe,
       });
       const { user: newUser, accessToken } = data.data!;
       setAuth(newUser, accessToken);
@@ -38,10 +39,11 @@ export function useAuth() {
   );
 
   const login = useCallback(
-    async (email: string, password: string) => {
+    async (email: string, password: string, rememberMe = false) => {
       const { data } = await api.post<ApiResponse<AuthResponse>>('/auth/login', {
         email,
         password,
+        rememberMe,
       });
       const { user: loggedInUser, accessToken } = data.data!;
       setAuth(loggedInUser, accessToken);
