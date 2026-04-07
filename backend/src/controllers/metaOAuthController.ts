@@ -5,7 +5,9 @@ import { createChannel, findChannelByExternalId, updateChannel } from '../db/mod
 import { cryptoService } from '../services/cryptoService';
 import { sendError, sendSuccess } from '../utils/response';
 
-const META_API_BASE = 'https://graph.facebook.com/v23.0';
+/** Match a recent Graph version so field expansion behaves like Graph API Explorer. */
+const META_API_BASE = 'https://graph.facebook.com/v25.0';
+const META_OAUTH_VERSION = 'v25.0';
 
 interface OAuthStatePayload {
   tenantId: string;
@@ -25,6 +27,45 @@ interface MetaPage {
   instagram_business_account?: {
     id: string;
   };
+}
+
+/**
+ * /me/accounts sometimes omits instagram_business_account even when the Page has IG linked.
+ * A direct Page fetch with the page access token usually returns it.
+ */
+async function resolveInstagramBusinessAccountId(
+  page: MetaPage,
+  userToken: string,
+): Promise<string | undefined> {
+  const nested = page.instagram_business_account?.id;
+  if (nested) return nested;
+
+  const fetchIgId = async (token: string) => {
+    const { data } = await axios.get<{
+      instagram_business_account?: { id: string };
+    }>(`${META_API_BASE}/${page.id}`, {
+      params: {
+        access_token: token,
+        fields: 'instagram_business_account{id}',
+      },
+    });
+    return data.instagram_business_account?.id;
+  };
+
+  if (page.access_token) {
+    try {
+      const id = await fetchIgId(page.access_token);
+      if (id) return id;
+    } catch {
+      /* fall through to user token */
+    }
+  }
+
+  try {
+    return await fetchIgId(userToken);
+  } catch {
+    return undefined;
+  }
 }
 
 function getOAuthConfig() {
@@ -53,15 +94,23 @@ function verifyStateToken(state: string, jwtSecret: string): OAuthStatePayload {
   return jwt.verify(state, jwtSecret) as OAuthStatePayload;
 }
 
+/**
+ * Instagram scopes require the same permissions to be added in the Meta app
+ * (App Review → Permissions, or Instagram API → Permissions and features) until they show “Ready for testing”.
+ */
 function getScopesForType(type: 'facebook' | 'instagram'): string {
   if (type === 'instagram') {
     return [
+      'business_management',
+      'instagram_basic',
       'pages_show_list',
       'pages_manage_metadata',
     ].join(',');
   }
 
   return [
+    'business_management',
+    'instagram_basic',
     'pages_show_list',
     'pages_manage_metadata',
     'pages_messaging',
@@ -78,7 +127,7 @@ export async function redirect(req: Request, res: Response): Promise<void> {
     const state = buildStateToken(tenantId, jwtSecret, requestedType);
     const scopes = getScopesForType(requestedType);
 
-    const url = new URL('https://www.facebook.com/v23.0/dialog/oauth');
+    const url = new URL(`https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth`);
     url.searchParams.set('client_id', appId);
     url.searchParams.set('redirect_uri', callbackUrl);
     url.searchParams.set('scope', scopes);
@@ -160,7 +209,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
         });
       }
 
-      const igId = page.instagram_business_account?.id;
+      const igId = await resolveInstagramBusinessAccountId(page, longLivedToken);
       if (igId) {
         const existingInstagram = await findChannelByExternalId(parsedState.tenantId, 'instagram', igId);
         if (existingInstagram) {
