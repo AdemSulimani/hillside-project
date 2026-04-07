@@ -11,6 +11,9 @@ import dashboardRouter from './routes/dashboard';
 import profileRouter from './routes/profile';
 import businessRouter from './routes/business';
 import productsRouter from './routes/products';
+import channelsRouter from './routes/channels';
+import oauthRouter from './routes/oauth';
+import webhooksRouter from './routes/webhooks';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -49,6 +52,9 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/business', businessRouter);
 app.use('/api/products', productsRouter);
+app.use('/api/channels', channelsRouter);
+app.use('/api/oauth', oauthRouter);
+app.use('/api/webhooks', webhooksRouter);
 
 app.use(errorHandler);
 
