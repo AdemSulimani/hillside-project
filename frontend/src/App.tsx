@@ -7,7 +7,6 @@ import CRMLayout from '@/components/layouts/CRMLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
 import {
   Inbox,
-  Radio,
   ShoppingCart,
   Users,
   BrainCircuit,
@@ -25,6 +24,7 @@ const ProfilePage = lazy(() => import('@/pages/profile/ProfilePage'));
 const BusinessPage = lazy(() => import('@/pages/business/BusinessPage'));
 const PlaceholderPage = lazy(() => import('@/pages/crm/PlaceholderPage'));
 const ProductsPage = lazy(() => import('@/pages/products/ProductsPage'));
+const ChannelsPage = lazy(() => import('@/pages/channels/ChannelsPage'));
 
 export default function App() {
   return (
@@ -54,16 +54,7 @@ export default function App() {
                 }
               />
               <Route path="/products" element={<ProductsPage />} />
-              <Route
-                path="/channels"
-                element={
-                  <PlaceholderPage
-                    title="Channels"
-                    description="Connect and manage your messaging channels."
-                    icon={Radio}
-                  />
-                }
-              />
+              <Route path="/channels" element={<ChannelsPage />} />
               <Route
                 path="/orders"
                 element={
