@@ -187,30 +187,35 @@ export async function callback(req: Request, res: Response): Promise<void> {
     });
 
     const pages = pagesResp.data.data ?? [];
+    const targetType = parsedState.type ?? 'facebook';
+    let connectedCount = 0;
     for (const page of pages) {
       const tokenToStore = page.access_token || longLivedToken;
       const encrypted = cryptoService.encrypt(tokenToStore);
 
-      const existingFacebook = await findChannelByExternalId(parsedState.tenantId, 'facebook', page.id);
-      if (existingFacebook) {
-        await updateChannel(existingFacebook.id, parsedState.tenantId, {
-          name: page.name,
-          access_token_encrypted: encrypted,
-          metadata: { source: 'meta_oauth' },
-        });
-      } else {
-        await createChannel({
-          tenant_id: parsedState.tenantId,
-          type: 'facebook',
-          name: page.name,
-          external_id: page.id,
-          access_token_encrypted: encrypted,
-          metadata: { source: 'meta_oauth' },
-        });
+      if (targetType === 'facebook') {
+        const existingFacebook = await findChannelByExternalId(parsedState.tenantId, 'facebook', page.id);
+        if (existingFacebook) {
+          await updateChannel(existingFacebook.id, parsedState.tenantId, {
+            name: page.name,
+            access_token_encrypted: encrypted,
+            metadata: { source: 'meta_oauth' },
+          });
+        } else {
+          await createChannel({
+            tenant_id: parsedState.tenantId,
+            type: 'facebook',
+            name: page.name,
+            external_id: page.id,
+            access_token_encrypted: encrypted,
+            metadata: { source: 'meta_oauth' },
+          });
+        }
+        connectedCount++;
       }
 
       const igId = await resolveInstagramBusinessAccountId(page, longLivedToken);
-      if (igId) {
+      if (targetType === 'instagram' && igId) {
         const existingInstagram = await findChannelByExternalId(parsedState.tenantId, 'instagram', igId);
         if (existingInstagram) {
           await updateChannel(existingInstagram.id, parsedState.tenantId, {
@@ -228,15 +233,16 @@ export async function callback(req: Request, res: Response): Promise<void> {
             metadata: { source_page_id: page.id, source: 'meta_oauth' },
           });
         }
+        connectedCount++;
       }
     }
 
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const type = parsedState.type ?? 'facebook';
+    const type = targetType;
     const redirectUrl = new URL('/channels', frontendUrl);
     redirectUrl.searchParams.set('status', 'connected');
     redirectUrl.searchParams.set('type', type);
-    redirectUrl.searchParams.set('count', String(pages.length));
+    redirectUrl.searchParams.set('count', String(connectedCount));
     res.redirect(302, redirectUrl.toString());
   } catch (err) {
     if (axios.isAxiosError(err)) {
