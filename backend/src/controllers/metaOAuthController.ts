@@ -103,6 +103,8 @@ function getScopesForType(type: 'facebook' | 'instagram'): string {
     return [
       'business_management',
       'instagram_basic',
+      'instagram_manage_messages',
+      'instagram_manage_comments',
       'pages_show_list',
       'pages_manage_metadata',
     ].join(',');
@@ -111,6 +113,8 @@ function getScopesForType(type: 'facebook' | 'instagram'): string {
   return [
     'business_management',
     'instagram_basic',
+    'instagram_manage_messages',
+    'instagram_manage_comments',
     'pages_show_list',
     'pages_manage_metadata',
     'pages_messaging',
