@@ -1,6 +1,8 @@
 import { NavLink } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '@/store/app';
 import { cn } from '@/lib/utils';
+import { fetchUnreadConversationCount } from '@/api/conversationsApi';
 import {
   LayoutDashboard,
   Inbox,
@@ -35,6 +37,12 @@ const navItems = [
 export default function Sidebar() {
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen);
+
+  const { data: inboxUnread = 0 } = useQuery({
+    queryKey: ['conversations', 'unread-count'],
+    queryFn: fetchUnreadConversationCount,
+    refetchInterval: 60_000,
+  });
 
   return (
     <>
@@ -85,7 +93,12 @@ export default function Sidebar() {
                   }
                 >
                   <Icon className="size-4 shrink-0" />
-                  {label}
+                  <span className="flex-1">{label}</span>
+                  {to === '/inbox' && inboxUnread > 0 ? (
+                    <span className="flex min-w-5 justify-center rounded-full bg-primary px-1.5 py-0.5 text-[0.65rem] font-semibold leading-none text-primary-foreground">
+                      {inboxUnread > 99 ? '99+' : inboxUnread}
+                    </span>
+                  ) : null}
                 </NavLink>
               </li>
             ))}

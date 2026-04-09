@@ -6,7 +6,6 @@ import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
 import {
-  Inbox,
   ShoppingCart,
   Users,
   BrainCircuit,
@@ -25,6 +24,7 @@ const BusinessPage = lazy(() => import('@/pages/business/BusinessPage'));
 const PlaceholderPage = lazy(() => import('@/pages/crm/PlaceholderPage'));
 const ProductsPage = lazy(() => import('@/pages/products/ProductsPage'));
 const ChannelsPage = lazy(() => import('@/pages/channels/ChannelsPage'));
+const InboxPage = lazy(() => import('@/pages/inbox/InboxPage'));
 
 export default function App() {
   return (
@@ -43,16 +43,7 @@ export default function App() {
           <Route element={<RequireOnboarding />}>
             <Route element={<CRMLayout />}>
               <Route path="/dashboard" element={<DashboardPage />} />
-              <Route
-                path="/inbox"
-                element={
-                  <PlaceholderPage
-                    title="Inbox"
-                    description="Manage your conversations across all channels."
-                    icon={Inbox}
-                  />
-                }
-              />
+              <Route path="/inbox" element={<InboxPage />} />
               <Route path="/products" element={<ProductsPage />} />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route

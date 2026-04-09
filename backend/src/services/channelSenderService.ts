@@ -2,7 +2,8 @@ import axios from 'axios';
 import type { Channel, ChannelType } from '../db/models/channel';
 import { cryptoService } from './cryptoService';
 
-const GRAPH_API_BASE = 'https://graph.facebook.com/v19.0';
+/** Keep in sync with Meta OAuth / Graph usage elsewhere (e.g. metaOAuthController). */
+const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
 
 function decryptToken(channel: Channel): string {
   return cryptoService.decrypt(channel.access_token_encrypted);
@@ -29,16 +30,21 @@ async function sendFacebookMessage(
   );
 }
 
+/**
+ * Instagram Messaging uses the Messenger send API with a **Page** access token.
+ * `POST /me/messages` — `me` is the Page linked to the IG professional account.
+ * Do NOT use the Instagram Business Account id in the path (that causes 400).
+ * @see https://developers.facebook.com/docs/messenger-platform/instagram/features/send-message
+ */
 async function sendInstagramMessage(
   channel: Channel,
   recipientExternalId: string,
   messageText: string,
 ): Promise<void> {
   const accessToken = decryptToken(channel);
-  const pageId = channel.external_id;
 
   await axios.post(
-    `${GRAPH_API_BASE}/${pageId}/messages`,
+    `${GRAPH_API_BASE}/me/messages`,
     {
       recipient: { id: recipientExternalId },
       message: { text: messageText },
@@ -99,6 +105,28 @@ export async function sendMessage(
     await sender(channel, recipientExternalId, messageText);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    console.error(`[channelSender] Failed to send ${channel.type} message:`, errMsg);
+    const graphBody =
+      axios.isAxiosError(error) && error.response?.data
+        ? JSON.stringify(error.response.data)
+        : '';
+    console.error(
+      `[channelSender] Failed to send ${channel.type} message:`,
+      errMsg,
+      graphBody ? `Graph: ${graphBody}` : '',
+    );
   }
+}
+
+/** Same as sendMessage but propagates errors (for API handlers that need to report failure). */
+export async function sendMessageStrict(
+  channel: Channel,
+  recipientExternalId: string,
+  messageText: string,
+): Promise<void> {
+  const sender = senders[channel.type];
+  if (!sender) {
+    throw new Error(`Unsupported channel type: ${channel.type}`);
+  }
+
+  await sender(channel, recipientExternalId, messageText);
 }

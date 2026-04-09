@@ -73,3 +73,14 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
 
   return rows[0];
 }
+
+export async function deleteMessageByIdForTenant(
+  messageId: string,
+  tenantId: string,
+): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    'DELETE FROM messages WHERE id = $1 AND tenant_id = $2',
+    [messageId, tenantId],
+  );
+  return (rowCount ?? 0) > 0;
+}

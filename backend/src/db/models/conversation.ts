@@ -50,6 +50,32 @@ export async function findConversationById(id: string): Promise<Conversation | n
   return rows[0] ?? null;
 }
 
+export async function findConversationByIdForTenant(
+  id: string,
+  tenantId: string,
+): Promise<Conversation | null> {
+  const { rows } = await pool.query<Conversation>(
+    'SELECT * FROM conversations WHERE id = $1 AND tenant_id = $2 LIMIT 1',
+    [id, tenantId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function updateConversationStatus(
+  id: string,
+  tenantId: string,
+  status: string,
+): Promise<Conversation | null> {
+  const { rows } = await pool.query<Conversation>(
+    `UPDATE conversations
+     SET status = $3, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING *`,
+    [id, tenantId, status],
+  );
+  return rows[0] ?? null;
+}
+
 export async function touchConversationLastMessageAt(id: string): Promise<void> {
   await pool.query(
     `UPDATE conversations
