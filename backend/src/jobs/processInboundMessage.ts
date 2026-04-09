@@ -6,6 +6,7 @@ import {
   webhookNormalizerService,
   type InboundMessageDTO,
 } from '../services/webhookNormalizer';
+import { socketService } from '../services/socketService';
 import { aiQueue } from './queues';
 
 export interface InboundWebhookJobData {
@@ -55,7 +56,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     status: 'open',
   });
 
-  await createMessage({
+  const inboundMessage = await createMessage({
     tenant_id: channel.tenant_id,
     conversation_id: conversation.id,
     external_message_id: normalized.externalMessageId,
@@ -67,6 +68,9 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   });
 
   await touchConversationLastMessageAt(conversation.id);
+
+  socketService.emitNewMessage(channel.tenant_id, inboundMessage);
+  socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
 
   await aiQueue.add('ai.reply', {
     tenantId: channel.tenant_id,

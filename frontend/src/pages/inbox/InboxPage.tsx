@@ -30,6 +30,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { useRealtimeInbox } from '@/hooks/useRealtimeInbox';
 import { useAuthStore } from '@/store/authStore';
 import type { ReplyResult } from '@/api/conversationsApi';
 import type { ChannelType, ConversationThread, InboxMessage } from '@/types/conversation';
@@ -58,6 +59,8 @@ export default function InboxPage() {
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
+
+  useRealtimeInbox(selectedId);
 
   const bottomAnchorRef = useRef<HTMLDivElement>(null);
   const lastScrolledMessageIdRef = useRef<string | null>(null);
