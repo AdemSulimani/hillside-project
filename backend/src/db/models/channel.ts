@@ -75,6 +75,17 @@ export async function findChannelByExternalId(
   return rows[0] ?? null;
 }
 
+export async function findChannelByTypeAndExternalId(
+  type: ChannelType,
+  externalId: string,
+): Promise<Channel | null> {
+  const { rows } = await pool.query<Channel>(
+    'SELECT * FROM channels WHERE type = $1 AND external_id = $2 LIMIT 1',
+    [type, externalId],
+  );
+  return rows[0] ?? null;
+}
+
 export async function findChannelById(id: string, tenantId: string): Promise<Channel | null> {
   const { rows } = await pool.query<Channel>(
     'SELECT * FROM channels WHERE id = $1 AND tenant_id = $2 LIMIT 1',

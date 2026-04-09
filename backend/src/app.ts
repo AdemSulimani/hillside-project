@@ -17,6 +17,7 @@ import webhooksRouter from './routes/webhooks';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
+app.set('trust proxy', 1);
 
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
@@ -39,7 +40,13 @@ app.use(
   }),
 );
 
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+    },
+  }),
+);
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
