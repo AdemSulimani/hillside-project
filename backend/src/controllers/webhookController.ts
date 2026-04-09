@@ -27,6 +27,31 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
     return;
   }
 
+  const parsedPayload =
+    req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? (req.body as Record<string, unknown>)
+      : {};
+
+  const enqueueInboundPayload = async (): Promise<void> => {
+    try {
+      await inboundMessageQueue.add('message.inbound', {
+        channelType: channelTypeParam,
+        payload: parsedPayload,
+      });
+    } catch (err) {
+      console.error('[webhook] failed to enqueue inbound payload', err);
+    }
+  };
+
+  // TEMPORARY - skip signature check in development.
+  if (process.env.NODE_ENV === 'development') {
+    res.sendStatus(200);
+    console.log('=== RAW PAYLOAD ===', JSON.stringify(req.body, null, 2));
+    // still enqueue...
+    void enqueueInboundPayload();
+    return;
+  }
+
   const appSecret = process.env.META_APP_SECRET;
   if (!appSecret) {
     sendError(res, 'META_APP_SECRET is not configured', 500);
@@ -56,20 +81,6 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
   }
 
   res.sendStatus(200);
-
-  const parsedPayload =
-    req.body && typeof req.body === 'object' && !Array.isArray(req.body)
-      ? (req.body as Record<string, unknown>)
-      : {};
-
-  void (async () => {
-    try {
-      await inboundMessageQueue.add('message.inbound', {
-        channelType: channelTypeParam,
-        payload: parsedPayload,
-      });
-    } catch (err) {
-      console.error('[webhook] failed to enqueue inbound payload', err);
-    }
-  })();
+  console.log('=== RAW PAYLOAD ===', JSON.stringify(req.body, null, 2));
+  void enqueueInboundPayload();
 }

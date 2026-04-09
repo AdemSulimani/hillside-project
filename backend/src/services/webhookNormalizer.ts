@@ -106,9 +106,49 @@ export class WebhookNormalizerService {
   }
 
   normalizeFromInstagram(payload: Record<string, unknown>): InboundMessageDTO {
+    const entry = Array.isArray(payload.entry) ? asRecord(payload.entry[0]) : null;
+    const changes = entry && Array.isArray(entry.changes) ? asRecord(entry.changes[0]) : null;
+    const value = changes ? asRecord(changes.value) : null;
+
+    const channelExternalId = typeof entry?.id === 'string' ? entry.id : null;
+    const sender = value ? asRecord(value.sender) : null;
+    const recipient = value ? asRecord(value.recipient) : null;
+    const message = value ? asRecord(value.message) : null;
+
+    const contactExternalId =
+      typeof sender?.id === 'string'
+        ? sender.id
+        : typeof recipient?.id === 'string'
+          ? recipient.id
+          : null;
+    const externalMessageId = typeof message?.mid === 'string' ? message.mid : null;
+    const content = typeof message?.text === 'string' ? message.text : null;
+
+    // Handle attachments.
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    const attachmentUrls = attachments
+      .map((a: unknown) => {
+        const att = asRecord(a);
+        const attachPayload = asRecord(att?.payload);
+        return typeof attachPayload?.url === 'string' ? attachPayload.url : null;
+      })
+      .filter((url): url is string => url !== null);
+
+    if (!channelExternalId || !externalMessageId || !contactExternalId) {
+      throw new Error('Invalid webhook payload: required message identifiers are missing');
+    }
+
     return {
       channelType: 'instagram',
-      ...extractMetaMessage(payload),
+      channelExternalId,
+      externalMessageId,
+      contactExternalId,
+      contactName: 'Unknown',
+      contactAvatarUrl: null,
+      messageType: attachmentUrls.length > 0 ? 'image' : 'text',
+      content,
+      attachmentUrls,
+      rawPayload: payload,
     };
   }
 
