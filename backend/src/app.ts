@@ -12,6 +12,7 @@ import profileRouter from './routes/profile';
 import businessRouter from './routes/business';
 import productsRouter from './routes/products';
 import channelsRouter from './routes/channels';
+import conversationsRouter from './routes/conversations';
 import oauthRouter from './routes/oauth';
 import webhooksRouter from './routes/webhooks';
 import { errorHandler } from './middleware/errorHandler';
@@ -60,6 +61,7 @@ app.use('/api/profile', profileRouter);
 app.use('/api/business', businessRouter);
 app.use('/api/products', productsRouter);
 app.use('/api/channels', channelsRouter);
+app.use('/api/conversations', conversationsRouter);
 app.use('/api/oauth', oauthRouter);
 app.use('/api/webhooks', webhooksRouter);
 
