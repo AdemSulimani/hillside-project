@@ -39,6 +39,20 @@ export async function findMessageByExternalMessageId(
   return rows[0] ?? null;
 }
 
+export async function findMessagesByConversation(
+  conversationId: string,
+  limit = 10,
+): Promise<Message[]> {
+  const { rows } = await pool.query<Message>(
+    `SELECT * FROM messages
+     WHERE conversation_id = $1
+     ORDER BY created_at ASC
+     LIMIT $2`,
+    [conversationId, limit],
+  );
+  return rows;
+}
+
 export async function createMessage(input: CreateMessageInput): Promise<Message> {
   const { rows } = await pool.query<Message>(
     `INSERT INTO messages (

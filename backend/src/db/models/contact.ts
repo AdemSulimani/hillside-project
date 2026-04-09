@@ -21,6 +21,14 @@ export interface UpsertContactInput {
   metadata?: Record<string, unknown>;
 }
 
+export async function findContactById(id: string): Promise<Contact | null> {
+  const { rows } = await pool.query<Contact>(
+    'SELECT * FROM contacts WHERE id = $1 LIMIT 1',
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
 export async function upsertContact(input: UpsertContactInput): Promise<Contact> {
   const { rows } = await pool.query<Contact>(
     `INSERT INTO contacts (tenant_id, channel_id, external_id, name, avatar_url, metadata)

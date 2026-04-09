@@ -42,6 +42,14 @@ export async function upsertConversation(input: UpsertConversationInput): Promis
   return rows[0];
 }
 
+export async function findConversationById(id: string): Promise<Conversation | null> {
+  const { rows } = await pool.query<Conversation>(
+    'SELECT * FROM conversations WHERE id = $1 LIMIT 1',
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
 export async function touchConversationLastMessageAt(id: string): Promise<void> {
   await pool.query(
     `UPDATE conversations
