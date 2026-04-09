@@ -43,15 +43,6 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
     }
   };
 
-  // TEMPORARY - skip signature check in development.
-  if (process.env.NODE_ENV === 'development') {
-    res.sendStatus(200);
-    console.log('=== RAW PAYLOAD ===', JSON.stringify(req.body, null, 2));
-    // still enqueue...
-    void enqueueInboundPayload();
-    return;
-  }
-
   const appSecret = process.env.META_APP_SECRET;
   if (!appSecret) {
     sendError(res, 'META_APP_SECRET is not configured', 500);
