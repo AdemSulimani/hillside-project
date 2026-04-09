@@ -8,6 +8,7 @@ import {
 } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
 import { sendMessage } from '../services/channelSenderService';
+import { socketService } from '../services/socketService';
 import {
   listConversationsForTenant,
   findConversationDetailForTenant,
@@ -145,16 +146,8 @@ export async function reply(req: Request, res: Response): Promise<void> {
     await setHumanOverride24h(id, tenantId);
     await touchConversationLastMessageAt(id);
 
-    try {
-      const { getIO } = await import('../socket');
-      const io = getIO();
-      io.to(`tenant:${tenantId}`).emit('new_message', {
-        message: outboundMessage,
-        conversationId: id,
-      });
-    } catch {
-      // Socket.io not initialized
-    }
+    socketService.emitNewMessage(tenantId, outboundMessage);
+    socketService.emitConversationUpdated(tenantId, id);
 
     const msg = channelDelivered
       ? 'Reply sent successfully'

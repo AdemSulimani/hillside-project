@@ -1,10 +1,11 @@
 import crypto from 'crypto';
 import { findChannelById } from '../db/models/channel';
-import { findConversationById } from '../db/models/conversation';
+import { findConversationById, touchConversationLastMessageAt } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
 import { createMessage, findMessagesByConversation } from '../db/models/message';
 import { generateReply } from '../services/aiService';
 import { sendMessage } from '../services/channelSenderService';
+import { socketService } from '../services/socketService';
 
 export interface AIReplyJobData {
   tenantId: string;
@@ -62,6 +63,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     sent_by: 'ai',
   });
 
+  await touchConversationLastMessageAt(conversationId);
+  socketService.emitNewMessage(tenantId, outboundMessage);
+  socketService.emitConversationUpdated(tenantId, conversationId);
+
   const contact = await findContactById(conversation.contact_id);
   if (contact) {
     await sendMessage(channel, contact.external_id, replyText);
@@ -71,15 +76,4 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     });
   }
 
-  // Socket.io broadcast placeholder — implemented in Step 11
-  try {
-    const { getIO } = await import('../socket');
-    const io = getIO();
-    io.to(`tenant:${tenantId}`).emit('new_message', {
-      message: outboundMessage,
-      conversationId,
-    });
-  } catch {
-    // Socket.io not yet initialized — silently skip
-  }
 }
