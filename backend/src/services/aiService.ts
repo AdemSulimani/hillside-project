@@ -2,34 +2,25 @@ import { groq, GROQ_MODEL } from './groqClient';
 import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
 import { searchProducts, type Product } from '../db/models/product';
-import pool from '../db/pool';
+import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 
-interface AIConfig {
-  tone: string;
-  restrictions: string | null;
-  sales_strategy: string;
-  qa_pairs: { question: string; answer: string }[];
-}
-
-const DEFAULT_AI_CONFIG: AIConfig = {
+const DEFAULT_AI_CONFIG: Pick<
+  AIConfig,
+  'tone' | 'personality_description' | 'restrictions' | 'sales_strategy' | 'objection_handling' | 'qa_pairs' | 'is_active' | 'custom_model_id'
+> = {
   tone: 'friendly and professional',
-  restrictions: null,
+  personality_description: null,
+  restrictions: [],
   sales_strategy: 'Be helpful, answer questions accurately, and gently guide towards a purchase when appropriate.',
+  objection_handling: null,
   qa_pairs: [],
+  is_active: true,
+  custom_model_id: null,
 };
 
-async function loadAIConfig(tenantId: string): Promise<AIConfig> {
-  try {
-    const { rows } = await pool.query<AIConfig>(
-      'SELECT tone, restrictions, sales_strategy, qa_pairs FROM ai_configs WHERE tenant_id = $1 LIMIT 1',
-      [tenantId],
-    );
-    if (rows[0]) return rows[0];
-  } catch {
-    // ai_configs table doesn't exist yet (created in Step 12) — use defaults
-  }
-
-  return DEFAULT_AI_CONFIG;
+async function loadAIConfig(tenantId: string) {
+  const config = await findAIConfigByTenant(tenantId);
+  return config ?? DEFAULT_AI_CONFIG;
 }
 
 function extractKeywords(text: string): string[] {
@@ -79,18 +70,31 @@ function formatQAPairs(pairs: { question: string; answer: string }[]): string {
 
 function buildSystemPrompt(
   businessName: string,
-  config: AIConfig,
+  config: typeof DEFAULT_AI_CONFIG,
   products: Product[],
 ): string {
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
     `Your tone should be: ${config.tone}.`,
-    '',
-    `Sales strategy: ${config.sales_strategy}`,
   ];
 
-  if (config.restrictions) {
-    lines.push('', `RESTRICTIONS — you MUST follow these rules: ${config.restrictions}`);
+  if (config.personality_description) {
+    lines.push(`Personality: ${config.personality_description}`);
+  }
+
+  if (config.sales_strategy) {
+    lines.push('', `Sales strategy: ${config.sales_strategy}`);
+  }
+
+  if (config.objection_handling) {
+    lines.push('', `Objection handling approach: ${config.objection_handling}`);
+  }
+
+  if (config.restrictions.length > 0) {
+    lines.push(
+      '',
+      `RESTRICTIONS — you MUST follow these rules:\n${config.restrictions.map((r) => `- ${r}`).join('\n')}`,
+    );
   }
 
   lines.push('', 'Product catalog:', formatProductCatalog(products));
@@ -165,9 +169,10 @@ export async function generateReply(
 
   const systemPrompt = buildSystemPrompt(tenant.name, config, products);
   const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage);
+  const model = config.custom_model_id || GROQ_MODEL;
 
   const completion = await groq.chat.completions.create({
-    model: GROQ_MODEL,
+    model,
     messages,
     temperature: 0.7,
     max_tokens: 1024,

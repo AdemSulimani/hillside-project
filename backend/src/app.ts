@@ -15,6 +15,7 @@ import channelsRouter from './routes/channels';
 import conversationsRouter from './routes/conversations';
 import oauthRouter from './routes/oauth';
 import webhooksRouter from './routes/webhooks';
+import aiConfigRouter from './routes/aiConfig';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -64,6 +65,7 @@ app.use('/api/channels', channelsRouter);
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/oauth', oauthRouter);
 app.use('/api/webhooks', webhooksRouter);
+app.use('/api/ai-config', aiConfigRouter);
 
 app.use(errorHandler);
 
