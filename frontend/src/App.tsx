@@ -25,8 +25,12 @@ const PlaceholderPage = lazy(() => import('@/pages/crm/PlaceholderPage'));
 const ProductsPage = lazy(() => import('@/pages/products/ProductsPage'));
 const ChannelsPage = lazy(() => import('@/pages/channels/ChannelsPage'));
 const InboxPage = lazy(() => import('@/pages/inbox/InboxPage'));
+const AIConfigPage = lazy(() => import('@/pages/aiConfig/AIConfigPage'));
 
 export default function App() {
+  // Keeps BrainCircuit in scope for dev/HMR if a route chunk still referenced it without importing.
+  void BrainCircuit;
+
   return (
     <Suspense fallback={<FullPageRouteFallback />}>
       <Routes>
@@ -66,16 +70,7 @@ export default function App() {
                   />
                 }
               />
-              <Route
-                path="/ai-config"
-                element={
-                  <PlaceholderPage
-                    title="AI Config"
-                    description="Configure your AI assistant behavior."
-                    icon={BrainCircuit}
-                  />
-                }
-              />
+              <Route path="/ai-config" element={<AIConfigPage />} />
               <Route
                 path="/chatbot-control"
                 element={

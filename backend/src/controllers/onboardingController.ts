@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import pool from '../db/pool';
 import { createTenant } from '../db/models/tenant';
+import { createAIConfig } from '../db/models/aiConfig';
 import { toPublicUser } from '../db/models/user';
 import { generateAccessToken } from '../services/tokenService';
 import { sendSuccess, sendError } from '../utils/response';
@@ -46,6 +47,8 @@ export async function complete(req: Request, res: Response): Promise<void> {
       },
       client,
     );
+
+    await createAIConfig(tenant.id, client);
 
     const { rows: updatedUsers } = await client.query<User>(
       `UPDATE users SET tenant_id = $1, updated_at = now() WHERE id = $2 RETURNING *`,
