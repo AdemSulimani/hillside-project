@@ -7,6 +7,7 @@ import {
   useState,
   type UIEvent,
 } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   useInfiniteQuery,
   useMutation,
@@ -14,8 +15,9 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { Inbox, Loader2, Lock, Unlock } from 'lucide-react';
+import { Inbox, Loader2, Lock, ShoppingBag, Unlock } from 'lucide-react';
 import { toast } from 'sonner';
+import { fetchOrders } from '@/api/ordersApi';
 import {
   closeConversation,
   fetchConversationThread,
@@ -26,7 +28,7 @@ import {
 import { ConversationListItem } from '@/components/inbox/ConversationListItem';
 import { MessageBubble } from '@/components/inbox/MessageBubble';
 import { ReplyBox } from '@/components/inbox/ReplyBox';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
@@ -53,6 +55,8 @@ export default function InboxPage() {
   const queryClient = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const agentName = user?.name?.trim() || 'Agent';
+  const [searchParams] = useSearchParams();
+  const conversationFromUrl = searchParams.get('c');
 
   const [channelFilter, setChannelFilter] = useState<ChannelType | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<'open' | 'closed'>('open');
@@ -61,6 +65,13 @@ export default function InboxPage() {
   const [olderLoading, setOlderLoading] = useState(false);
 
   useRealtimeInbox(selectedId);
+
+  useEffect(() => {
+    if (!conversationFromUrl) return;
+    if (/^[0-9a-f-]{36}$/i.test(conversationFromUrl)) {
+      setSelectedId(conversationFromUrl);
+    }
+  }, [conversationFromUrl]);
 
   const bottomAnchorRef = useRef<HTMLDivElement>(null);
   const lastScrolledMessageIdRef = useRef<string | null>(null);
@@ -106,6 +117,20 @@ export default function InboxPage() {
     queryFn: () => fetchConversationThread(selectedId!, {}),
     enabled: Boolean(selectedId),
   });
+
+  const draftOrderQuery = useQuery({
+    queryKey: ['orders', 'draft-for-conversation', selectedId],
+    queryFn: () =>
+      fetchOrders({
+        conversation_id: selectedId!,
+        status: 'draft',
+        page: 1,
+        limit: 1,
+      }),
+    enabled: Boolean(selectedId),
+  });
+
+  const draftOrderForThread = draftOrderQuery.data?.orders[0];
 
   const sendMutation = useMutation({
     mutationFn: ({ id, text }: { id: string; text: string }) => sendConversationReply(id, text),
@@ -424,6 +449,40 @@ export default function InboxPage() {
                   )}
                 </div>
               </div>
+
+              {draftOrderForThread ? (
+                <div className="border-b border-amber-500/25 bg-amber-500/10 px-4 py-3 dark:bg-amber-500/10">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex gap-3">
+                      <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/20 text-amber-800 dark:text-amber-200">
+                        <ShoppingBag className="size-5" aria-hidden />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-foreground">Order created</p>
+                        <p className="text-sm text-muted-foreground">
+                          A draft order exists for this conversation:{' '}
+                          <span className="font-medium text-foreground">
+                            {draftOrderForThread.product_name}
+                          </span>
+                          <span className="tabular-nums">
+                            {' '}
+                            · ${draftOrderForThread.total_price.toFixed(2)}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+                    <Link
+                      to={`/orders?open=${draftOrderForThread.id}`}
+                      className={cn(
+                        buttonVariants({ variant: 'secondary', size: 'sm' }),
+                        'shrink-0 self-start sm:self-auto',
+                      )}
+                    >
+                      Review in Orders
+                    </Link>
+                  </div>
+                </div>
+              ) : null}
 
               <div
                 className="min-h-0 flex-1 overflow-y-auto px-4 py-3"

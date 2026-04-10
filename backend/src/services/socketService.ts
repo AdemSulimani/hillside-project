@@ -1,5 +1,6 @@
 import type { Server } from 'socket.io';
 import type { Message } from '../db/models/message';
+import type { Order } from '../db/models/order';
 
 let io: Server | null = null;
 
@@ -25,7 +26,7 @@ export const socketService = {
     io.to(tenantRoom(tenantId)).emit('conversation_updated', { conversationId });
   },
 
-  emitOrderCreated(tenantId: string, order: unknown): void {
+  emitOrderCreated(tenantId: string, order: Order): void {
     if (!io) return;
     io.to(tenantRoom(tenantId)).emit('order_created', { order });
   },
