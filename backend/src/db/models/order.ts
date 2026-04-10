@@ -93,6 +93,7 @@ export interface OrderWithRelations extends Order {
     name: string;
     avatar_url: string | null;
     metadata: Record<string, unknown>;
+    notes: string | null;
     created_at: Date;
     updated_at: Date;
   };
@@ -314,4 +315,43 @@ export async function updateDraftOrderForTenant(
     values,
   );
   return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+export type OrderWithChannelType = Order & { channel_type: ChannelType };
+
+export async function listOrdersForContactForTenant(
+  contactId: string,
+  tenantId: string,
+  page: number,
+  limit: number,
+): Promise<{ orders: OrderWithChannelType[]; total: number }> {
+  const offset = (page - 1) * limit;
+
+  const countResult = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM orders o
+     WHERE o.contact_id = $1 AND o.tenant_id = $2`,
+    [contactId, tenantId],
+  );
+  const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
+
+  type Row = OrderRow & { channel_type: ChannelType };
+  const { rows } = await pool.query<Row>(
+    `SELECT o.*, ch.type AS channel_type
+     FROM orders o
+     INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
+     INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
+     WHERE o.contact_id = $1 AND o.tenant_id = $2
+     ORDER BY o.created_at DESC
+     LIMIT $3 OFFSET $4`,
+    [contactId, tenantId, limit, offset],
+  );
+
+  return {
+    orders: rows.map((r) => {
+      const { channel_type, ...rest } = r;
+      return { ...rowToOrder(rest), channel_type };
+    }),
+    total,
+  };
 }

@@ -84,3 +84,24 @@ export async function deleteMessageByIdForTenant(
   );
   return (rowCount ?? 0) > 0;
 }
+
+/** Most recent `limit` messages, oldest-first within the window (for transcripts). */
+export async function listRecentMessagesChronologicalForConversation(
+  conversationId: string,
+  tenantId: string,
+  limit: number,
+): Promise<Message[]> {
+  const cap = Math.min(Math.max(1, limit), 500);
+  const { rows } = await pool.query<Message>(
+    `SELECT * FROM (
+       SELECT *
+       FROM messages
+       WHERE conversation_id = $1 AND tenant_id = $2
+       ORDER BY created_at DESC
+       LIMIT $3
+     ) sub
+     ORDER BY created_at ASC`,
+    [conversationId, tenantId, cap],
+  );
+  return rows;
+}

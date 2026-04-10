@@ -17,7 +17,7 @@ function toInt(v: unknown): number {
   return Math.floor(n);
 }
 
-function normalizeOrderListItem(raw: Record<string, unknown>): OrderListItem {
+export function normalizeOrderListItem(raw: Record<string, unknown>): OrderListItem {
   return {
     id: String(raw.id),
     tenant_id: String(raw.tenant_id),
