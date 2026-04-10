@@ -56,7 +56,7 @@ export default function InboxPage() {
   const user = useAuthStore((s) => s.user);
   const agentName = user?.name?.trim() || 'Agent';
   const [searchParams] = useSearchParams();
-  const conversationFromUrl = searchParams.get('c');
+  const conversationFromUrl = searchParams.get('c') ?? searchParams.get('conversationId');
 
   const [channelFilter, setChannelFilter] = useState<ChannelType | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<'open' | 'closed'>('open');

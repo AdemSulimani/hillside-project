@@ -1,4 +1,5 @@
 import pool from '../pool';
+import type { ChannelType } from './channel';
 
 export interface Conversation {
   id: string;
@@ -83,4 +84,49 @@ export async function touchConversationLastMessageAt(id: string): Promise<void> 
      WHERE id = $1`,
     [id],
   );
+}
+
+export interface ConversationWithChannel extends Conversation {
+  channel_type: ChannelType;
+  channel_name: string;
+}
+
+export async function listConversationsForContactForTenant(
+  contactId: string,
+  tenantId: string,
+  page: number,
+  limit: number,
+): Promise<{ rows: ConversationWithChannel[]; total: number }> {
+  const offset = (page - 1) * limit;
+
+  const countResult = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM conversations c
+     WHERE c.contact_id = $1 AND c.tenant_id = $2`,
+    [contactId, tenantId],
+  );
+  const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
+
+  const { rows } = await pool.query<ConversationWithChannel>(
+    `SELECT
+       c.id,
+       c.tenant_id,
+       c.contact_id,
+       c.channel_id,
+       c.status,
+       c.last_message_at,
+       c.human_override_until,
+       c.created_at,
+       c.updated_at,
+       ch.type AS channel_type,
+       ch.name AS channel_name
+     FROM conversations c
+     INNER JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = c.tenant_id
+     WHERE c.contact_id = $1 AND c.tenant_id = $2
+     ORDER BY c.last_message_at DESC
+     LIMIT $3 OFFSET $4`,
+    [contactId, tenantId, limit, offset],
+  );
+
+  return { rows, total };
 }
