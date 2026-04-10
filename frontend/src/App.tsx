@@ -5,14 +5,7 @@ import PublicOnlyRoute from '@/components/auth/PublicOnlyRoute';
 import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
-import {
-  ShoppingCart,
-  Users,
-  BrainCircuit,
-  Bot,
-  BarChart3,
-  MessageSquareHeart,
-} from 'lucide-react';
+import { Users, BrainCircuit, Bot, BarChart3, MessageSquareHeart } from 'lucide-react';
 
 const HomePage = lazy(() => import('@/pages/Home'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
@@ -26,6 +19,7 @@ const ProductsPage = lazy(() => import('@/pages/products/ProductsPage'));
 const ChannelsPage = lazy(() => import('@/pages/channels/ChannelsPage'));
 const InboxPage = lazy(() => import('@/pages/inbox/InboxPage'));
 const AIConfigPage = lazy(() => import('@/pages/aiConfig/AIConfigPage'));
+const OrdersPage = lazy(() => import('@/pages/orders/OrdersPage'));
 
 export default function App() {
   // Keeps BrainCircuit in scope for dev/HMR if a route chunk still referenced it without importing.
@@ -50,16 +44,7 @@ export default function App() {
               <Route path="/inbox" element={<InboxPage />} />
               <Route path="/products" element={<ProductsPage />} />
               <Route path="/channels" element={<ChannelsPage />} />
-              <Route
-                path="/orders"
-                element={
-                  <PlaceholderPage
-                    title="Orders"
-                    description="Track and manage customer orders."
-                    icon={ShoppingCart}
-                  />
-                }
-              />
+              <Route path="/orders" element={<OrdersPage />} />
               <Route
                 path="/contacts"
                 element={

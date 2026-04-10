@@ -3,7 +3,10 @@ import { findChannelById } from '../db/models/channel';
 import { findConversationById, touchConversationLastMessageAt } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
 import { createMessage, findMessagesByConversation } from '../db/models/message';
+import { createOrder } from '../db/models/order';
+import { findProductByNameCaseInsensitive } from '../db/models/product';
 import { generateReply } from '../services/aiService';
+import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
 
@@ -69,11 +72,75 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   const contact = await findContactById(conversation.contact_id);
   if (contact) {
-    await sendMessage(channel, contact.external_id, replyText);
+    try {
+      await sendMessage(channel, contact.external_id, replyText);
+    } catch (err) {
+      console.error('[ai.reply] Channel send failed', { conversationId, err });
+    }
   } else {
     console.error('[ai.reply] Contact not found for conversation', {
       contactId: conversation.contact_id,
     });
   }
 
+  try {
+    if (!contact) {
+      return;
+    }
+
+    const messagesForIntent = await findMessagesByConversation(conversationId, 40);
+    const intent = await detect(messagesForIntent, tenantId);
+
+    if (!intent.is_ready_to_order || intent.intent_score <= 0.75) {
+      return;
+    }
+
+    const nameFromIntent = intent.product_name?.trim();
+    const matchedProduct = nameFromIntent
+      ? await findProductByNameCaseInsensitive(tenantId, nameFromIntent)
+      : null;
+
+    const productName = matchedProduct?.name ?? nameFromIntent;
+    if (!productName) {
+      console.info('[ai.reply] Order intent detected but no product name to record', {
+        conversationId,
+        intent_score: intent.intent_score,
+      });
+      return;
+    }
+
+    const quantity = Math.max(1, intent.quantity ?? 1);
+    const unitPrice = matchedProduct ? Number(matchedProduct.price) : 0;
+    const totalPrice = unitPrice * quantity;
+
+    const meta = contact.metadata ?? {};
+    const phoneRaw = meta.phone ?? meta.phone_number ?? meta.phoneNumber;
+    const customerPhone =
+      typeof phoneRaw === 'string' && phoneRaw.trim() ? phoneRaw.trim() : null;
+
+    const order = await createOrder({
+      tenant_id: tenantId,
+      conversation_id: conversationId,
+      contact_id: conversation.contact_id,
+      product_id: matchedProduct?.id ?? null,
+      product_name: productName,
+      quantity,
+      unit_price: unitPrice,
+      total_price: totalPrice,
+      status: 'draft',
+      customer_name: contact.name || 'Unknown',
+      customer_phone: customerPhone,
+      delivery_address: intent.delivery_address,
+      notes: null,
+      detected_by: 'ai',
+    });
+
+    socketService.emitOrderCreated(tenantId, order);
+  } catch (err) {
+    console.error('[ai.reply] Intent detection or draft order failed', {
+      conversationId,
+      tenantId,
+      err,
+    });
+  }
 }

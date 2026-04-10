@@ -184,6 +184,34 @@ export async function softDeleteProduct(
   return (rowCount ?? 0) > 0;
 }
 
+/** Case-insensitive match: exact name first, then first ILIKE substring match (shortest name wins). */
+export async function findProductByNameCaseInsensitive(
+  tenantId: string,
+  name: string,
+): Promise<Product | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+
+  const exact = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND LOWER(TRIM(name)) = LOWER($2)
+     LIMIT 1`,
+    [tenantId, trimmed],
+  );
+  if (exact.rows[0]) return exact.rows[0];
+
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND name ILIKE $2
+     ORDER BY LENGTH(name) ASC, name ASC
+     LIMIT 1`,
+    [tenantId, `%${trimmed}%`],
+  );
+  return rows[0] ?? null;
+}
+
 export async function searchProducts(
   tenantId: string,
   query: string,

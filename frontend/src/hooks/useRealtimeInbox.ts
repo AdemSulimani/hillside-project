@@ -5,8 +5,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { normalizeInboxMessage } from '@/api/conversationsApi';
-import { createInboxSocket } from '@/lib/socket';
-import { useAuthStore } from '@/store/authStore';
+import { useCrmSocket } from '@/contexts/CrmSocketContext';
 import type {
   ConversationSummary,
   ConversationThread,
@@ -71,15 +70,12 @@ function patchConversationSummaries(
  */
 export function useRealtimeInbox(selectedConversationId: string | null): void {
   const queryClient = useQueryClient();
-  const accessToken = useAuthStore((s) => s.accessToken);
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const socket = useCrmSocket();
   const selectedRef = useRef(selectedConversationId);
   selectedRef.current = selectedConversationId;
 
   useEffect(() => {
-    if (!isAuthenticated || !accessToken) return;
-
-    const socket = createInboxSocket(accessToken);
+    if (!socket) return;
 
     const onConnectError = (err: Error) => {
       console.warn('[realtime inbox] connection error:', err.message);
@@ -144,13 +140,10 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
     socket.on('new_message', onNewMessage);
     socket.on('conversation_updated', onConversationUpdated);
 
-    socket.connect();
-
     return () => {
       socket.off('connect_error', onConnectError);
       socket.off('new_message', onNewMessage);
       socket.off('conversation_updated', onConversationUpdated);
-      socket.disconnect();
     };
-  }, [accessToken, isAuthenticated, queryClient]);
+  }, [socket, queryClient]);
 }
