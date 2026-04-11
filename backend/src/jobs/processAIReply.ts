@@ -9,6 +9,7 @@ import { generateReply } from '../services/aiService';
 import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
+import { logEvent } from '../services/analyticsService';
 
 export interface AIReplyJobData {
   tenantId: string;
@@ -71,6 +72,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   });
 
   await touchConversationLastMessageAt(conversationId);
+
+  void logEvent(tenantId, 'ai_reply_sent', {
+    conversation_id: conversationId,
+    channel_id: channelId,
+    message_id: outboundMessage.id,
+  });
+
   socketService.emitNewMessage(tenantId, outboundMessage);
   socketService.emitConversationUpdated(tenantId, conversationId);
 
@@ -137,6 +145,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       delivery_address: intent.delivery_address,
       notes: null,
       detected_by: 'ai',
+    });
+
+    void logEvent(tenantId, 'order_created', {
+      order_id: order.id,
+      conversation_id: conversationId,
+      product_id: order.product_id,
+      product_name: order.product_name,
+      quantity: order.quantity,
     });
 
     socketService.emitOrderCreated(tenantId, order);

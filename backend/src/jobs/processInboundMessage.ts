@@ -10,6 +10,7 @@ import { downloadAndStore } from '../services/attachmentStorageService';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { aiQueue } from './queues';
+import { logEvent } from '../services/analyticsService';
 
 export interface InboundWebhookJobData {
   channelType: ChannelType;
@@ -95,6 +96,13 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   });
 
   await touchConversationLastMessageAt(conversation.id);
+
+  void logEvent(channel.tenant_id, 'message_received', {
+    conversation_id: conversation.id,
+    channel_id: channel.id,
+    channel_type: channel.type,
+    message_id: inboundMessage.id,
+  });
 
   socketService.emitNewMessage(channel.tenant_id, inboundMessage);
   socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
