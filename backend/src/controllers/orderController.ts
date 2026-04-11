@@ -7,6 +7,7 @@ import {
   findOrderByIdForTenant,
 } from '../db/models/order';
 import { sendSuccess, sendError, sendPaginated } from '../utils/response';
+import { logEvent } from '../services/analyticsService';
 import type { OrderListQuery, UpdateDraftOrderBody } from '../validators/order';
 
 export async function index(req: Request, res: Response): Promise<void> {
@@ -76,6 +77,8 @@ export async function confirm(req: Request, res: Response): Promise<void> {
       sendError(res, 'Order not found', 404);
       return;
     }
+
+    void logEvent(tenantId, 'order_confirmed', { order_id: order.id });
 
     sendSuccess(res, { order }, 'Order confirmed successfully');
   } catch (err) {

@@ -17,6 +17,7 @@ import {
   countUnreadConversations,
 } from '../services/conversationService';
 import { sendSuccess, sendError } from '../utils/response';
+import { logEvent } from '../services/analyticsService';
 import type {
   ConversationListQuery,
   ConversationMessagesQuery,
@@ -140,6 +141,12 @@ export async function reply(req: Request, res: Response): Promise<void> {
       content: trimmedText || null,
       attachment_urls: attachmentUrls,
       sent_by: 'human',
+    });
+
+    void logEvent(tenantId, 'human_reply_sent', {
+      conversation_id: id,
+      channel_id: channel.id,
+      message_id: outboundMessage.id,
     });
 
     const textForChannel =

@@ -4,6 +4,7 @@ import { ensureAIConfigForTenant, incrementFeedbackCount } from '../db/models/ai
 import { createFeedbackLog, listFeedbackLogsForTenant } from '../db/models/feedbackLog';
 import { findMessageByIdForTenant } from '../db/models/message';
 import { sendError, sendPaginated, sendSuccess } from '../utils/response';
+import { logEvent } from '../services/analyticsService';
 import type { FeedbackListQuery, StoreFeedbackBody } from '../validators/feedback';
 
 export async function store(req: Request, res: Response): Promise<void> {
@@ -50,6 +51,11 @@ export async function store(req: Request, res: Response): Promise<void> {
     } finally {
       client.release();
     }
+
+    void logEvent(tenantId, 'feedback_submitted', {
+      message_id: body.message_id,
+      conversation_id: message.conversation_id,
+    });
 
     sendSuccess(res, { submitted: true }, 'Feedback recorded successfully', 201);
   } catch (err) {

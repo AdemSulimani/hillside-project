@@ -5,7 +5,7 @@ import PublicOnlyRoute from '@/components/auth/PublicOnlyRoute';
 import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
-import { BrainCircuit, Bot, BarChart3 } from 'lucide-react';
+import { Bot } from 'lucide-react';
 
 const HomePage = lazy(() => import('@/pages/Home'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
@@ -23,11 +23,9 @@ const OrdersPage = lazy(() => import('@/pages/orders/OrdersPage'));
 const ContactsPage = lazy(() => import('@/pages/contacts/ContactsPage'));
 const ContactDetailPage = lazy(() => import('@/pages/contacts/ContactDetailPage'));
 const FeedbackPage = lazy(() => import('@/pages/feedback/FeedbackPage'));
+const StatisticsPage = lazy(() => import('@/pages/statistics/StatisticsPage'));
 
 export default function App() {
-  // Keeps BrainCircuit in scope for dev/HMR if a route chunk still referenced it without importing.
-  void BrainCircuit;
-
   return (
     <Suspense fallback={<FullPageRouteFallback />}>
       <Routes>
@@ -61,16 +59,7 @@ export default function App() {
                   />
                 }
               />
-              <Route
-                path="/statistics"
-                element={
-                  <PlaceholderPage
-                    title="Statistics"
-                    description="View analytics and performance metrics."
-                    icon={BarChart3}
-                  />
-                }
-              />
+              <Route path="/statistics" element={<StatisticsPage />} />
               <Route path="/feedback" element={<FeedbackPage />} />
               <Route path="/business" element={<BusinessPage />} />
               <Route path="/profile" element={<ProfilePage />} />
