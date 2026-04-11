@@ -13,3 +13,7 @@ export const inboundMessageQueue = new Queue<InboundWebhookJobData>('message.inb
 export const aiQueue = new Queue('ai.reply', {
   connection: redisConnection,
 });
+
+export const prepareFinetuningQueue = new Queue<Record<string, never>>('finetuning.prepare', {
+  connection: redisConnection,
+});

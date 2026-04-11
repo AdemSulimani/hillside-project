@@ -29,6 +29,41 @@ export interface CreateMessageInput {
   sent_by: MessageSender;
 }
 
+export async function findMessageByIdForTenant(
+  messageId: string,
+  tenantId: string,
+): Promise<Message | null> {
+  const { rows } = await pool.query<Message>(
+    'SELECT * FROM messages WHERE id = $1 AND tenant_id = $2 LIMIT 1',
+    [messageId, tenantId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function listMessagesBeforeForConversation(
+  conversationId: string,
+  tenantId: string,
+  beforeCreatedAt: Date,
+  beforeMessageId: string,
+  limit: number,
+): Promise<Message[]> {
+  const cap = Math.min(Math.max(1, limit), 500);
+  const { rows } = await pool.query<Message>(
+    `SELECT *
+     FROM messages
+     WHERE conversation_id = $1
+       AND tenant_id = $2
+       AND (
+         created_at < $3::timestamptz
+         OR (created_at = $3::timestamptz AND id < $4::uuid)
+       )
+     ORDER BY created_at ASC, id ASC
+     LIMIT $5`,
+    [conversationId, tenantId, beforeCreatedAt, beforeMessageId, cap],
+  );
+  return rows;
+}
+
 export async function findMessageByExternalMessageId(
   externalMessageId: string,
 ): Promise<Message | null> {
