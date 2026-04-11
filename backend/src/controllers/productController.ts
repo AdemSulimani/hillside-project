@@ -10,6 +10,7 @@ import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import { getDocumentService } from '../services/documents';
 import { ImageProcessingService } from '../services/ImageProcessingService';
 import { AIProductProcessingService } from '../services/AIProductProcessingService';
+import { embeddingQueue } from '../jobs/queues';
 import type { CreateProductInput, UpdateProductInput } from '../validators/product';
 import type { ProductQuery } from '../validators/product';
 
@@ -55,6 +56,11 @@ export async function store(req: Request, res: Response): Promise<void> {
       source_type: 'manual',
     });
 
+    await embeddingQueue.add('product.embedding', {
+      productId: product.id,
+      tenantId,
+    });
+
     sendSuccess(res, { product }, 'Product created successfully', 201);
   } catch (err) {
     sendError(res, 'Failed to create product', 500, err);
@@ -90,6 +96,17 @@ export async function update(req: Request, res: Response): Promise<void> {
     if (!product) {
       sendError(res, 'Product not found', 404);
       return;
+    }
+
+    const embeddingRelevantFields = ['name', 'description', 'tags'] as const;
+    const touchesEmbedding = embeddingRelevantFields.some(
+      (f) => f in fields,
+    );
+    if (touchesEmbedding) {
+      await embeddingQueue.add('product.embedding', {
+        productId: product.id,
+        tenantId,
+      });
     }
 
     sendSuccess(res, { product }, 'Product updated successfully');

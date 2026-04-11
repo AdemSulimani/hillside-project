@@ -1,4 +1,5 @@
 import pool from '../pool';
+import { toSql } from 'pgvector';
 
 export interface Product {
   id: string;
@@ -224,6 +225,33 @@ export async function searchProducts(
      ORDER BY name ASC
      LIMIT $3`,
     [tenantId, `%${query}%`, limit],
+  );
+  return rows;
+}
+
+export interface SimilarProduct extends Product {
+  similarity: number;
+}
+
+/**
+ * Vector similarity search using pgvector's cosine distance operator.
+ * Returns products ordered by closest embedding match.
+ */
+export async function searchProductsBySimilarity(
+  tenantId: string,
+  queryEmbedding: number[],
+  limit = 5,
+): Promise<SimilarProduct[]> {
+  const { rows } = await pool.query<SimilarProduct>(
+    `SELECT *, 1 - (embedding <=> $2) AS similarity
+     FROM products
+     WHERE tenant_id = $1
+       AND deleted_at IS NULL
+       AND is_active = true
+       AND embedding IS NOT NULL
+     ORDER BY embedding <=> $2
+     LIMIT $3`,
+    [tenantId, toSql(queryEmbedding), limit],
   );
   return rows;
 }

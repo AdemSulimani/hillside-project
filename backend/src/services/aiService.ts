@@ -1,9 +1,12 @@
 import { groq, GROQ_MODEL, VISION_MODEL } from './groqClient';
 import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
-import { searchProducts, type Product } from '../db/models/product';
+import { searchProducts, searchProductsBySimilarity, type Product } from '../db/models/product';
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
+import { generateEmbedding } from './embeddingService';
+
+const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
 
 const DEFAULT_AI_CONFIG: Pick<
   AIConfig,
@@ -217,11 +220,25 @@ export async function generateReply(
     throw new Error(`Tenant not found: ${tenantId}`);
   }
 
-  const keywords = extractKeywords(inboundMessage.trim());
   let products: Product[] = [];
-  if (keywords.length > 0) {
-    const searchQuery = keywords.slice(0, 5).join(' ');
-    products = await searchProducts(tenantId, searchQuery, 5);
+
+  const searchText = inboundMessage.trim();
+  if (searchText) {
+    try {
+      const queryEmbedding = await generateEmbedding(searchText);
+      const similar = await searchProductsBySimilarity(tenantId, queryEmbedding, 5);
+      products = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
+    } catch (err) {
+      console.warn('[aiService] Semantic search failed, falling back to keyword search', err);
+    }
+  }
+
+  if (products.length === 0) {
+    const keywords = extractKeywords(searchText);
+    if (keywords.length > 0) {
+      const searchQuery = keywords.slice(0, 5).join(' ');
+      products = await searchProducts(tenantId, searchQuery, 5);
+    }
   }
 
   if (products.length === 0) {

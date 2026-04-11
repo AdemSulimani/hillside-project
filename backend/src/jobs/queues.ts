@@ -17,3 +17,8 @@ export const aiQueue = new Queue('ai.reply', {
 export const prepareFinetuningQueue = new Queue<Record<string, never>>('finetuning.prepare', {
   connection: redisConnection,
 });
+
+export const embeddingQueue = new Queue<import('./generateProductEmbedding').GenerateProductEmbeddingJobData>(
+  'product.embedding',
+  { connection: redisConnection },
+);
