@@ -31,9 +31,18 @@ const CHART_COLORS = [
 const GRID_STROKE = 'var(--border)';
 const AXIS_TICK = 'var(--muted-foreground)';
 
-/** Explicit box so ResponsiveContainer never measures 0×0 inside flex/grid (avoids Recharts -1 width/height warnings). */
-function ChartBox({ children }: { children: ReactNode }) {
-  return <div className="h-72 w-full min-h-[18rem] min-w-0">{children}</div>;
+/** Matches Tailwind `h-72` (18rem); numeric height avoids Recharts 3 first-paint % sizing (-1×-1) warnings. */
+const CHART_HEIGHT_PX = 288;
+
+/** Positive initial size so Recharts never logs width(-1)/height(-1) before ResizeObserver (incl. React Strict Mode). */
+const CHART_INITIAL_DIMENSION = { width: 640, height: CHART_HEIGHT_PX } as const;
+
+function ChartShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="h-72 w-full min-h-[18rem] min-w-0 shrink-0" style={{ minHeight: CHART_HEIGHT_PX }}>
+      {children}
+    </div>
+  );
 }
 
 function ChartTooltip({ active, payload, label }: TooltipContentProps) {
@@ -84,8 +93,13 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
           <CardDescription>Total message activity (inbound, AI, and human replies) by UTC day.</CardDescription>
         </CardHeader>
         <CardContent className="pl-0">
-          <ChartBox>
-            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+          <ChartShell>
+            <ResponsiveContainer
+              width="100%"
+              height={CHART_HEIGHT_PX}
+              minWidth={0}
+              initialDimension={CHART_INITIAL_DIMENSION}
+            >
               <LineChart data={messageRows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
               <XAxis
@@ -108,7 +122,7 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
               />
               </LineChart>
             </ResponsiveContainer>
-          </ChartBox>
+          </ChartShell>
         </CardContent>
       </Card>
 
@@ -118,8 +132,13 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
           <CardDescription>Draft orders created vs orders confirmed (UTC day).</CardDescription>
         </CardHeader>
         <CardContent className="pl-0">
-          <ChartBox>
-            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+          <ChartShell>
+            <ResponsiveContainer
+              width="100%"
+              height={CHART_HEIGHT_PX}
+              minWidth={0}
+              initialDimension={CHART_INITIAL_DIMENSION}
+            >
               <BarChart data={orderRows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
               <XAxis
@@ -136,7 +155,7 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
               <Bar dataKey="ordersConfirmed" name="Confirmed" fill="var(--chart-4)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
-          </ChartBox>
+          </ChartShell>
         </CardContent>
       </Card>
 
@@ -154,8 +173,13 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
               </p>
             </div>
           ) : (
-            <ChartBox>
-              <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+            <ChartShell>
+              <ResponsiveContainer
+                width="100%"
+                height={CHART_HEIGHT_PX}
+                minWidth={0}
+                initialDimension={CHART_INITIAL_DIMENSION}
+              >
                 <PieChart margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
                   <Pie
                     data={pieRows}
@@ -175,7 +199,7 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
                   <Legend verticalAlign="bottom" height={28} />
                 </PieChart>
               </ResponsiveContainer>
-            </ChartBox>
+            </ChartShell>
           )}
         </CardContent>
       </Card>
