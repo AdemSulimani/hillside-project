@@ -18,6 +18,7 @@ import webhooksRouter from './routes/webhooks';
 import aiConfigRouter from './routes/aiConfig';
 import ordersRouter from './routes/orders';
 import contactsRouter from './routes/contacts';
+import feedbackRouter from './routes/feedback';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -70,6 +71,7 @@ app.use('/api/webhooks', webhooksRouter);
 app.use('/api/ai-config', aiConfigRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/contacts', contactsRouter);
+app.use('/api/feedback', feedbackRouter);
 
 app.use(errorHandler);
 

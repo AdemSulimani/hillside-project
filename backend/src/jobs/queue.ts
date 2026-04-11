@@ -1,6 +1,7 @@
 import { Worker } from 'bullmq';
 import { processInboundMessage, type InboundWebhookJobData } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
+import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
 import { redisConnection } from './queues';
 
 export const inboundMessageWorker = new Worker<InboundWebhookJobData>(
@@ -40,4 +41,28 @@ aiReplyWorker.on('failed', (job, err) => {
 
 aiReplyWorker.on('completed', (job) => {
   console.info('[jobs] ai.reply completed', { jobId: job?.id });
+});
+
+export const prepareFinetuningWorker = new Worker(
+  'finetuning.prepare',
+  async () => {
+    await processPrepareFinetuning();
+  },
+  { connection: redisConnection, concurrency: 1 },
+);
+
+prepareFinetuningWorker.on('failed', (job, err) => {
+  console.error('[jobs] finetuning.prepare failed', {
+    jobId: job?.id,
+    name: job?.name,
+    error: err.message,
+  });
+});
+
+prepareFinetuningWorker.on('completed', (job) => {
+  console.info('[jobs] finetuning.prepare completed', { jobId: job?.id });
+});
+
+void initPrepareFinetuningScheduler().catch((err) => {
+  console.error('[jobs] Failed to register finetuning scheduler', err);
 });

@@ -57,6 +57,22 @@ export interface UpdateAIConfigInput {
   custom_model_id?: string | null;
 }
 
+export async function incrementFeedbackCount(
+  tenantId: string,
+  client?: PoolClient,
+): Promise<AIConfig | null> {
+  const executor = client ?? pool;
+  const { rows } = await executor.query<AIConfig>(
+    `UPDATE ai_configs
+     SET feedback_count = feedback_count + 1,
+         updated_at = now()
+     WHERE tenant_id = $1
+     RETURNING *`,
+    [tenantId],
+  );
+  return rows[0] ?? null;
+}
+
 export async function updateAIConfig(
   tenantId: string,
   fields: UpdateAIConfigInput,
