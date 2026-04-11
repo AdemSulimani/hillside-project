@@ -1,8 +1,9 @@
-import { groq, GROQ_MODEL } from './groqClient';
+import { groq, GROQ_MODEL, VISION_MODEL } from './groqClient';
 import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
 import { searchProducts, type Product } from '../db/models/product';
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
+import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 
 const DEFAULT_AI_CONFIG: Pick<
   AIConfig,
@@ -110,32 +111,89 @@ function buildSystemPrompt(
     '- Never fabricate product details, prices, or availability.',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
     '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
+    '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
   );
 
   return lines.join('\n');
+}
+
+type ChatMessageContent = string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
+type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: ChatMessageContent };
+
+function normalizeAttachmentUrls(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((u): u is string => typeof u === 'string' && u.length > 0);
+  }
+  if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return normalizeAttachmentUrls(parsed);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function resolveImageUrls(attachmentUrls: string[]): string[] {
+  const resolved: string[] = [];
+  for (const url of attachmentUrls) {
+    const filePath = permanentUrlToFilePath(url);
+    if (filePath) {
+      const dataUrl = fileToBase64DataUrl(filePath);
+      if (dataUrl) {
+        resolved.push(dataUrl);
+        continue;
+      }
+    }
+    resolved.push(url);
+  }
+  return resolved;
 }
 
 function buildMessagesArray(
   systemPrompt: string,
   conversationHistory: Message[],
   inboundMessage: string,
-): { role: 'system' | 'user' | 'assistant'; content: string }[] {
-  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+  attachmentUrls: string[] = [],
+): ChatMessage[] {
+  const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
   ];
 
   for (const msg of conversationHistory) {
-    if (!msg.content) continue;
+    const histUrls = normalizeAttachmentUrls(msg.attachment_urls);
+    if (!msg.content?.trim() && histUrls.length === 0) continue;
 
     const role: 'user' | 'assistant' =
       msg.sent_by === 'customer' ? 'user' : 'assistant';
 
-    messages.push({ role, content: msg.content });
+    messages.push({ role, content: (msg.content ?? '').trim() });
   }
 
   const lastMsg = messages[messages.length - 1];
-  if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== inboundMessage) {
-    messages.push({ role: 'user', content: inboundMessage });
+  const lastUserText =
+    typeof lastMsg?.content === 'string' ? lastMsg.content.trim() : '';
+  const inboundTrimmed = inboundMessage.trim();
+  const alreadyAppended =
+    lastMsg?.role === 'user' &&
+    (lastUserText === inboundTrimmed ||
+      (inboundTrimmed === '' && lastUserText === ''));
+
+  if (attachmentUrls.length > 0) {
+    const imageUrls = resolveImageUrls(attachmentUrls);
+    const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [
+      { type: 'text', text: inboundTrimmed || 'The customer sent an image.' },
+      ...imageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+    ];
+
+    if (alreadyAppended) {
+      messages[messages.length - 1] = { role: 'user', content: parts };
+    } else {
+      messages.push({ role: 'user', content: parts });
+    }
+  } else if (!alreadyAppended) {
+    messages.push({ role: 'user', content: inboundTrimmed });
   }
 
   return messages;
@@ -145,7 +203,10 @@ export async function generateReply(
   conversationId: string,
   tenantId: string,
   inboundMessage: string,
+  attachmentUrlsRaw: unknown = [],
 ): Promise<string> {
+  const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
+
   const [tenant, config, conversationHistory] = await Promise.all([
     findTenantById(tenantId),
     loadAIConfig(tenantId),
@@ -156,7 +217,7 @@ export async function generateReply(
     throw new Error(`Tenant not found: ${tenantId}`);
   }
 
-  const keywords = extractKeywords(inboundMessage);
+  const keywords = extractKeywords(inboundMessage.trim());
   let products: Product[] = [];
   if (keywords.length > 0) {
     const searchQuery = keywords.slice(0, 5).join(' ');
@@ -167,13 +228,17 @@ export async function generateReply(
     products = await searchProducts(tenantId, '', 5);
   }
 
+  const hasImages = attachmentUrls.length > 0;
   const systemPrompt = buildSystemPrompt(tenant.name, config, products);
-  const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage);
-  const model = config.custom_model_id || GROQ_MODEL;
+  const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage, attachmentUrls);
+
+  const model = hasImages
+    ? VISION_MODEL
+    : (config.custom_model_id || GROQ_MODEL);
 
   const completion = await groq.chat.completions.create({
     model,
-    messages,
+    messages: messages as Parameters<typeof groq.chat.completions.create>[0]['messages'],
     temperature: 0.7,
     max_tokens: 1024,
   });

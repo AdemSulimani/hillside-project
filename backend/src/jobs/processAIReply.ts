@@ -47,14 +47,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   const recentMessages = await findMessagesByConversation(conversationId, 10);
   const lastInbound = [...recentMessages].reverse().find((m) => m.direction === 'inbound');
-  const inboundText = lastInbound?.content || '';
+  const inboundText = (lastInbound?.content ?? '').trim();
+  const rawUrls = lastInbound?.attachment_urls;
+  const attachmentUrls = Array.isArray(rawUrls)
+    ? rawUrls.filter((u): u is string => typeof u === 'string' && u.length > 0)
+    : [];
 
-  if (!inboundText) {
-    console.info('[ai.reply] No text content in inbound message, skipping');
+  if (!inboundText && attachmentUrls.length === 0) {
+    console.info('[ai.reply] No text content or attachments in inbound message, skipping');
     return;
   }
 
-  const replyText = await generateReply(conversationId, tenantId, inboundText);
+  const replyText = await generateReply(conversationId, tenantId, inboundText, attachmentUrls);
 
   const outboundMessage = await createMessage({
     tenant_id: tenantId,

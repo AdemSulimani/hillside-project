@@ -8,6 +8,7 @@ import {
   conversationMessagesQuerySchema,
   conversationReplyBodySchema,
 } from '../validators/conversation';
+import { uploadAttachment } from '../middleware/upload';
 import * as conversationController from '../controllers/conversationController';
 
 const router = Router();
@@ -30,5 +31,11 @@ router.post(
 );
 router.patch('/:id/close', validateParams(conversationIdSchema), conversationController.close);
 router.patch('/:id/reopen', validateParams(conversationIdSchema), conversationController.reopen);
+router.post(
+  '/:id/attachments',
+  validateParams(conversationIdSchema),
+  uploadAttachment,
+  conversationController.uploadConversationAttachment,
+);
 
 export default router;

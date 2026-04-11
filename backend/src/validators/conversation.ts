@@ -63,11 +63,17 @@ export const conversationMessagesQuerySchema = z
 
 export type ConversationMessagesQuery = z.infer<typeof conversationMessagesQuerySchema>;
 
-export const conversationReplyBodySchema = z.object({
-  text: z
-    .string()
-    .min(1, 'Message text is required')
-    .max(10000, 'Message must be at most 10000 characters'),
-});
+export const conversationReplyBodySchema = z
+  .object({
+    text: z.string().max(10000, 'Message must be at most 10000 characters').default(''),
+    attachment_urls: z.array(z.string().min(1)).max(10).default([]),
+  })
+  .refine(
+    (data) => data.text.trim().length > 0 || data.attachment_urls.length > 0,
+    {
+      message: 'Message text or at least one image attachment is required',
+      path: ['text'],
+    },
+  );
 
 export type ConversationReplyBody = z.infer<typeof conversationReplyBodySchema>;
