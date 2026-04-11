@@ -144,13 +144,38 @@ export interface ReplyResult {
   channelDelivered: boolean;
 }
 
+export interface SendConversationReplyPayload {
+  text: string;
+  attachment_urls?: string[];
+}
+
+export async function uploadConversationAttachment(
+  conversationId: string,
+  file: File,
+): Promise<string> {
+  const formData = new FormData();
+  formData.append('attachment', file);
+  const { data } = await api.post<ApiResponse<{ url: string }>>(
+    `/conversations/${conversationId}/attachments`,
+    formData,
+  );
+  const url = data.data?.url;
+  if (!url) {
+    throw new Error('Upload response missing URL');
+  }
+  return String(url);
+}
+
 export async function sendConversationReply(
   conversationId: string,
-  text: string,
+  payload: SendConversationReplyPayload,
 ): Promise<ReplyResult> {
   const { data } = await api.post<
     ApiResponse<{ message: Record<string, unknown>; channelDelivered: boolean }>
-  >(`/conversations/${conversationId}/reply`, { text });
+  >(`/conversations/${conversationId}/reply`, {
+    text: payload.text,
+    attachment_urls: payload.attachment_urls ?? [],
+  });
 
   return {
     message: normalizeInboxMessage(data.data!.message as Record<string, unknown>),

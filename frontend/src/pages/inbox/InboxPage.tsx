@@ -24,6 +24,7 @@ import {
   fetchConversations,
   reopenConversation,
   sendConversationReply,
+  uploadConversationAttachment,
 } from '@/api/conversationsApi';
 import { ConversationListItem } from '@/components/inbox/ConversationListItem';
 import { MessageBubble } from '@/components/inbox/MessageBubble';
@@ -133,22 +134,38 @@ export default function InboxPage() {
   const draftOrderForThread = draftOrderQuery.data?.orders[0];
 
   const sendMutation = useMutation({
-    mutationFn: ({ id, text }: { id: string; text: string }) => sendConversationReply(id, text),
-    onMutate: async ({ id, text }) => {
+    mutationFn: async ({
+      id,
+      text,
+      files,
+    }: {
+      id: string;
+      text: string;
+      files: File[];
+    }) => {
+      const urls: string[] = [];
+      for (const file of files) {
+        urls.push(await uploadConversationAttachment(id, file));
+      }
+      return sendConversationReply(id, { text, attachment_urls: urls });
+    },
+    onMutate: async ({ id, text, files }) => {
       await queryClient.cancelQueries({ queryKey: ['conversations', id, 'detail'] });
       const prev = queryClient.getQueryData<ConversationThread>(['conversations', id, 'detail']);
-      if (!prev) return { prev: undefined as ConversationThread | undefined };
+      if (!prev) return { prev: undefined as ConversationThread | undefined, previewUrls: [] as string[] };
 
       const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const previewUrls = files.map((f) => URL.createObjectURL(f));
+      const trimmed = text.trim();
       const optimistic: InboxMessage = {
         id: `optimistic-${Date.now()}`,
         tenant_id: prev.conversation.tenant_id,
         conversation_id: id,
         external_message_id: 'optimistic',
         direction: 'outbound',
-        type: 'text',
-        content: text,
-        attachment_urls: [],
+        type: files.length > 0 && !trimmed ? 'image' : 'text',
+        content: trimmed || null,
+        attachment_urls: previewUrls,
         sent_by: 'human',
         ai_processed: false,
         created_at: new Date().toISOString(),
@@ -159,15 +176,17 @@ export default function InboxPage() {
         conversation: { ...prev.conversation, human_override_until: until },
         messages: [...prev.messages, optimistic],
       });
-      return { prev };
+      return { prev, previewUrls };
     },
     onError: (err, { id }, ctx) => {
+      ctx?.previewUrls?.forEach((u) => URL.revokeObjectURL(u));
       if (ctx?.prev) {
         queryClient.setQueryData(['conversations', id, 'detail'], ctx.prev);
       }
       toast.error(extractMessage(err, 'Failed to send message'));
     },
-    onSuccess: (result: ReplyResult, { id }) => {
+    onSuccess: (result: ReplyResult, { id }, ctx) => {
+      ctx?.previewUrls?.forEach((u) => URL.revokeObjectURL(u));
       queryClient.setQueryData<ConversationThread>(['conversations', id, 'detail'], (old) => {
         if (!old) return old;
         const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -511,8 +530,12 @@ export default function InboxPage() {
                 disabledReason="This conversation is closed. Reopen it to send messages."
                 aiPaused={isAiPaused(thread.conversation.human_override_until)}
                 sending={sendMutation.isPending}
-                onSend={async (text) => {
-                  await sendMutation.mutateAsync({ id: thread.conversation.id, text });
+                onSend={async ({ text, files }) => {
+                  await sendMutation.mutateAsync({
+                    id: thread.conversation.id,
+                    text,
+                    files,
+                  });
                 }}
               />
             </>

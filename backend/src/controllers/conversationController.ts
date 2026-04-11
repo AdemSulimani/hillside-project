@@ -104,7 +104,9 @@ export async function reply(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = req.user!.tenantId!;
     const { id } = req.params as { id: string };
-    const { text } = req.body as ConversationReplyBody;
+    const { text, attachment_urls: attachmentUrlsRaw } = req.body as ConversationReplyBody;
+    const trimmedText = text.trim();
+    const attachmentUrls = attachmentUrlsRaw ?? [];
 
     const conversation = await findConversationDetailForTenant(id, tenantId);
     if (!conversation) {
@@ -126,19 +128,29 @@ export async function reply(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const messageType =
+      attachmentUrls.length > 0 && !trimmedText ? 'image' : 'text';
+
     const outboundMessage = await createMessage({
       tenant_id: tenantId,
       conversation_id: id,
       external_message_id: `human_${crypto.randomUUID()}`,
       direction: 'outbound',
-      type: 'text',
-      content: text,
+      type: messageType,
+      content: trimmedText || null,
+      attachment_urls: attachmentUrls,
       sent_by: 'human',
     });
 
+    const textForChannel =
+      trimmedText ||
+      (attachmentUrls.length > 0 ? '[Image from team]' : '');
+
     let channelDelivered = true;
     try {
-      await sendMessage(channel, contact.external_id, text);
+      if (textForChannel) {
+        await sendMessage(channel, contact.external_id, textForChannel);
+      }
     } catch {
       channelDelivered = false;
     }
@@ -190,5 +202,31 @@ export async function reopen(req: Request, res: Response): Promise<void> {
     sendSuccess(res, { conversation: updated }, 'Conversation reopened successfully');
   } catch (err) {
     sendError(res, 'Failed to reopen conversation', 500, err);
+  }
+}
+
+export async function uploadConversationAttachment(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId!;
+    const { id } = req.params as { id: string };
+
+    const conversation = await findConversationDetailForTenant(id, tenantId);
+    if (!conversation) {
+      sendError(res, 'Conversation not found', 404);
+      return;
+    }
+
+    const file = req.file;
+    if (!file) {
+      sendError(res, 'No file uploaded', 400);
+      return;
+    }
+
+    const base = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 8000}`;
+    const permanentUrl = `${base}/storage/attachments/${file.filename}`;
+
+    sendSuccess(res, { url: permanentUrl }, 'Attachment uploaded successfully', 201);
+  } catch (err) {
+    sendError(res, 'Failed to upload attachment', 500, err);
   }
 }

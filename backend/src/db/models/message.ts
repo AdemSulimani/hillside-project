@@ -74,16 +74,25 @@ export async function findMessageByExternalMessageId(
   return rows[0] ?? null;
 }
 
+/**
+ * Latest `limit` messages for the conversation, oldest-first (for AI / intent context).
+ * Uses most recent window, not the earliest rows in the thread.
+ */
 export async function findMessagesByConversation(
   conversationId: string,
   limit = 10,
 ): Promise<Message[]> {
+  const cap = Math.min(Math.max(1, limit), 500);
   const { rows } = await pool.query<Message>(
-    `SELECT * FROM messages
-     WHERE conversation_id = $1
-     ORDER BY created_at ASC
-     LIMIT $2`,
-    [conversationId, limit],
+    `SELECT * FROM (
+       SELECT *
+       FROM messages
+       WHERE conversation_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2
+     ) sub
+     ORDER BY created_at ASC, id ASC`,
+    [conversationId, cap],
   );
   return rows;
 }
@@ -107,6 +116,17 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
   );
 
   return rows[0];
+}
+
+export async function updateMessageAttachmentUrls(
+  messageId: string,
+  attachmentUrls: string[],
+): Promise<Message | null> {
+  const { rows } = await pool.query<Message>(
+    `UPDATE messages SET attachment_urls = $1::jsonb WHERE id = $2 RETURNING *`,
+    [JSON.stringify(attachmentUrls), messageId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function deleteMessageByIdForTenant(

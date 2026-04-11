@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import type { InboxMessage } from '@/types/conversation';
 import { AiMessageFeedbackForm } from '@/components/inbox/AiMessageFeedbackForm';
+import { MessageImageAttachments } from '@/components/inbox/MessageImageAttachments';
 import { Button } from '@/components/ui/button';
 
 interface MessageBubbleProps {
@@ -13,7 +14,10 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message, agentDisplayName }: MessageBubbleProps) {
   const isInbound = message.direction === 'inbound';
-  const text = message.content?.trim() || (message.type !== 'text' ? `[${message.type}]` : '');
+  const hasAttachments = message.attachment_urls.length > 0;
+  const text =
+    message.content?.trim() ||
+    (hasAttachments ? '' : message.type !== 'text' ? `[${message.type}]` : '');
   const time = formatRelativeShort(message.created_at);
 
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -31,7 +35,17 @@ export function MessageBubble({ message, agentDisplayName }: MessageBubbleProps)
             'bg-muted text-foreground',
           )}
         >
-          <p className="whitespace-pre-wrap break-words">{text}</p>
+          {text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null}
+          {hasAttachments ? (
+            <MessageImageAttachments
+              urls={message.attachment_urls}
+              align="start"
+              className={text ? 'mt-2' : undefined}
+            />
+          ) : null}
+          {!text && !hasAttachments ? (
+            <p className="whitespace-pre-wrap break-words text-muted-foreground">[Empty message]</p>
+          ) : null}
         </div>
         {time ? <span className="px-1 text-[0.65rem] text-muted-foreground">{time}</span> : null}
       </div>
@@ -66,7 +80,19 @@ export function MessageBubble({ message, agentDisplayName }: MessageBubbleProps)
             <ThumbsDown className="size-3.5" />
           </Button>
         ) : null}
-        <p className={cn('whitespace-pre-wrap break-words', isAi && 'pr-8')}>{text}</p>
+        {text ? <p className={cn('whitespace-pre-wrap break-words', isAi && 'pr-8')}>{text}</p> : null}
+        {hasAttachments ? (
+          <MessageImageAttachments
+            urls={message.attachment_urls}
+            align="end"
+            className={text ? 'mt-2' : undefined}
+          />
+        ) : null}
+        {!text && !hasAttachments ? (
+          <p className={cn('whitespace-pre-wrap break-words text-primary-foreground/80', isAi && 'pr-8')}>
+            [Empty message]
+          </p>
+        ) : null}
       </div>
       <div className="flex w-full max-w-[min(100%,28rem)] flex-col items-end gap-1">
         <div className="flex items-center gap-2 pr-0.5">

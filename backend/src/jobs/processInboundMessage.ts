@@ -6,6 +6,8 @@ import {
   webhookNormalizerService,
   type InboundMessageDTO,
 } from '../services/webhookNormalizer';
+import { downloadAndStore } from '../services/attachmentStorageService';
+import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { aiQueue } from './queues';
 
@@ -56,6 +58,31 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     status: 'open',
   });
 
+  let permanentAttachmentUrls = normalized.attachmentUrls;
+
+  if (normalized.attachmentUrls.length > 0) {
+    let accessToken: string | undefined;
+    try {
+      accessToken = cryptoService.decrypt(channel.access_token_encrypted);
+    } catch {
+      console.warn('[inbound] Could not decrypt channel access token for attachment download');
+    }
+
+    const stored: string[] = [];
+    for (const ref of normalized.attachmentUrls) {
+      try {
+        const url = await downloadAndStore(ref, normalized.channelType, accessToken);
+        stored.push(url);
+      } catch (err) {
+        console.error('[inbound] Failed to download attachment', { ref, err });
+      }
+    }
+
+    if (stored.length > 0) {
+      permanentAttachmentUrls = stored;
+    }
+  }
+
   const inboundMessage = await createMessage({
     tenant_id: channel.tenant_id,
     conversation_id: conversation.id,
@@ -63,7 +90,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     direction: 'inbound',
     type: normalized.messageType,
     content: normalized.content,
-    attachment_urls: normalized.attachmentUrls,
+    attachment_urls: permanentAttachmentUrls,
     sent_by: 'customer',
   });
 
