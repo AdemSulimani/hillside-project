@@ -1,6 +1,7 @@
 import { Worker } from 'bullmq';
 import { processInboundMessage, type InboundWebhookJobData } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
+import { processGenerateProductEmbedding, type GenerateProductEmbeddingJobData } from './generateProductEmbedding';
 import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
 import { redisConnection } from './queues';
 
@@ -61,6 +62,26 @@ prepareFinetuningWorker.on('failed', (job, err) => {
 
 prepareFinetuningWorker.on('completed', (job) => {
   console.info('[jobs] finetuning.prepare completed', { jobId: job?.id });
+});
+
+export const embeddingWorker = new Worker<GenerateProductEmbeddingJobData>(
+  'product.embedding',
+  async (job) => {
+    await processGenerateProductEmbedding(job.data);
+  },
+  { connection: redisConnection, concurrency: 3 },
+);
+
+embeddingWorker.on('failed', (job, err) => {
+  console.error('[jobs] product.embedding failed', {
+    jobId: job?.id,
+    name: job?.name,
+    error: err.message,
+  });
+});
+
+embeddingWorker.on('completed', (job) => {
+  console.info('[jobs] product.embedding completed', { jobId: job?.id });
 });
 
 void initPrepareFinetuningScheduler().catch((err) => {
