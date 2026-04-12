@@ -1,4 +1,6 @@
 import { z, ZodError } from 'zod';
+import { decodeMessageCursor } from '../utils/messageCursor';
+import type { DecodedMessageCursor } from '../utils/messageCursor';
 
 const channelTypeEnum = z.enum(['facebook', 'instagram', 'whatsapp']);
 
@@ -41,24 +43,35 @@ export const conversationMessagesQuerySchema = z
       .default('50')
       .transform(Number)
       .pipe(z.number().int().min(1).max(100)),
+    /** Cursor-based pagination (created_at + id). Preferred over `before`. */
+    cursor: z.string().optional(),
+    /** @deprecated Use `cursor`. ISO timestamp only; use `cursor` for stable pages when timestamps collide. */
     before: z.string().optional(),
   })
   .transform((q) => {
-    let before: Date | undefined;
-    if (q.before !== undefined && q.before.trim() !== '') {
-      const d = new Date(q.before);
-      if (Number.isNaN(d.getTime())) {
+    const raw =
+      q.cursor !== undefined && q.cursor.trim() !== ''
+        ? q.cursor.trim()
+        : q.before !== undefined && q.before.trim() !== ''
+          ? q.before.trim()
+          : undefined;
+
+    let cursor: DecodedMessageCursor | null = null;
+    if (raw !== undefined) {
+      const decoded = decodeMessageCursor(raw);
+      if (!decoded) {
         throw new ZodError([
           {
             code: 'custom',
-            path: ['before'],
-            message: 'Invalid cursor datetime',
+            path: ['cursor'],
+            message: 'Invalid message cursor',
           },
         ]);
       }
-      before = d;
+      cursor = decoded;
     }
-    return { limit: q.limit, before };
+
+    return { limit: q.limit, cursor };
   });
 
 export type ConversationMessagesQuery = z.infer<typeof conversationMessagesQuerySchema>;

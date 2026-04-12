@@ -40,8 +40,10 @@ export default function Header() {
     <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-4">
       {/* Mobile menu toggle */}
       <button
+        type="button"
         onClick={toggleSidebar}
         className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
+        aria-label="Open navigation menu"
       >
         <Menu className="size-5" />
       </button>
@@ -53,6 +55,8 @@ export default function Header() {
             src={assetUrl(tenant.logo_url)}
             alt={tenant.name}
             className="size-7 shrink-0 rounded-md object-cover"
+            loading="lazy"
+            decoding="async"
           />
         ) : (
           <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-[11px] font-semibold text-primary-foreground">
@@ -67,15 +71,23 @@ export default function Header() {
       <SystemHealthIndicator />
 
       {/* Notification bell */}
-      <button className="relative rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
+      <button
+        type="button"
+        className="relative rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+        aria-label="Notifications"
+      >
         <Bell className="size-5" />
       </button>
 
       {/* User dropdown */}
       <div ref={dropdownRef} className="relative">
         <button
+          type="button"
           onClick={() => setDropdownOpen((prev) => !prev)}
           className="flex items-center gap-2 rounded-lg p-1 pr-2 text-sm hover:bg-muted"
+          aria-expanded={dropdownOpen}
+          aria-haspopup="menu"
+          aria-label="Account menu"
         >
           <div className="flex size-7 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
             {initials}
@@ -92,6 +104,7 @@ export default function Header() {
         {dropdownOpen && (
           <div className="absolute right-0 top-full mt-1 w-48 overflow-hidden rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-lg">
             <button
+              type="button"
               onClick={() => {
                 setDropdownOpen(false);
                 navigate('/profile');
@@ -102,6 +115,7 @@ export default function Header() {
               My Profile
             </button>
             <button
+              type="button"
               onClick={() => {
                 setDropdownOpen(false);
                 navigate('/business');
@@ -113,6 +127,7 @@ export default function Header() {
             </button>
             <div className="my-1 border-t border-border" />
             <button
+              type="button"
               onClick={() => {
                 setDropdownOpen(false);
                 logout();

@@ -26,7 +26,13 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
     >
       <div className="relative aspect-[4/3] bg-muted">
         {coverSrc ? (
-          <img src={coverSrc} alt="" className="size-full object-cover" />
+          <img
+            src={coverSrc}
+            alt=""
+            className="size-full object-cover"
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div className="flex size-full items-center justify-center text-muted-foreground">
             <Package className="size-12 opacity-40" />

@@ -326,10 +326,13 @@ export default function OnboardingPage() {
                       src={logoPreview}
                       alt="Logo preview"
                       className="size-24 rounded-lg border object-cover"
+                      loading="lazy"
+                      decoding="async"
                     />
                     <button
                       type="button"
                       onClick={removeLogo}
+                      aria-label="Remove logo"
                       className="absolute -right-2 -top-2 flex size-6 items-center justify-center rounded-full bg-destructive text-white shadow-sm transition-colors hover:bg-destructive/80"
                     >
                       <X className="size-3.5" />

@@ -55,6 +55,8 @@ export function ConversationListItem({ conversation, selected, onSelect }: Conve
               src={conversation.contact_avatar_url}
               alt=""
               className="size-full object-cover"
+              loading="lazy"
+              decoding="async"
             />
           ) : (
             <span className="text-sm font-semibold text-muted-foreground">

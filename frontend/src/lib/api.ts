@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { toast } from 'sonner';
 import { useAuthStore } from '@/store/authStore';
 
 const api = axios.create({
@@ -40,6 +41,12 @@ function onRefreshFailure(err: unknown) {
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
+    if (axios.isAxiosError(error) && error.request && error.response === undefined) {
+      toast.error('Connection lost — please check your network', {
+        id: 'network-connection-lost',
+      });
+    }
+
     const originalRequest = error.config;
 
     const skipRefresh =

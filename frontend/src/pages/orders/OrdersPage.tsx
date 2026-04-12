@@ -73,6 +73,7 @@ function SortHeader({
     <button
       type="button"
       onClick={() => onSort(column)}
+      aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : undefined}
       className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary"
     >
       {label}

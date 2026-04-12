@@ -289,11 +289,20 @@ export default function ContactsPage() {
                 {table.getRowModel().rows.map((row) => (
                   <tr
                     key={row.id}
+                    role="link"
+                    tabIndex={0}
+                    aria-label={`Open contact ${row.original.name}`}
                     className={cn(
                       'border-b border-border last:border-0 hover:bg-muted/30',
-                      'cursor-pointer',
+                      'cursor-pointer outline-none focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
                     )}
                     onClick={() => navigate(`/contacts/${row.original.id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        navigate(`/contacts/${row.original.id}`);
+                      }
+                    }}
                   >
                     {row.getVisibleCells().map((cell) => (
                       <td key={cell.id} className="px-3 py-2.5">

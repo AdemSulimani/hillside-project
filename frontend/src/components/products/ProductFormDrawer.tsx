@@ -347,7 +347,13 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
                 return (
                   <div key={url} className="group relative aspect-square overflow-hidden rounded-md border bg-muted">
                     {src ? (
-                      <img src={src} alt="" className="size-full object-cover" />
+                      <img
+                        src={src}
+                        alt=""
+                        className="size-full object-cover"
+                        loading="lazy"
+                        decoding="async"
+                      />
                     ) : null}
                     <button
                       type="button"
@@ -365,7 +371,13 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
                   key={`${f.name}-${i}`}
                   className="group relative aspect-square overflow-hidden rounded-md border bg-muted"
                 >
-                  <img src={URL.createObjectURL(f)} alt="" className="size-full object-cover" />
+                  <img
+                    src={URL.createObjectURL(f)}
+                    alt=""
+                    className="size-full object-cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
                   <button
                     type="button"
                     onClick={() => removePending(i)}

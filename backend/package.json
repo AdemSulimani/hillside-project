@@ -9,7 +9,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/db/migrate.ts",
-    "embed-all": "tsx src/scripts/embedAllProducts.ts"
+    "embed-all": "tsx src/scripts/embedAllProducts.ts",
+    "healthcheck": "tsx src/scripts/healthCheck.ts"
   },
   "keywords": [],
   "author": "",
@@ -17,9 +18,11 @@
   "dependencies": {
     "@bull-board/api": "^6.21.0",
     "@bull-board/express": "^6.21.0",
+    "@sentry/node": "^10.48.0",
     "axios": "^1.14.0",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.73.1",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.1",
@@ -29,6 +32,7 @@
     "helmet": "^8.1.0",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.10.1",
     "multer": "^2.1.1",
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
@@ -41,10 +45,12 @@
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
+    "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/morgan": "^1.9.10",
     "@types/multer": "^2.1.0",
     "@types/node": "^25.5.2",
     "@types/pg": "^8.20.0",

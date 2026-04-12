@@ -260,6 +260,7 @@ export default function ChatbotControlPage() {
                         Open in inbox
                       </Link>
                       <Button
+                        type="button"
                         size="sm"
                         disabled={resumeConversationMutation.isPending}
                         onClick={() => resumeConversationMutation.mutate(row.id)}

@@ -118,8 +118,9 @@ export async function fetchUnreadConversationCount(): Promise<number> {
 
 export async function fetchConversationThread(
   conversationId: string,
-  opts: { before?: string; limit?: number } = {},
+  opts: { before?: string; cursor?: string; limit?: number } = {},
 ): Promise<ConversationThread> {
+  const cursorParam = opts.cursor ?? opts.before;
   const { data } = await api.get<
     ApiResponse<{
       conversation: Record<string, unknown>;
@@ -129,7 +130,7 @@ export async function fetchConversationThread(
   >(`/conversations/${conversationId}`, {
     params: {
       limit: opts.limit ?? 50,
-      before: opts.before,
+      ...(cursorParam ? { cursor: cursorParam } : {}),
     },
   });
 
