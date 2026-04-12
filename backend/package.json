@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/db/migrate.ts",
     "embed-all": "tsx src/scripts/embedAllProducts.ts",
-    "healthcheck": "tsx src/scripts/healthCheck.ts"
+    "healthcheck": "tsx src/scripts/healthCheck.ts",
+    "encrypt-token": "tsx src/scripts/encryptAccessToken.ts"
   },
   "keywords": [],
   "author": "",
