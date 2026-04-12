@@ -76,6 +76,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   const replyText = await generateReply(conversationId, tenantId, inboundText, attachmentUrls);
 
+  if (replyText.trim() === '[NO_REPLY]') {
+    return;
+  }
+
   const outboundMessage = await createMessage({
     tenant_id: tenantId,
     conversation_id: conversationId,
