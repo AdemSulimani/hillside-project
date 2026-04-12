@@ -3,11 +3,13 @@ import { Outlet } from 'react-router-dom';
 import { CRMRouteFallback } from '@/components/layouts/RouteFallback';
 import { CrmSocketProvider } from '@/contexts/CrmSocketContext';
 import { useOrderCreatedToast } from '@/hooks/useOrderCreatedToast';
+import { useAiAlertToast } from '@/hooks/useAiAlertToast';
 import Sidebar from './Sidebar';
 import Header from './Header';
 
 function CrmRealtimeListeners() {
   useOrderCreatedToast();
+  useAiAlertToast();
   return null;
 }
 

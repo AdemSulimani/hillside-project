@@ -7,11 +7,20 @@ import type {
   ConversationThread,
   ConversationsListResult,
   InboxMessage,
+  OpenAIAlertSummary,
 } from '@/types/conversation';
 
 function toBool(v: unknown): boolean {
   if (typeof v === 'boolean') return v;
   return Boolean(v);
+}
+
+function parseOpenAiAlert(raw: unknown): OpenAIAlertSummary | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.id !== 'string' || typeof o.reason !== 'string') return null;
+  if (o.status !== 'unread' && o.status !== 'read') return null;
+  return { id: o.id, reason: o.reason, status: o.status };
 }
 
 export function normalizeConversationSummary(raw: Record<string, unknown>): ConversationSummary {
@@ -36,6 +45,7 @@ export function normalizeConversationSummary(raw: Record<string, unknown>): Conv
     last_message_created_at:
       raw.last_message_created_at != null ? String(raw.last_message_created_at) : null,
     has_outbound_message: toBool(raw.has_outbound_message),
+    has_unread_ai_alert: toBool(raw.has_unread_ai_alert),
   };
 }
 
@@ -58,11 +68,18 @@ export function normalizeConversationDetail(raw: Record<string, unknown>): Conve
     contact_external_id: String(raw.contact_external_id ?? ''),
     channel_type: (raw.channel_type as ChannelType) ?? 'facebook',
     channel_name: String(raw.channel_name ?? ''),
+    open_ai_alert: parseOpenAiAlert(raw.open_ai_alert),
   };
 }
 
 export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessage {
   const urls = raw.attachment_urls;
+  const qs = raw.quality_score;
+  let quality_score: number | null = null;
+  if (qs != null && qs !== '') {
+    const n = Number(qs);
+    quality_score = Number.isFinite(n) ? n : null;
+  }
   return {
     id: String(raw.id),
     tenant_id: String(raw.tenant_id),
@@ -75,6 +92,9 @@ export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessag
     sent_by: (raw.sent_by as InboxMessage['sent_by']) ?? 'customer',
     ai_processed: toBool(raw.ai_processed),
     created_at: String(raw.created_at ?? ''),
+    quality_score,
+    flagged: toBool(raw.flagged),
+    flag_reason: raw.flag_reason != null && raw.flag_reason !== '' ? String(raw.flag_reason) : null,
   };
 }
 

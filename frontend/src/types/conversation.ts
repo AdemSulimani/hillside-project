@@ -1,5 +1,12 @@
 export type ChannelType = 'facebook' | 'instagram' | 'whatsapp';
 
+/** Latest non-resolved AI quality alert on a conversation (from API). */
+export interface OpenAIAlertSummary {
+  id: string;
+  reason: string;
+  status: 'unread' | 'read';
+}
+
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageSender = 'customer' | 'ai' | 'human';
 
@@ -21,6 +28,7 @@ export interface ConversationSummary {
   last_message_content: string | null;
   last_message_created_at: string | null;
   has_outbound_message: boolean;
+  has_unread_ai_alert: boolean;
 }
 
 export interface ConversationDetail {
@@ -39,6 +47,7 @@ export interface ConversationDetail {
   contact_external_id: string;
   channel_type: ChannelType;
   channel_name: string;
+  open_ai_alert: OpenAIAlertSummary | null;
 }
 
 export interface InboxMessage {
@@ -53,6 +62,9 @@ export interface InboxMessage {
   sent_by: MessageSender;
   ai_processed: boolean;
   created_at: string;
+  quality_score: number | null;
+  flagged: boolean;
+  flag_reason: string | null;
 }
 
 export interface ConversationThread {

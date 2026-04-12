@@ -26,6 +26,8 @@ import {
   toggleConversationAi,
   uploadConversationAttachment,
 } from '@/api/conversationsApi';
+import { resolveAIAlert } from '@/api/aiAlertsApi';
+import { AiQualityConversationBanner } from '@/components/inbox/AiQualityConversationBanner';
 import { ConversationAiStatusBar } from '@/components/inbox/ConversationAiStatusBar';
 import { ConversationListItem } from '@/components/inbox/ConversationListItem';
 import { MessageBubble } from '@/components/inbox/MessageBubble';
@@ -196,6 +198,9 @@ export default function InboxPage() {
         sent_by: 'human',
         ai_processed: false,
         created_at: new Date().toISOString(),
+        quality_score: null,
+        flagged: false,
+        flag_reason: null,
       };
 
       queryClient.setQueryData<ConversationThread>(['conversations', id, 'detail'], {
@@ -264,6 +269,21 @@ export default function InboxPage() {
     onError: (err) => toast.error(extractMessage(err, 'Failed to reopen conversation')),
   });
 
+  const resolveQualityAlertMutation = useMutation({
+    mutationFn: ({ alertId, resume_ai }: { alertId: string; resume_ai: boolean }) =>
+      resolveAIAlert(alertId, { resume_ai }),
+    onSuccess: (_, { resume_ai }) => {
+      if (selectedId) {
+        void queryClient.invalidateQueries({ queryKey: ['conversations', selectedId, 'detail'] });
+      }
+      void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+      void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
+      toast.success(resume_ai ? 'AI resumed for this conversation' : 'Alert cleared — AI stays paused');
+    },
+    onError: (err) =>
+      toast.error(extractMessage(err, 'Could not update alert or AI pause state')),
+  });
+
   const toggleConversationAiMutation = useMutation({
     mutationFn: toggleConversationAi,
     onMutate: async (conversationId) => {
@@ -319,6 +339,7 @@ export default function InboxPage() {
 
   const thread = threadQuery.data;
   const messages = thread?.messages ?? [];
+  const openQualityAlert = thread?.conversation.open_ai_alert ?? null;
 
   useLayoutEffect(() => {
     if (!selectedId || !thread) return;
@@ -544,6 +565,25 @@ export default function InboxPage() {
                 </div>
               </div>
 
+              {openQualityAlert ? (
+                <AiQualityConversationBanner
+                  openAlert={openQualityAlert}
+                  resolvePending={resolveQualityAlertMutation.isPending}
+                  onResumeAi={() =>
+                    resolveQualityAlertMutation.mutate({
+                      alertId: openQualityAlert.id,
+                      resume_ai: true,
+                    })
+                  }
+                  onKeepManual={() =>
+                    resolveQualityAlertMutation.mutate({
+                      alertId: openQualityAlert.id,
+                      resume_ai: false,
+                    })
+                  }
+                />
+              ) : null}
+
               {draftOrderForThread ? (
                 <div className="border-b border-amber-500/25 bg-amber-500/10 px-4 py-3 dark:bg-amber-500/10">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -596,7 +636,12 @@ export default function InboxPage() {
                 ) : null}
                 <div className="flex flex-col gap-3">
                   {messages.map((m) => (
-                    <MessageBubble key={m.id} message={m} agentDisplayName={agentName} />
+                    <MessageBubble
+                      key={m.id}
+                      message={m}
+                      agentDisplayName={agentName}
+                      qualityFlagged={m.sent_by === 'ai' && m.flagged}
+                    />
                   ))}
                 </div>
                 <div ref={bottomAnchorRef} className="h-px w-full shrink-0" aria-hidden />

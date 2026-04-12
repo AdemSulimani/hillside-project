@@ -1,0 +1,51 @@
+import { AlertTriangle } from 'lucide-react';
+import { formatFlagReason } from '@/lib/aiAlertLabels';
+import { Button } from '@/components/ui/button';
+import type { OpenAIAlertSummary } from '@/types/conversation';
+
+interface AiQualityConversationBannerProps {
+  openAlert: OpenAIAlertSummary;
+  resolvePending: boolean;
+  onResumeAi: () => void;
+  onKeepManual: () => void;
+}
+
+export function AiQualityConversationBanner({
+  openAlert,
+  resolvePending,
+  onResumeAi,
+  onKeepManual,
+}: AiQualityConversationBannerProps) {
+  return (
+    <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3 dark:bg-amber-950/30">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex gap-3 min-w-0">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/25 text-amber-800 dark:text-amber-200">
+            <AlertTriangle className="size-5" aria-hidden />
+          </div>
+          <div className="min-w-0 space-y-1">
+            <p className="font-semibold text-foreground">AI was flagged in this conversation</p>
+            <p className="text-sm text-muted-foreground">
+              Reason: <span className="font-medium text-foreground">{formatFlagReason(openAlert.reason)}</span>.
+              AI has been paused. You are now in control.
+            </p>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={resolvePending}
+            onClick={onKeepManual}
+          >
+            Keep Manual
+          </Button>
+          <Button type="button" size="sm" disabled={resolvePending} onClick={onResumeAi}>
+            Resume AI
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

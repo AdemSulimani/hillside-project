@@ -24,6 +24,7 @@ import feedbackRouter from './routes/feedback';
 import statisticsRouter from './routes/statistics';
 import chatbotRouter from './routes/chatbot';
 import adminRouter from './routes/admin';
+import aiAlertsRouter from './routes/aiAlerts';
 import { errorHandler } from './middleware/errorHandler';
 import { mountBullBoard } from './jobs/bullBoard';
 import { setupSentryExpressErrorHandler } from './instrument';
@@ -88,6 +89,7 @@ app.use('/api/feedback', feedbackRouter);
 app.use('/api/statistics', statisticsRouter);
 app.use('/api/chatbot', chatbotRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/ai-alerts', aiAlertsRouter);
 
 mountBullBoard(app);
 

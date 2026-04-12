@@ -13,6 +13,8 @@ export interface ConversationListRow extends Conversation {
   last_message_created_at: Date | null;
   /** Any outbound message exists (used with last_message_at for simplified unread UI). */
   has_outbound_message: boolean;
+  /** Unread AI quality / off-topic alerts for this thread. */
+  has_unread_ai_alert: boolean;
 }
 
 export interface ListConversationsParams {
@@ -79,7 +81,13 @@ export async function listConversationsForTenant(
        EXISTS (
          SELECT 1 FROM messages mo
          WHERE mo.conversation_id = c.id AND mo.direction = 'outbound'
-       ) AS has_outbound_message
+       ) AS has_outbound_message,
+       EXISTS (
+         SELECT 1 FROM ai_alerts aa
+         WHERE aa.conversation_id = c.id
+           AND aa.tenant_id = c.tenant_id
+           AND aa.status = 'unread'
+       ) AS has_unread_ai_alert
      FROM conversations c
      INNER JOIN contacts ct ON ct.id = c.contact_id AND ct.tenant_id = c.tenant_id
      INNER JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = c.tenant_id
@@ -99,19 +107,38 @@ export async function listConversationsForTenant(
   return { rows, total };
 }
 
+export interface OpenAIAlertSummary {
+  id: string;
+  reason: string;
+  status: 'unread' | 'read';
+}
+
 export interface ConversationDetail extends Conversation {
   contact_name: string;
   contact_avatar_url: string | null;
   contact_external_id: string;
   channel_type: ChannelType;
   channel_name: string;
+  /** Latest non-resolved quality alert (unread or read), if any. */
+  open_ai_alert: OpenAIAlertSummary | null;
+}
+
+interface ConversationDetailQueryRow extends Conversation {
+  contact_name: string;
+  contact_avatar_url: string | null;
+  contact_external_id: string;
+  channel_type: ChannelType;
+  channel_name: string;
+  open_ai_alert_id: string | null;
+  open_ai_alert_reason: string | null;
+  open_ai_alert_status: string | null;
 }
 
 export async function findConversationDetailForTenant(
   conversationId: string,
   tenantId: string,
 ): Promise<ConversationDetail | null> {
-  const { rows } = await pool.query<ConversationDetail>(
+  const { rows } = await pool.query<ConversationDetailQueryRow>(
     `SELECT
        c.id,
        c.tenant_id,
@@ -127,15 +154,58 @@ export async function findConversationDetailForTenant(
        ct.avatar_url AS contact_avatar_url,
        ct.external_id AS contact_external_id,
        ch.type AS channel_type,
-       ch.name AS channel_name
+       ch.name AS channel_name,
+       oaa.id AS open_ai_alert_id,
+       oaa.reason AS open_ai_alert_reason,
+       oaa.status AS open_ai_alert_status
      FROM conversations c
      INNER JOIN contacts ct ON ct.id = c.contact_id AND ct.tenant_id = c.tenant_id
      INNER JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = c.tenant_id
+     LEFT JOIN LATERAL (
+       SELECT a.id, a.reason, a.status
+       FROM ai_alerts a
+       WHERE a.conversation_id = c.id
+         AND a.tenant_id = c.tenant_id
+         AND a.status IN ('unread', 'read')
+       ORDER BY a.created_at DESC
+       LIMIT 1
+     ) oaa ON true
      WHERE c.id = $1 AND c.tenant_id = $2
      LIMIT 1`,
     [conversationId, tenantId],
   );
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+
+  const open_ai_alert: OpenAIAlertSummary | null =
+    row.open_ai_alert_id &&
+    row.open_ai_alert_reason &&
+    (row.open_ai_alert_status === 'unread' || row.open_ai_alert_status === 'read')
+      ? {
+          id: row.open_ai_alert_id,
+          reason: row.open_ai_alert_reason,
+          status: row.open_ai_alert_status,
+        }
+      : null;
+
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    contact_id: row.contact_id,
+    channel_id: row.channel_id,
+    status: row.status,
+    last_message_at: row.last_message_at,
+    human_override_until: row.human_override_until,
+    ai_paused: row.ai_paused,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    contact_name: row.contact_name,
+    contact_avatar_url: row.contact_avatar_url,
+    contact_external_id: row.contact_external_id,
+    channel_type: row.channel_type,
+    channel_name: row.channel_name,
+    open_ai_alert,
+  };
 }
 
 export interface MessagesPageResult {
