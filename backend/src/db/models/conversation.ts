@@ -9,6 +9,7 @@ export interface Conversation {
   status: string;
   last_message_at: Date;
   human_override_until: Date | null;
+  ai_paused: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -86,6 +87,60 @@ export async function touchConversationLastMessageAt(id: string): Promise<void> 
   );
 }
 
+export async function toggleAiPaused(
+  id: string,
+  tenantId: string,
+): Promise<Conversation | null> {
+  const { rows } = await pool.query<Conversation>(
+    `UPDATE conversations
+     SET
+       ai_paused = NOT ai_paused,
+       human_override_until = CASE
+         WHEN ai_paused THEN NULL
+         ELSE human_override_until
+       END,
+       updated_at = now()
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING *`,
+    [id, tenantId],
+  );
+  return rows[0] ?? null;
+}
+
+export type PausedConversationForControl = Conversation & {
+  contact_name: string;
+  channel_name: string;
+  channel_type: ChannelType;
+};
+
+export async function findPausedConversationsByTenant(
+  tenantId: string,
+): Promise<PausedConversationForControl[]> {
+  const { rows } = await pool.query<PausedConversationForControl>(
+    `SELECT
+       c.id,
+       c.tenant_id,
+       c.contact_id,
+       c.channel_id,
+       c.status,
+       c.last_message_at,
+       c.human_override_until,
+       c.ai_paused,
+       c.created_at,
+       c.updated_at,
+       ct.name AS contact_name,
+       ch.name AS channel_name,
+       ch.type AS channel_type
+     FROM conversations c
+     INNER JOIN contacts ct ON ct.id = c.contact_id AND ct.tenant_id = c.tenant_id
+     INNER JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = c.tenant_id
+     WHERE c.tenant_id = $1 AND c.ai_paused = true
+     ORDER BY c.updated_at DESC`,
+    [tenantId],
+  );
+  return rows;
+}
+
 export interface ConversationWithChannel extends Conversation {
   channel_type: ChannelType;
   channel_name: string;
@@ -116,6 +171,7 @@ export async function listConversationsForContactForTenant(
        c.status,
        c.last_message_at,
        c.human_override_until,
+       c.ai_paused,
        c.created_at,
        c.updated_at,
        ch.type AS channel_type,

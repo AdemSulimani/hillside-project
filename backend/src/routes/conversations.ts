@@ -10,6 +10,7 @@ import {
 } from '../validators/conversation';
 import { uploadAttachment } from '../middleware/upload';
 import * as conversationController from '../controllers/conversationController';
+import * as chatbotControlController from '../controllers/chatbotControlController';
 
 const router = Router();
 
@@ -36,6 +37,11 @@ router.post(
   validateParams(conversationIdSchema),
   uploadAttachment,
   conversationController.uploadConversationAttachment,
+);
+router.patch(
+  '/:id/toggle-ai',
+  validateParams(conversationIdSchema),
+  chatbotControlController.toggleConversation,
 );
 
 export default router;

@@ -99,7 +99,7 @@ export function ReplyBox({
               : 'bg-muted text-muted-foreground',
           )}
         >
-          {aiPaused ? 'AI paused for this conversation' : 'AI active'}
+          {aiPaused ? 'Human reply window (AI held back)' : 'No human hold'}
         </span>
       </div>
       {disabled && disabledReason ? (

@@ -1,0 +1,2 @@
+ALTER TABLE conversations
+  ADD COLUMN IF NOT EXISTS ai_paused BOOLEAN NOT NULL DEFAULT false;

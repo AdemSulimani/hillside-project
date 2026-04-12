@@ -20,6 +20,7 @@ import ordersRouter from './routes/orders';
 import contactsRouter from './routes/contacts';
 import feedbackRouter from './routes/feedback';
 import statisticsRouter from './routes/statistics';
+import chatbotRouter from './routes/chatbot';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -75,6 +76,7 @@ app.use('/api/orders', ordersRouter);
 app.use('/api/contacts', contactsRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/statistics', statisticsRouter);
+app.use('/api/chatbot', chatbotRouter);
 
 app.use(errorHandler);
 

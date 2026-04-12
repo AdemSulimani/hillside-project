@@ -12,6 +12,7 @@ export interface ConversationSummary {
   status: string;
   last_message_at: string;
   human_override_until: string | null;
+  ai_paused: boolean;
   created_at: string;
   updated_at: string;
   contact_name: string;
@@ -30,6 +31,7 @@ export interface ConversationDetail {
   status: string;
   last_message_at: string;
   human_override_until: string | null;
+  ai_paused: boolean;
   created_at: string;
   updated_at: string;
   contact_name: string;
