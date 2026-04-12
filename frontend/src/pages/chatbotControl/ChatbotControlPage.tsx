@@ -12,7 +12,7 @@ import {
 import { fetchChannels, toggleChannelAI } from '@/api/channelsApi';
 import { toggleConversationAi } from '@/api/conversationsApi';
 import { ChannelAiToggleRow } from '@/components/channels/ChannelAiToggleRow';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -201,9 +201,9 @@ export default function ChatbotControlPage() {
           <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed py-12 text-center">
             <Radio className="size-9 text-muted-foreground opacity-50" />
             <p className="text-sm text-muted-foreground">No channels connected yet.</p>
-            <Button variant="outline" size="sm" asChild>
-              <Link to="/channels">Go to Channels</Link>
-            </Button>
+            <Link to="/channels" className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}>
+              Go to Channels
+            </Link>
           </div>
         ) : (
           <div className="space-y-2 max-w-3xl">
@@ -253,9 +253,12 @@ export default function ChatbotControlPage() {
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-2">
-                      <Button variant="outline" size="sm" asChild>
-                        <Link to={`/inbox?c=${encodeURIComponent(row.id)}`}>Open in inbox</Link>
-                      </Button>
+                      <Link
+                        to={`/inbox?c=${encodeURIComponent(row.id)}`}
+                        className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
+                      >
+                        Open in inbox
+                      </Link>
                       <Button
                         size="sm"
                         disabled={resumeConversationMutation.isPending}

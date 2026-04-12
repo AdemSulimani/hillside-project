@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { Channel, ChannelType } from '../db/models/channel';
 import { cryptoService } from './cryptoService';
+import { acquireOutboundSendToken } from './outboundChannelRateLimiter';
 
 /** Keep in sync with Meta OAuth / Graph usage elsewhere (e.g. metaOAuthController). */
 const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
@@ -102,6 +103,7 @@ export async function sendMessage(
   }
 
   try {
+    await acquireOutboundSendToken(channel.id);
     await sender(channel, recipientExternalId, messageText);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -128,5 +130,6 @@ export async function sendMessageStrict(
     throw new Error(`Unsupported channel type: ${channel.type}`);
   }
 
+  await acquireOutboundSendToken(channel.id);
   await sender(channel, recipientExternalId, messageText);
 }

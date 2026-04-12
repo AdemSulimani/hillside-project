@@ -22,6 +22,7 @@ import feedbackRouter from './routes/feedback';
 import statisticsRouter from './routes/statistics';
 import chatbotRouter from './routes/chatbot';
 import { errorHandler } from './middleware/errorHandler';
+import { mountBullBoard } from './jobs/bullBoard';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -77,6 +78,8 @@ app.use('/api/contacts', contactsRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/statistics', statisticsRouter);
 app.use('/api/chatbot', chatbotRouter);
+
+mountBullBoard(app);
 
 app.use(errorHandler);
 

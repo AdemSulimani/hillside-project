@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import http from 'http';
 import app from './app';
-import './jobs/queue';
+import './jobs/workers';
 import { initSocketServer } from './sockets';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
