@@ -2,6 +2,8 @@ import express from 'express';
 import path from 'path';
 import cors from 'cors';
 import helmet from 'helmet';
+import compression from 'compression';
+import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import healthRouter from './routes/health';
@@ -21,13 +23,22 @@ import contactsRouter from './routes/contacts';
 import feedbackRouter from './routes/feedback';
 import statisticsRouter from './routes/statistics';
 import chatbotRouter from './routes/chatbot';
+import adminRouter from './routes/admin';
 import { errorHandler } from './middleware/errorHandler';
 import { mountBullBoard } from './jobs/bullBoard';
+import { setupSentryExpressErrorHandler } from './instrument';
 
 const app = express();
 app.set('trust proxy', 1);
 
 app.use(helmet({ crossOriginResourcePolicy: false }));
+
+app.use(compression());
+
+const isDev = process.env.NODE_ENV !== 'production';
+if (isDev) {
+  app.use(morgan('dev'));
+}
 
 app.use(
   cors({
@@ -36,12 +47,10 @@ app.use(
   }),
 );
 
-const isDev = process.env.NODE_ENV !== 'production';
-
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: isDev ? 1000 : 100,
+    max: process.env.NODE_ENV !== 'production' ? 1000 : 100,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: 'Too many requests, please try again later.' },
@@ -78,8 +87,11 @@ app.use('/api/contacts', contactsRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/statistics', statisticsRouter);
 app.use('/api/chatbot', chatbotRouter);
+app.use('/api/admin', adminRouter);
 
 mountBullBoard(app);
+
+setupSentryExpressErrorHandler(app);
 
 app.use(errorHandler);
 

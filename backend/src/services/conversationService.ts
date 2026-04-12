@@ -2,6 +2,8 @@ import pool from '../db/pool';
 import type { ChannelType } from '../db/models/channel';
 import type { Conversation } from '../db/models/conversation';
 import type { Message } from '../db/models/message';
+import type { DecodedMessageCursor } from '../utils/messageCursor';
+import { encodeMessageCursor } from '../utils/messageCursor';
 
 export interface ConversationListRow extends Conversation {
   contact_name: string;
@@ -146,28 +148,45 @@ export async function listMessagesPageOldestFirst(params: {
   conversationId: string;
   tenantId: string;
   limit: number;
-  before?: Date | null;
+  cursor: DecodedMessageCursor | null;
 }): Promise<MessagesPageResult> {
-  const { conversationId, tenantId, limit, before } = params;
+  const { conversationId, tenantId, limit, cursor } = params;
   const fetchLimit = Math.min(limit, 100) + 1;
+
+  let cursorTime: Date | null = null;
+  let cursorId: string | null = null;
+  if (cursor?.kind === 'legacy_before') {
+    cursorTime = cursor.createdAt;
+  } else if (cursor?.kind === 'tuple') {
+    cursorTime = cursor.createdAt;
+    cursorId = cursor.id;
+  }
 
   const { rows } = await pool.query<Message>(
     `SELECT *
      FROM messages
      WHERE conversation_id = $1
        AND tenant_id = $2
-       AND ($3::timestamptz IS NULL OR created_at < $3)
-     ORDER BY created_at DESC
-     LIMIT $4`,
-    [conversationId, tenantId, before ?? null, fetchLimit],
+       AND (
+         ($3::timestamptz IS NULL AND $4::uuid IS NULL)
+         OR ($4::uuid IS NULL AND created_at < $3::timestamptz)
+         OR (
+           $4::uuid IS NOT NULL
+           AND (created_at, id) < ($3::timestamptz, $4::uuid)
+         )
+       )
+     ORDER BY created_at DESC, id DESC
+     LIMIT $5`,
+    [conversationId, tenantId, cursorTime, cursorId, fetchLimit],
   );
 
   const hasMore = rows.length > limit;
   const slice = hasMore ? rows.slice(0, limit) : rows;
   const messages = [...slice].reverse();
 
+  const oldest = messages[0];
   const nextCursor =
-    hasMore && messages.length > 0 ? messages[0]!.created_at.toISOString() : null;
+    hasMore && oldest ? encodeMessageCursor({ created_at: oldest.created_at, id: oldest.id }) : null;
 
   return { messages, hasMore, nextCursor };
 }

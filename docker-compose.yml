@@ -1,0 +1,66 @@
+# Local full stack: Postgres, Redis, API, SPA (Nginx).
+# Requires backend/.env (copy from backend/.env.example) with JWT_*, GROQ_API_KEY, ENCRYPTION_KEY, etc.
+# From repo root: docker compose up --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hillside
+    ports:
+      - '5432:5432'
+    volumes:
+      - hillside_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d hillside']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - '8000:8000'
+    environment:
+      NODE_ENV: development
+      PORT: '8000'
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hillside
+      REDIS_URL: redis://redis:6379
+      FRONTEND_URL: http://localhost:3000
+      BACKEND_URL: http://localhost:8000
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000/api
+        VITE_WS_URL: ws://localhost:8000
+    ports:
+      - '3000:80'
+    depends_on:
+      - backend
+
+volumes:
+  hillside_pg:

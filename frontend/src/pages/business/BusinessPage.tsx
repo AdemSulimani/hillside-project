@@ -349,10 +349,13 @@ export default function BusinessPage() {
                   src={logoPreview}
                   alt="Business logo"
                   className="size-32 rounded-lg border object-cover"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
+                  aria-label="Change logo"
                   className="absolute -right-2 -top-2 flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-colors hover:bg-primary/80"
                 >
                   <Upload className="size-3" />

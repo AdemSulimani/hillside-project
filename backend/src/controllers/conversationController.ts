@@ -81,7 +81,7 @@ export async function show(req: Request, res: Response): Promise<void> {
       conversationId: id,
       tenantId,
       limit: query.limit,
-      before: query.before,
+      cursor: query.cursor ?? null,
     });
 
     sendSuccess(

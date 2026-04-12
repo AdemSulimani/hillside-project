@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import './bootstrap';
+import './instrument';
 import http from 'http';
 import app from './app';
 import './jobs/workers';

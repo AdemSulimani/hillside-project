@@ -26,6 +26,8 @@ export function ContactAvatar({
         src={avatarUrl}
         alt=""
         className={cn('rounded-full object-cover', dim, className)}
+        loading="lazy"
+        decoding="async"
       />
     );
   }

@@ -20,8 +20,18 @@ export default function AppWithSessionRestore() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <Spinner className="size-8" />
+      <div
+        className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background px-6"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        aria-label="Restoring session"
+      >
+        <Spinner className="size-10 text-primary" />
+        <div className="text-center">
+          <p className="text-sm font-medium text-foreground">Restoring your session…</p>
+          <p className="mt-1 text-xs text-muted-foreground">Checking your account and workspace.</p>
+        </div>
       </div>
     );
   }

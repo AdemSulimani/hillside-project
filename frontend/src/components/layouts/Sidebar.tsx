@@ -47,12 +47,14 @@ export default function Sidebar() {
   return (
     <>
       {/* Mobile overlay */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-black/40 md:hidden"
+      {sidebarOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 cursor-default bg-black/40 md:hidden"
+          aria-label="Close navigation menu"
           onClick={() => setSidebarOpen(false)}
         />
-      )}
+      ) : null}
 
       <aside
         className={cn(
@@ -66,8 +68,10 @@ export default function Sidebar() {
             Hillside CRM
           </span>
           <button
+            type="button"
             onClick={() => setSidebarOpen(false)}
             className="rounded-md p-1 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground md:hidden"
+            aria-label="Close sidebar"
           >
             <X className="size-5" />
           </button>

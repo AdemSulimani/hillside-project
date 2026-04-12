@@ -113,7 +113,13 @@ export function ReplyBox({
               key={p.id}
               className="relative size-14 shrink-0 overflow-hidden rounded-md border border-border bg-muted/40"
             >
-              <img src={p.previewUrl} alt="" className="size-full object-cover" />
+              <img
+                src={p.previewUrl}
+                alt=""
+                className="size-full object-cover"
+                loading="lazy"
+                decoding="async"
+              />
               <Button
                 type="button"
                 variant="secondary"

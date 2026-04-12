@@ -5,7 +5,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type UIEvent,
 } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -35,6 +34,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { useIntersectionObserver } from '@/hooks/useIntersectionObserver';
 import { useRealtimeInbox } from '@/hooks/useRealtimeInbox';
 import { useAuthStore } from '@/store/authStore';
 import type { ReplyResult } from '@/api/conversationsApi';
@@ -66,6 +66,12 @@ export default function InboxPage() {
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
+  const [allowOlderMessageIO, setAllowOlderMessageIO] = useState(false);
+
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const listSentinelRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const messagesTopSentinelRef = useRef<HTMLDivElement>(null);
 
   useRealtimeInbox(selectedId);
 
@@ -79,6 +85,12 @@ export default function InboxPage() {
   const bottomAnchorRef = useRef<HTMLDivElement>(null);
   const lastScrolledMessageIdRef = useRef<string | null>(null);
   const loadOlderCooldownRef = useRef(false);
+
+  useEffect(() => {
+    setAllowOlderMessageIO(false);
+    const id = window.setTimeout(() => setAllowOlderMessageIO(true), 450);
+    return () => window.clearTimeout(id);
+  }, [selectedId]);
 
   useEffect(() => {
     void queryClient.invalidateQueries({ queryKey: ['conversations', 'unread-count'] });
@@ -98,6 +110,19 @@ export default function InboxPage() {
       last.pagination.page < last.pagination.totalPages
         ? last.pagination.page + 1
         : undefined,
+  });
+
+  const loadMoreConversations = useCallback(() => {
+    if (listQuery.hasNextPage && !listQuery.isFetchingNextPage) {
+      void listQuery.fetchNextPage();
+    }
+  }, [listQuery.fetchNextPage, listQuery.hasNextPage, listQuery.isFetchingNextPage]);
+
+  useIntersectionObserver(listSentinelRef, loadMoreConversations, {
+    root: listScrollRef,
+    rootMargin: '80px',
+    enabled: Boolean(listQuery.hasNextPage),
+    reobserveKey: listQuery.dataUpdatedAt,
   });
 
   const flatConversations = useMemo(
@@ -317,7 +342,7 @@ export default function InboxPage() {
     setOlderLoading(true);
     try {
       const more = await fetchConversationThread(selectedId, {
-        before: current.pagination.nextCursor,
+        cursor: current.pagination.nextCursor,
         limit: 50,
       });
       queryClient.setQueryData<ConversationThread>(['conversations', selectedId, 'detail'], {
@@ -332,20 +357,26 @@ export default function InboxPage() {
     }
   }, [olderLoading, queryClient, selectedId]);
 
-  const handleScrollMessages = useCallback(
-    (e: UIEvent<HTMLDivElement>) => {
-      const el = e.currentTarget;
-      if (el.scrollTop >= 48) return;
-      if (!thread?.pagination.hasMore || olderLoading || loadOlderCooldownRef.current) return;
-      loadOlderCooldownRef.current = true;
-      void loadOlder().finally(() => {
-        window.setTimeout(() => {
-          loadOlderCooldownRef.current = false;
-        }, 500);
-      });
-    },
-    [loadOlder, olderLoading, thread?.pagination.hasMore],
-  );
+  const onOlderMessagesIntersect = useCallback(() => {
+    if (!thread?.pagination.hasMore || olderLoading || loadOlderCooldownRef.current) return;
+    loadOlderCooldownRef.current = true;
+    void loadOlder().finally(() => {
+      window.setTimeout(() => {
+        loadOlderCooldownRef.current = false;
+      }, 500);
+    });
+  }, [loadOlder, olderLoading, thread?.pagination.hasMore]);
+
+  useIntersectionObserver(messagesTopSentinelRef, onOlderMessagesIntersect, {
+    root: messagesScrollRef,
+    rootMargin: '100px 0px 0px 0px',
+    enabled:
+      Boolean(selectedId) &&
+      allowOlderMessageIO &&
+      Boolean(thread?.pagination.hasMore) &&
+      !olderLoading,
+    reobserveKey: threadQuery.dataUpdatedAt,
+  });
 
   const channelTabs: { key: ChannelType | 'all'; label: string }[] = [
     { key: 'all', label: 'All' },
@@ -370,7 +401,7 @@ export default function InboxPage() {
         )}
       >
         {/* Left: conversation list */}
-        <div className="flex w-full flex-col border-b border-border lg:w-[min(100%,380px)] lg:border-r lg:border-b-0">
+        <div className="flex min-h-0 w-full flex-col border-b border-border lg:w-[min(100%,380px)] lg:border-r lg:border-b-0">
           <div className="border-b border-border p-3 space-y-3">
             <div className="relative">
               <Input
@@ -413,7 +444,7 @@ export default function InboxPage() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2">
+          <div ref={listScrollRef} className="flex min-h-0 flex-1 flex-col overflow-y-auto p-2">
             {listQuery.isLoading ? (
               <div className="space-y-2 p-1">
                 {Array.from({ length: 6 }).map((_, i) => (
@@ -437,26 +468,14 @@ export default function InboxPage() {
                 ))}
               </ul>
             )}
-            {listQuery.hasNextPage ? (
-              <div className="p-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="w-full"
-                  disabled={listQuery.isFetchingNextPage}
-                  onClick={() => void listQuery.fetchNextPage()}
-                >
-                  {listQuery.isFetchingNextPage ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      Loading…
-                    </>
-                  ) : (
-                    'Load more'
-                  )}
-                </Button>
+            {listQuery.isFetchingNextPage ? (
+              <div className="flex justify-center py-2" aria-live="polite">
+                <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
+                <span className="sr-only">Loading more conversations</span>
               </div>
+            ) : null}
+            {listQuery.hasNextPage || flatConversations.length > 0 ? (
+              <div ref={listSentinelRef} className="h-2 w-full shrink-0" aria-hidden />
             ) : null}
           </div>
         </div>
@@ -560,12 +579,14 @@ export default function InboxPage() {
               ) : null}
 
               <div
+                ref={messagesScrollRef}
                 className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
-                onScroll={handleScrollMessages}
               >
+                <div ref={messagesTopSentinelRef} className="h-px w-full shrink-0" aria-hidden />
                 {olderLoading ? (
-                  <div className="mb-2 flex justify-center">
-                    <Loader2 className="size-5 animate-spin text-muted-foreground" />
+                  <div className="mb-2 flex justify-center" aria-live="polite">
+                    <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
+                    <span className="sr-only">Loading older messages</span>
                   </div>
                 ) : null}
                 {thread.pagination.hasMore && !olderLoading ? (
