@@ -1,7 +1,7 @@
 import { findChannelByTypeAndExternalId, type ChannelType } from '../db/models/channel';
 import { upsertContact } from '../db/models/contact';
 import { upsertConversation, touchConversationLastMessageAt } from '../db/models/conversation';
-import { createMessage, findMessageByExternalMessageId } from '../db/models/message';
+import { createMessage, findMessageIdByExternalMessageId } from '../db/models/message';
 import {
   webhookNormalizerService,
   type InboundMessageDTO,
@@ -11,11 +11,9 @@ import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { aiQueue } from './queues';
 import { logEvent } from '../services/analyticsService';
+import type { InboundWebhookJobData } from './jobTypes';
 
-export interface InboundWebhookJobData {
-  channelType: ChannelType;
-  payload: Record<string, unknown>;
-}
+export type { InboundWebhookJobData } from './jobTypes';
 
 function normalize(channelType: ChannelType, payload: Record<string, unknown>): InboundMessageDTO {
   if (channelType === 'facebook') return webhookNormalizerService.normalizeFromFacebook(payload);
@@ -26,8 +24,12 @@ function normalize(channelType: ChannelType, payload: Record<string, unknown>): 
 export async function processInboundMessage(data: InboundWebhookJobData): Promise<void> {
   const normalized = normalize(data.channelType, data.payload);
 
-  const existingMessage = await findMessageByExternalMessageId(normalized.externalMessageId);
-  if (existingMessage) {
+  const existingId = await findMessageIdByExternalMessageId(normalized.externalMessageId);
+  if (existingId) {
+    console.info('[inbound] Duplicate external_message_id, skipping processing', {
+      external_message_id: normalized.externalMessageId,
+      message_id: existingId,
+    });
     return;
   }
 

@@ -5,6 +5,7 @@ import { useAppStore } from '@/store/app';
 import { useAuth } from '@/hooks/useAuth';
 import { Bell, ChevronDown, LogOut, Building2, UserCircle, Menu } from 'lucide-react';
 import { cn, assetUrl } from '@/lib/utils';
+import SystemHealthIndicator from '@/components/layouts/SystemHealthIndicator';
 
 export default function Header() {
   const user = useAuthStore((s) => s.user);
@@ -61,7 +62,9 @@ export default function Header() {
         <span className="truncate text-sm font-medium">{tenant?.name ?? 'My Business'}</span>
       </div>
 
-      <div className="flex-1" />
+      <div className="min-w-0 flex-1" />
+
+      <SystemHealthIndicator />
 
       {/* Notification bell */}
       <button className="relative rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">

@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { sendSuccess, sendError } from '../utils/response';
+import { authenticate } from '../middleware/authenticate';
+import { ensureOnboarded } from '../middleware/ensureOnboarded';
+import * as healthController from '../controllers/healthController';
 
 const router = Router();
 
@@ -25,5 +28,7 @@ router.get('/', async (_req, res) => {
     );
   }
 });
+
+router.get('/queues', authenticate, ensureOnboarded, healthController.queues);
 
 export default router;

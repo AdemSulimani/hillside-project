@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import pool from '../db/pool';
-import { embeddingQueue } from '../jobs/queues';
+import { defaultQueue } from '../jobs/queues';
 
 /**
  * One-time backfill script: dispatches a GenerateProductEmbedding job
@@ -24,7 +24,7 @@ async function main() {
   console.log(`[embedAllProducts] Dispatching embedding jobs for ${rows.length} product(s)…`);
 
   for (const product of rows) {
-    await embeddingQueue.add('product.embedding', {
+    await defaultQueue.add('product.embedding', {
       productId: product.id,
       tenantId: product.tenant_id,
     });

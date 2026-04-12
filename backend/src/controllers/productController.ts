@@ -10,7 +10,7 @@ import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import { getDocumentService } from '../services/documents';
 import { ImageProcessingService } from '../services/ImageProcessingService';
 import { AIProductProcessingService } from '../services/AIProductProcessingService';
-import { embeddingQueue } from '../jobs/queues';
+import { defaultQueue } from '../jobs/queues';
 import type { CreateProductInput, UpdateProductInput } from '../validators/product';
 import type { ProductQuery } from '../validators/product';
 
@@ -56,7 +56,7 @@ export async function store(req: Request, res: Response): Promise<void> {
       source_type: 'manual',
     });
 
-    await embeddingQueue.add('product.embedding', {
+    await defaultQueue.add('product.embedding', {
       productId: product.id,
       tenantId,
     });
@@ -103,7 +103,7 @@ export async function update(req: Request, res: Response): Promise<void> {
       (f) => f in fields,
     );
     if (touchesEmbedding) {
-      await embeddingQueue.add('product.embedding', {
+      await defaultQueue.add('product.embedding', {
         productId: product.id,
         tenantId,
       });

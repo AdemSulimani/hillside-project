@@ -74,6 +74,17 @@ export async function findMessageByExternalMessageId(
   return rows[0] ?? null;
 }
 
+/** Lightweight id-only lookup for inbound deduplication. */
+export async function findMessageIdByExternalMessageId(
+  externalMessageId: string,
+): Promise<string | null> {
+  const { rows } = await pool.query<{ id: string }>(
+    'SELECT id FROM messages WHERE external_message_id = $1 LIMIT 1',
+    [externalMessageId],
+  );
+  return rows[0]?.id ?? null;
+}
+
 /**
  * Latest `limit` messages for the conversation, oldest-first (for AI / intent context).
  * Uses most recent window, not the earliest rows in the thread.

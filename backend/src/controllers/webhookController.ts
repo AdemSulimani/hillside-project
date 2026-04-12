@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import type { Request, Response } from 'express';
 import { sendError } from '../utils/response';
-import { inboundMessageQueue } from '../jobs/queues';
+import { webhookQueue } from '../jobs/queues';
 import type { ChannelType } from '../db/models/channel';
 
 const allowedTypes: ChannelType[] = ['facebook', 'instagram', 'whatsapp'];
@@ -34,7 +34,7 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
 
   const enqueueInboundPayload = async (): Promise<void> => {
     try {
-      await inboundMessageQueue.add('message.inbound', {
+      await webhookQueue.add('message.inbound', {
         channelType: channelTypeParam,
         payload: parsedPayload,
       });

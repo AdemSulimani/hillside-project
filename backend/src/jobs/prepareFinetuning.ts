@@ -13,7 +13,7 @@ import {
   listMessagesBeforeForConversation,
   type Message,
 } from '../db/models/message';
-import { prepareFinetuningQueue } from './queues';
+import { finetuningQueue } from './queues';
 
 export type PrepareFinetuningJobData = Record<string, never>;
 
@@ -35,6 +35,7 @@ function parseFinetuningThreshold(): number {
   return Number.isFinite(n) && n > 0 ? n : 50;
 }
 
+/** BullMQ repeat pattern: 2:00 UTC nightly (override with FINETUNING_CRON). */
 function finetuningCronPattern(): string {
   return process.env.FINETUNING_CRON?.trim() || '0 2 * * *';
 }
@@ -221,16 +222,16 @@ export async function processPrepareFinetuning(): Promise<void> {
 
 export async function initPrepareFinetuningScheduler(): Promise<void> {
   const pattern = finetuningCronPattern();
-  await prepareFinetuningQueue.upsertJobScheduler(
+  await finetuningQueue.upsertJobScheduler(
     'finetuning-prepare-nightly',
     { pattern },
     {
       name: 'prepareFinetuning',
       data: {},
       opts: {
+        attempts: 1,
         removeOnComplete: { count: 100 },
-        attempts: 2,
-        backoff: { type: 'exponential', delay: 60_000 },
+        removeOnFail: { count: 50 },
       },
     },
   );
