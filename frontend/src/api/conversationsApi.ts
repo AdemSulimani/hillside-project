@@ -24,6 +24,7 @@ export function normalizeConversationSummary(raw: Record<string, unknown>): Conv
     last_message_at: String(raw.last_message_at ?? ''),
     human_override_until:
       raw.human_override_until != null ? String(raw.human_override_until) : null,
+    ai_paused: toBool(raw.ai_paused),
     created_at: String(raw.created_at ?? ''),
     updated_at: String(raw.updated_at ?? ''),
     contact_name: String(raw.contact_name ?? ''),
@@ -48,6 +49,7 @@ export function normalizeConversationDetail(raw: Record<string, unknown>): Conve
     last_message_at: String(raw.last_message_at ?? ''),
     human_override_until:
       raw.human_override_until != null ? String(raw.human_override_until) : null,
+    ai_paused: toBool(raw.ai_paused),
     created_at: String(raw.created_at ?? ''),
     updated_at: String(raw.updated_at ?? ''),
     contact_name: String(raw.contact_name ?? ''),
@@ -195,4 +197,17 @@ export async function reopenConversation(conversationId: string): Promise<Conver
     `/conversations/${conversationId}/reopen`,
   );
   return normalizeConversationDetail(data.data!.conversation as Record<string, unknown>);
+}
+
+export async function toggleConversationAi(
+  conversationId: string,
+): Promise<{ id: string; ai_paused: boolean }> {
+  const { data } = await api.patch<ApiResponse<{ id: string; ai_paused: boolean }>>(
+    `/conversations/${conversationId}/toggle-ai`,
+  );
+  const payload = data.data;
+  if (!payload?.id) {
+    throw new Error('Invalid toggle AI response');
+  }
+  return { id: String(payload.id), ai_paused: Boolean(payload.ai_paused) };
 }

@@ -2,14 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Loader2, Plus, Radio } from 'lucide-react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   connectWhatsApp,
   deleteChannel,
   fetchChannels,
   getMetaRedirectUrl,
-  toggleChannelAI,
 } from '@/api/channelsApi';
 import { ChannelCard } from '@/components/channels/ChannelCard';
 import { Button } from '@/components/ui/button';
@@ -24,8 +23,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
-import type { Channel } from '@/types/channel';
-
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError && err.response?.data?.message) {
     return String(err.response.data.message);
@@ -73,30 +70,6 @@ export default function ChannelsPage() {
     },
   });
 
-  const toggleAiMutation = useMutation({
-    mutationFn: (id: string) => toggleChannelAI(id),
-    onMutate: async (id) => {
-      await queryClient.cancelQueries({ queryKey: ['channels'] });
-      const previous = queryClient.getQueryData<Channel[]>(['channels']) ?? [];
-      queryClient.setQueryData<Channel[]>(
-        ['channels'],
-        previous.map((channel) =>
-          channel.id === id
-            ? { ...channel, ai_enabled: !channel.ai_enabled }
-            : channel,
-        ),
-      );
-      return { previous };
-    },
-    onError: (err, _id, context) => {
-      queryClient.setQueryData(['channels'], context?.previous ?? []);
-      toast.error(extractMessage(err, 'Failed to update AI setting'));
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['channels'] });
-    },
-  });
-
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteChannel(id),
     onSuccess: () => {
@@ -126,10 +99,6 @@ export default function ChannelsPage() {
     }
   }, [navigate, queryClient, searchParams]);
 
-  const pendingToggleIds = useMemo(
-    () => new Set(toggleAiMutation.isPending ? [toggleAiMutation.variables] : []),
-    [toggleAiMutation.isPending, toggleAiMutation.variables],
-  );
   const pendingDeleteIds = useMemo(
     () => new Set(deleteMutation.isPending ? [deleteMutation.variables] : []),
     [deleteMutation.isPending, deleteMutation.variables],
@@ -157,7 +126,14 @@ export default function ChannelsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Channels</h1>
           <p className="text-sm text-muted-foreground">
-            Connect your social channels and control AI automation per channel.
+            Connect your social channels. Manage AI per channel in{' '}
+            <Link
+              to="/chatbot-control"
+              className="font-medium text-foreground underline-offset-4 hover:underline"
+            >
+              Chatbot Control
+            </Link>
+            .
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -195,7 +171,7 @@ export default function ChannelsPage() {
       {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-52 rounded-xl" />
+            <Skeleton key={i} className="h-36 rounded-xl" />
           ))}
         </div>
       ) : isError ? (
@@ -213,9 +189,7 @@ export default function ChannelsPage() {
             <ChannelCard
               key={channel.id}
               channel={channel}
-              isTogglePending={pendingToggleIds.has(channel.id)}
               isDeletePending={pendingDeleteIds.has(channel.id)}
-              onToggleAI={(target) => toggleAiMutation.mutate(target.id)}
               onDisconnect={(target) => deleteMutation.mutate(target.id)}
             />
           ))}

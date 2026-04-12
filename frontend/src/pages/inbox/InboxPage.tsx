@@ -24,8 +24,10 @@ import {
   fetchConversations,
   reopenConversation,
   sendConversationReply,
+  toggleConversationAi,
   uploadConversationAttachment,
 } from '@/api/conversationsApi';
+import { ConversationAiStatusBar } from '@/components/inbox/ConversationAiStatusBar';
 import { ConversationListItem } from '@/components/inbox/ConversationListItem';
 import { MessageBubble } from '@/components/inbox/MessageBubble';
 import { ReplyBox } from '@/components/inbox/ReplyBox';
@@ -190,13 +192,18 @@ export default function InboxPage() {
       queryClient.setQueryData<ConversationThread>(['conversations', id, 'detail'], (old) => {
         if (!old) return old;
         const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        const withoutOptimistic = old.messages.filter(
+          (m) => !String(m.id).startsWith('optimistic-'),
+        );
+        // Socket may append the real message before this handler runs — avoid duplicate rows.
+        const alreadyHave = withoutOptimistic.some((m) => m.id === result.message.id);
+        const messages = alreadyHave
+          ? withoutOptimistic
+          : [...withoutOptimistic, result.message];
         return {
           ...old,
           conversation: { ...old.conversation, human_override_until: until },
-          messages: [
-            ...old.messages.filter((m) => !String(m.id).startsWith('optimistic-')),
-            result.message,
-          ],
+          messages,
         };
       });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
@@ -230,6 +237,55 @@ export default function InboxPage() {
       toast.success('Conversation reopened');
     },
     onError: (err) => toast.error(extractMessage(err, 'Failed to reopen conversation')),
+  });
+
+  const toggleConversationAiMutation = useMutation({
+    mutationFn: toggleConversationAi,
+    onMutate: async (conversationId) => {
+      await queryClient.cancelQueries({ queryKey: ['conversations', conversationId, 'detail'] });
+      const prev = queryClient.getQueryData<ConversationThread>([
+        'conversations',
+        conversationId,
+        'detail',
+      ]);
+      if (prev) {
+        const nextPaused = !prev.conversation.ai_paused;
+        queryClient.setQueryData<ConversationThread>(
+          ['conversations', conversationId, 'detail'],
+          {
+            ...prev,
+            conversation: {
+              ...prev.conversation,
+              ai_paused: nextPaused,
+              // Match backend: resuming AI clears the post-human hold so replies can run again.
+              human_override_until: nextPaused
+                ? prev.conversation.human_override_until
+                : null,
+            },
+          },
+        );
+      }
+      return { prev, conversationId };
+    },
+    onError: (err, conversationId, ctx) => {
+      if (ctx?.prev) {
+        queryClient.setQueryData(
+          ['conversations', conversationId, 'detail'],
+          ctx.prev,
+        );
+      }
+      toast.error(extractMessage(err, 'Failed to update AI pause for this conversation'));
+    },
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ['chatbot', 'paused-conversations'] });
+      void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+      void queryClient.invalidateQueries({
+        queryKey: ['conversations', result.id, 'detail'],
+      });
+      toast.success(
+        result.ai_paused ? 'AI paused for this conversation' : 'AI resumed for this conversation',
+      );
+    },
   });
 
   useEffect(() => {
@@ -524,6 +580,13 @@ export default function InboxPage() {
                 </div>
                 <div ref={bottomAnchorRef} className="h-px w-full shrink-0" aria-hidden />
               </div>
+
+              <ConversationAiStatusBar
+                aiPaused={thread.conversation.ai_paused}
+                disabled={thread.conversation.status === 'closed'}
+                togglePending={toggleConversationAiMutation.isPending}
+                onToggle={() => toggleConversationAiMutation.mutate(thread.conversation.id)}
+              />
 
               <ReplyBox
                 disabled={thread.conversation.status === 'closed'}

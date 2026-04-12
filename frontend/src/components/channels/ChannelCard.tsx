@@ -1,35 +1,18 @@
-import { Bot, Globe, Image, MessageCircleMore } from 'lucide-react';
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Switch } from '@/components/ui/switch';
+import { getChannelIcon, getChannelLabel } from '@/components/channels/ChannelAiToggleRow';
 import type { Channel } from '@/types/channel';
 
 interface ChannelCardProps {
   channel: Channel;
-  isTogglePending?: boolean;
   isDeletePending?: boolean;
-  onToggleAI: (channel: Channel) => void;
   onDisconnect: (channel: Channel) => void;
-}
-
-function getChannelIcon(type: Channel['type']) {
-  if (type === 'facebook') return Globe;
-  if (type === 'instagram') return Image;
-  return MessageCircleMore;
-}
-
-function getChannelLabel(type: Channel['type']) {
-  if (type === 'facebook') return 'Facebook';
-  if (type === 'instagram') return 'Instagram';
-  return 'WhatsApp';
 }
 
 export function ChannelCard({
   channel,
-  isTogglePending = false,
   isDeletePending = false,
-  onToggleAI,
   onDisconnect,
 }: ChannelCardProps) {
   const Icon = getChannelIcon(channel.type);
@@ -52,21 +35,7 @@ export function ChannelCard({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent>
-        <div className="flex items-center justify-between rounded-lg border px-3 py-2">
-          <div className="flex items-center gap-2 text-sm">
-            <Bot className="size-4 text-muted-foreground" />
-            AI assistant
-          </div>
-          <Switch
-            checked={channel.ai_enabled}
-            onCheckedChange={() => onToggleAI(channel)}
-            disabled={isTogglePending}
-            aria-label={`Toggle AI for ${channel.name}`}
-          />
-        </div>
-      </CardContent>
-      <CardFooter className="justify-end">
+      <CardFooter className="justify-end border-t pt-4">
         <Button
           variant="destructive"
           size="sm"

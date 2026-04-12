@@ -5,6 +5,7 @@ import { findContactById } from '../db/models/contact';
 import { createMessage, findMessagesByConversation } from '../db/models/message';
 import { createOrder } from '../db/models/order';
 import { findProductByNameCaseInsensitive } from '../db/models/product';
+import { findAIConfigByTenant } from '../db/models/aiConfig';
 import { generateReply } from '../services/aiService';
 import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
@@ -21,6 +22,14 @@ export interface AIReplyJobData {
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
 
+  // Level 1: Global AI toggle
+  const aiConfig = await findAIConfigByTenant(tenantId);
+  if (!aiConfig?.is_active) {
+    console.info('[ai.reply] AI globally disabled for tenant, skipping', { tenantId });
+    return;
+  }
+
+  // Level 2: Per-channel toggle
   const channel = await findChannelById(channelId, tenantId);
   if (!channel) {
     console.warn('[ai.reply] Channel not found, skipping', { channelId, tenantId });
@@ -32,9 +41,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
+  // Level 3: Per-conversation controls
   const conversation = await findConversationById(conversationId);
   if (!conversation) {
     console.warn('[ai.reply] Conversation not found, skipping', { conversationId });
+    return;
+  }
+
+  if (conversation.ai_paused) {
+    console.info('[ai.reply] AI paused for conversation, skipping', { conversationId });
     return;
   }
 

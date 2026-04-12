@@ -95,13 +95,25 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
           (old) => {
             if (!old) return old;
             if (old.messages.some((m) => m.id === inboxMessage.id)) return old;
+            // Outbound echo from the server: drop our optimistic bubble so we do not show two sends.
+            const base =
+              inboxMessage.direction === 'outbound'
+                ? old.messages.filter(
+                    (m) =>
+                      !(
+                        String(m.id).startsWith('optimistic-') &&
+                        m.direction === 'outbound'
+                      ),
+                  )
+                : old.messages;
+            if (base.some((m) => m.id === inboxMessage.id)) return old;
             return {
               ...old,
               conversation: {
                 ...old.conversation,
                 last_message_at: inboxMessage.created_at,
               },
-              messages: [...old.messages, inboxMessage],
+              messages: [...base, inboxMessage],
             };
           },
         );

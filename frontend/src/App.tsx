@@ -5,8 +5,6 @@ import PublicOnlyRoute from '@/components/auth/PublicOnlyRoute';
 import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
-import { Bot } from 'lucide-react';
-
 const HomePage = lazy(() => import('@/pages/Home'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('@/pages/auth/RegisterPage'));
@@ -14,7 +12,6 @@ const OnboardingPage = lazy(() => import('@/pages/onboarding/OnboardingPage'));
 const DashboardPage = lazy(() => import('@/pages/dashboard/DashboardPage'));
 const ProfilePage = lazy(() => import('@/pages/profile/ProfilePage'));
 const BusinessPage = lazy(() => import('@/pages/business/BusinessPage'));
-const PlaceholderPage = lazy(() => import('@/pages/crm/PlaceholderPage'));
 const ProductsPage = lazy(() => import('@/pages/products/ProductsPage'));
 const ChannelsPage = lazy(() => import('@/pages/channels/ChannelsPage'));
 const InboxPage = lazy(() => import('@/pages/inbox/InboxPage'));
@@ -24,6 +21,7 @@ const ContactsPage = lazy(() => import('@/pages/contacts/ContactsPage'));
 const ContactDetailPage = lazy(() => import('@/pages/contacts/ContactDetailPage'));
 const FeedbackPage = lazy(() => import('@/pages/feedback/FeedbackPage'));
 const StatisticsPage = lazy(() => import('@/pages/statistics/StatisticsPage'));
+const ChatbotControlPage = lazy(() => import('@/pages/chatbotControl/ChatbotControlPage'));
 
 export default function App() {
   return (
@@ -49,16 +47,7 @@ export default function App() {
               <Route path="/contacts" element={<ContactsPage />} />
               <Route path="/contacts/:id" element={<ContactDetailPage />} />
               <Route path="/ai-config" element={<AIConfigPage />} />
-              <Route
-                path="/chatbot-control"
-                element={
-                  <PlaceholderPage
-                    title="Chatbot Control"
-                    description="Control your chatbot settings and responses."
-                    icon={Bot}
-                  />
-                }
-              />
+              <Route path="/chatbot-control" element={<ChatbotControlPage />} />
               <Route path="/statistics" element={<StatisticsPage />} />
               <Route path="/feedback" element={<FeedbackPage />} />
               <Route path="/business" element={<BusinessPage />} />
