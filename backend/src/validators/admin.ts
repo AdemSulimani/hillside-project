@@ -46,7 +46,7 @@ export const adminOrderIdParamsSchema = z.object({
 });
 
 export const adminCommissionStatusPatchBodySchema = z.object({
-  commission_status: z.enum(['billed', 'paid']),
+  commission_status: z.enum(['unpaid', 'billed', 'paid']),
 });
 
 export type AdminCommissionStatusPatchBody = z.infer<typeof adminCommissionStatusPatchBodySchema>;
@@ -78,3 +78,13 @@ export const adminPeriodQueryRequiredSchema = z
   });
 
 export type AdminPeriodQueryRequired = z.infer<typeof adminPeriodQueryRequiredSchema>;
+
+export const adminReportIdParamsSchema = z.object({
+  reportId: z.string().uuid('Invalid report ID'),
+});
+
+export const adminReportStatusPatchBodySchema = z.object({
+  status: z.enum(['unpaid', 'billed', 'paid']),
+});
+
+export type AdminReportStatusPatchBody = z.infer<typeof adminReportStatusPatchBodySchema>;
