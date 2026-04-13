@@ -174,7 +174,7 @@ export async function upsertContact(input: UpsertContactInput): Promise<Contact>
      DO UPDATE SET
        name = EXCLUDED.name,
        avatar_url = EXCLUDED.avatar_url,
-       metadata = EXCLUDED.metadata,
+       metadata = (contacts.metadata - 'raw_payload_contact') || EXCLUDED.metadata,
        updated_at = now()
      RETURNING *`,
     [

@@ -72,6 +72,5 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
   }
 
   res.sendStatus(200);
-  console.log('=== RAW PAYLOAD ===', JSON.stringify(req.body, null, 2));
   void enqueueInboundPayload();
 }
