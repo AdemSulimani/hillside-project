@@ -146,6 +146,8 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
       const conversationId = parseConversationUpdatedPayload(payload);
       if (!conversationId) return;
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
+      void queryClient.invalidateQueries({ queryKey: ['conversations', conversationId, 'detail'] });
     };
 
     socket.on('connect_error', onConnectError);

@@ -1,12 +1,24 @@
 import crypto from 'crypto';
+import pool from '../db/pool';
 import { findChannelById } from '../db/models/channel';
-import { findConversationById, touchConversationLastMessageAt } from '../db/models/conversation';
+import {
+  findConversationById,
+  setConversationAiPaused,
+  touchConversationLastMessageAt,
+} from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
 import { createMessage, findMessagesByConversation } from '../db/models/message';
+import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
 import { createOrder } from '../db/models/order';
 import { findProductByNameCaseInsensitive } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import { generateReply } from '../services/aiService';
+import {
+  evaluateReply,
+  evaluationTriggersAlert,
+  getQualityThreshold,
+  resolveStoredFlagReason,
+} from '../services/aiQualityService';
 import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
@@ -80,6 +92,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
+  const qualityThreshold = getQualityThreshold();
+  const qualityEval = await evaluateReply(inboundText, replyText, tenantId);
+  const qualityFailing =
+    qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
+  const qualityScore = qualityEval?.quality_score ?? null;
+  const flagReason =
+    qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
+
   const outboundMessage = await createMessage({
     tenant_id: tenantId,
     conversation_id: conversationId,
@@ -88,7 +108,45 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     type: 'text',
     content: replyText,
     sent_by: 'ai',
+    quality_score: qualityScore,
+    flagged: qualityFailing,
+    flag_reason: flagReason,
   });
+
+  if (qualityFailing && flagReason) {
+    const client = await pool.connect();
+    let alert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      alert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: flagReason,
+        },
+        client,
+      );
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[ai.reply] Quality alert / pause failed', { conversationId, tenantId, err });
+    } finally {
+      client.release();
+    }
+    if (alert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...alert,
+        message_content: outboundMessage.content,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    }
+  }
 
   await touchConversationLastMessageAt(conversationId);
 

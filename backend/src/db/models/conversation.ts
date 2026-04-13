@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import pool from '../pool';
 import type { ChannelType } from './channel';
 
@@ -85,6 +86,22 @@ export async function touchConversationLastMessageAt(id: string): Promise<void> 
      WHERE id = $1`,
     [id],
   );
+}
+
+export async function setConversationAiPaused(
+  id: string,
+  tenantId: string,
+  aiPaused: boolean,
+  client: PoolClient | typeof pool = pool,
+): Promise<Conversation | null> {
+  const { rows } = await client.query<Conversation>(
+    `UPDATE conversations
+     SET ai_paused = $3, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING *`,
+    [id, tenantId, aiPaused],
+  );
+  return rows[0] ?? null;
 }
 
 export async function toggleAiPaused(

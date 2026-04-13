@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '@/store/app';
 import { cn } from '@/lib/utils';
 import { fetchUnreadConversationCount } from '@/api/conversationsApi';
+import { fetchAIAlertsUnreadCount } from '@/api/aiAlertsApi';
 import {
   LayoutDashboard,
   Inbox,
@@ -14,6 +15,7 @@ import {
   Bot,
   BarChart3,
   MessageSquareHeart,
+  ShieldAlert,
   Building2,
   UserCircle,
   X,
@@ -30,6 +32,7 @@ const navItems = [
   { to: '/chatbot-control', label: 'Chatbot Control', icon: Bot },
   { to: '/statistics', label: 'Statistics', icon: BarChart3 },
   { to: '/feedback', label: 'Feedback', icon: MessageSquareHeart },
+  { to: '/ai-alerts', label: 'AI Alerts', icon: ShieldAlert },
   { to: '/business', label: 'My Business', icon: Building2 },
   { to: '/profile', label: 'My Profile', icon: UserCircle },
 ] as const;
@@ -41,6 +44,12 @@ export default function Sidebar() {
   const { data: inboxUnread = 0 } = useQuery({
     queryKey: ['conversations', 'unread-count'],
     queryFn: fetchUnreadConversationCount,
+    refetchInterval: 60_000,
+  });
+
+  const { data: aiAlertsUnread = 0 } = useQuery({
+    queryKey: ['ai-alerts', 'unread-count'],
+    queryFn: fetchAIAlertsUnreadCount,
     refetchInterval: 60_000,
   });
 
@@ -101,6 +110,11 @@ export default function Sidebar() {
                   {to === '/inbox' && inboxUnread > 0 ? (
                     <span className="flex min-w-5 justify-center rounded-full bg-primary px-1.5 py-0.5 text-[0.65rem] font-semibold leading-none text-primary-foreground">
                       {inboxUnread > 99 ? '99+' : inboxUnread}
+                    </span>
+                  ) : null}
+                  {to === '/ai-alerts' && aiAlertsUnread > 0 ? (
+                    <span className="flex min-w-5 justify-center rounded-full bg-destructive px-1.5 py-0.5 text-[0.65rem] font-semibold leading-none text-destructive-foreground">
+                      {aiAlertsUnread > 99 ? '99+' : aiAlertsUnread}
                     </span>
                   ) : null}
                 </NavLink>

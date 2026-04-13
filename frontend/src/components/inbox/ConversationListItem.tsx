@@ -1,4 +1,4 @@
-import { Globe, Image, MessageCircleMore } from 'lucide-react';
+import { AlertTriangle, Globe, Image, MessageCircleMore } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatRelativeShort, isWithinLastHours } from '@/lib/formatRelativeTime';
 import type { ChannelType, ConversationSummary } from '@/types/conversation';
@@ -76,6 +76,15 @@ export function ConversationListItem({ conversation, selected, onSelect }: Conve
         <div className="flex items-start justify-between gap-2">
           <span className="truncate font-medium text-foreground">{conversation.contact_name}</span>
           <div className="flex shrink-0 items-center gap-1.5">
+            {conversation.has_unread_ai_alert ? (
+              <span
+                className="flex size-6 items-center justify-center rounded-full bg-orange-500/15 text-orange-700 dark:text-orange-300"
+                title="Unread AI quality alert"
+                aria-label="Unread AI quality alert"
+              >
+                <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+              </span>
+            ) : null}
             {unread && (
               <span
                 className="size-2 rounded-full bg-primary"

@@ -20,6 +20,7 @@ const OrdersPage = lazy(() => import('@/pages/orders/OrdersPage'));
 const ContactsPage = lazy(() => import('@/pages/contacts/ContactsPage'));
 const ContactDetailPage = lazy(() => import('@/pages/contacts/ContactDetailPage'));
 const FeedbackPage = lazy(() => import('@/pages/feedback/FeedbackPage'));
+const AIAlertsPage = lazy(() => import('@/pages/aiAlerts/AIAlertsPage'));
 const StatisticsPage = lazy(() => import('@/pages/statistics/StatisticsPage'));
 const ChatbotControlPage = lazy(() => import('@/pages/chatbotControl/ChatbotControlPage'));
 
@@ -50,6 +51,7 @@ export default function App() {
               <Route path="/chatbot-control" element={<ChatbotControlPage />} />
               <Route path="/statistics" element={<StatisticsPage />} />
               <Route path="/feedback" element={<FeedbackPage />} />
+              <Route path="/ai-alerts" element={<AIAlertsPage />} />
               <Route path="/business" element={<BusinessPage />} />
               <Route path="/profile" element={<ProfilePage />} />
             </Route>
