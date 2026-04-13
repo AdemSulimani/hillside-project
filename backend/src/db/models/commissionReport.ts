@@ -99,3 +99,26 @@ export async function listAllCommissionReportsPage(
 
   return { rows: mapped, total };
 }
+
+export async function updateCommissionReportStatusById(
+  reportId: string,
+  status: CommissionReportBillingStatus,
+): Promise<CommissionReportListRow | null> {
+  const { rows } = await pool.query<ReportListQueryRow>(
+    `UPDATE commission_reports cr
+     SET status = $2::varchar
+     FROM tenants t
+     WHERE cr.id = $1::uuid AND t.id = cr.tenant_id
+     RETURNING cr.*, t.name AS business_name`,
+    [reportId, status],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const { business_name, ...cr } = row;
+  return { ...rowToReport(cr), business_name };
+}
+
+export async function deleteCommissionReportById(reportId: string): Promise<boolean> {
+  const result = await pool.query('DELETE FROM commission_reports WHERE id = $1::uuid', [reportId]);
+  return (result.rowCount ?? 0) > 0;
+}

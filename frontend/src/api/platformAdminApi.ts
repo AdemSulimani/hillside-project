@@ -152,9 +152,31 @@ export async function postAdminMarkPaid(tenantId: string, body: { period_start: 
   return data.data!.updated_count;
 }
 
+export async function patchAdminOrderCommissionStatus(
+  orderId: string,
+  body: { commission_status: CommissionableOrderRow['commission_status'] },
+): Promise<void> {
+  await adminApi.patch(`/admin/orders/${orderId}/commission-status`, body);
+}
+
 export async function fetchAdminCommissionReportsAll(page: number, limit: number) {
   const { data } = await adminApi.get<PaginatedResponse<CommissionReportRow>>('/admin/commission-reports', {
     params: { page, limit },
   });
   return { rows: data.data ?? [], pagination: data.pagination };
+}
+
+export async function patchAdminCommissionReport(
+  reportId: string,
+  body: { status: CommissionReportRow['status'] },
+) {
+  const { data } = await adminApi.patch<ApiResponse<{ report: CommissionReportRow }>>(
+    `/admin/commission-reports/${reportId}`,
+    body,
+  );
+  return data.data!.report;
+}
+
+export async function deleteAdminCommissionReport(reportId: string) {
+  await adminApi.delete(`/admin/commission-reports/${reportId}`);
 }

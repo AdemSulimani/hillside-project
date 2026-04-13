@@ -8,9 +8,9 @@ import {
   fetchAdminBusinessOverview,
   fetchAdminBusinessPeriodStats,
   fetchAdminCommissionableOrders,
+  patchAdminOrderCommissionStatus,
   postAdminGenerateReport,
-  postAdminMarkBilled,
-  postAdminMarkPaid,
+  type CommissionableOrderRow,
 } from '@/api/platformAdminApi';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -22,6 +22,11 @@ import { formatCurrency } from '@/lib/formatCurrency';
 import { cn } from '@/lib/utils';
 
 const ORDERS_PAGE_SIZE = 20;
+
+const COMMISSION_STATUS_OPTIONS: CommissionableOrderRow['commission_status'][] = ['unpaid', 'billed', 'paid'];
+
+const selectClass =
+  'h-8 min-w-[108px] rounded-md border border-input bg-background px-2 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-50';
 
 function toYmdLocal(d: Date): string {
   const y = d.getFullYear();
@@ -36,17 +41,12 @@ function defaultPeriod(): { start: string; end: string } {
   return { start: toYmdLocal(start), end: toYmdLocal(now) };
 }
 
-function commissionBadgeVariant(s: string): 'destructive' | 'secondary' | 'default' {
-  if (s === 'unpaid') return 'destructive';
-  if (s === 'billed') return 'secondary';
-  return 'default';
-}
-
 export default function AdminBusinessDetailPage() {
   const { tenantId } = useParams<{ tenantId: string }>();
   const queryClient = useQueryClient();
   const [{ start: periodStart, end: periodEnd }, setPeriod] = useState(defaultPeriod);
   const [ordersPage, setOrdersPage] = useState(1);
+  const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
 
   const periodValid = useMemo(() => periodEnd >= periodStart, [periodStart, periodEnd]);
 
@@ -81,25 +81,17 @@ export default function AdminBusinessDetailPage() {
     void queryClient.invalidateQueries({ queryKey: ['admin', 'commission-reports'] });
   };
 
-  const markBilledMutation = useMutation({
-    mutationFn: () => postAdminMarkBilled(tenantId!, { period_start: periodStart, period_end: periodEnd }),
-    onSuccess: (count) => {
-      toast.success(`Marked ${count} order(s) as billed.`);
+  const patchCommissionMutation = useMutation({
+    mutationFn: ({ orderId, commission_status }: { orderId: string; commission_status: CommissionableOrderRow['commission_status'] }) =>
+      patchAdminOrderCommissionStatus(orderId, { commission_status }),
+    onMutate: ({ orderId }) => setUpdatingOrderId(orderId),
+    onSettled: () => setUpdatingOrderId(null),
+    onSuccess: () => {
       invalidateBusiness();
+      toast.success('Commission status updated');
     },
     onError: (e) => {
-      toast.error(e instanceof AxiosError ? e.response?.data?.message ?? 'Request failed' : 'Request failed');
-    },
-  });
-
-  const markPaidMutation = useMutation({
-    mutationFn: () => postAdminMarkPaid(tenantId!, { period_start: periodStart, period_end: periodEnd }),
-    onSuccess: (count) => {
-      toast.success(`Marked ${count} order(s) as paid.`);
-      invalidateBusiness();
-    },
-    onError: (e) => {
-      toast.error(e instanceof AxiosError ? e.response?.data?.message ?? 'Request failed' : 'Request failed');
+      toast.error(e instanceof AxiosError ? (e.response?.data?.message as string) ?? 'Update failed' : 'Update failed');
     },
   });
 
@@ -211,9 +203,12 @@ export default function AdminBusinessDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Period & actions</CardTitle>
+          <CardTitle className="text-base">Period & report</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Filter commissionable orders and run billing actions for the selected inclusive date range.
+            Choose the date range for the table below. Set each order&apos;s commission status with the dropdown
+            (Unpaid → Billed → Paid, or back to Unpaid if you need to fix a mistake). Use{' '}
+            <span className="font-medium text-foreground">Generate report</span> when you want a saved snapshot for
+            invoicing.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -242,32 +237,10 @@ export default function AdminBusinessDetailPage() {
                 }}
               />
             </div>
-          </div>
-          {!periodValid ? (
-            <p className="text-sm text-destructive">&quot;To&quot; must be on or after &quot;From&quot;.</p>
-          ) : null}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={!periodValid || markBilledMutation.isPending}
-              onClick={() => markBilledMutation.mutate()}
-            >
-              {markBilledMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
-              Mark as billed
-            </Button>
-            <Button
-              type="button"
-              variant="default"
-              disabled={!periodValid || markPaidMutation.isPending}
-              onClick={() => markPaidMutation.mutate()}
-            >
-              {markPaidMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
-              Mark as paid
-            </Button>
             <Button
               type="button"
               variant="outline"
+              className="mt-auto"
               disabled={!periodValid || generateReportMutation.isPending}
               onClick={() => generateReportMutation.mutate()}
             >
@@ -275,6 +248,9 @@ export default function AdminBusinessDetailPage() {
               Generate report
             </Button>
           </div>
+          {!periodValid ? (
+            <p className="text-sm text-destructive">&quot;To&quot; must be on or after &quot;From&quot;.</p>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -282,12 +258,12 @@ export default function AdminBusinessDetailPage() {
         <CardHeader>
           <CardTitle className="text-base">Commissionable orders</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Orders placed by AI while no human had replied in the thread (5% commission).
+            Orders placed by AI while no human had replied in the thread (5% commission). Edit status per row.
           </p>
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[800px] text-sm">
+            <table className="w-full min-w-[880px] text-sm">
               <thead>
                 <tr className="border-b border-border bg-muted/40 text-left">
                   <th className="px-4 py-3 font-medium">Order ID</th>
@@ -296,7 +272,7 @@ export default function AdminBusinessDetailPage() {
                   <th className="px-4 py-3 font-medium text-right">Order total</th>
                   <th className="px-4 py-3 font-medium text-right">Commission</th>
                   <th className="px-4 py-3 font-medium">Date</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">Commission status</th>
                 </tr>
               </thead>
               <tbody>
@@ -332,7 +308,29 @@ export default function AdminBusinessDetailPage() {
                         {new Date(o.created_at).toLocaleString()}
                       </td>
                       <td className="px-4 py-3">
-                        <Badge variant={commissionBadgeVariant(o.commission_status)}>{o.commission_status}</Badge>
+                        <div className="flex items-center gap-2">
+                          <select
+                            className={selectClass}
+                            value={o.commission_status}
+                            disabled={updatingOrderId === o.id}
+                            aria-label={`Commission status for order ${o.id}`}
+                            onChange={(e) => {
+                              const commission_status = e.target.value as CommissionableOrderRow['commission_status'];
+                              if (commission_status !== o.commission_status) {
+                                patchCommissionMutation.mutate({ orderId: o.id, commission_status });
+                              }
+                            }}
+                          >
+                            {COMMISSION_STATUS_OPTIONS.map((s) => (
+                              <option key={s} value={s}>
+                                {s.charAt(0).toUpperCase() + s.slice(1)}
+                              </option>
+                            ))}
+                          </select>
+                          {updatingOrderId === o.id ? (
+                            <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden />
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))

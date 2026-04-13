@@ -13,6 +13,8 @@ import {
   adminGenerateReportBodySchema,
   adminMarkCommissionPeriodBodySchema,
   adminPeriodQueryRequiredSchema,
+  adminReportIdParamsSchema,
+  adminReportStatusPatchBodySchema,
 } from '../validators/admin';
 import * as adminTenantController from '../controllers/adminTenantController';
 import * as adminAuthController from '../controllers/adminAuthController';
@@ -31,6 +33,17 @@ ownerRoutes.get(
   '/commission-reports',
   validateQuery(adminBusinessListQuerySchema),
   adminCommissionController.listCommissionReportsAll,
+);
+ownerRoutes.patch(
+  '/commission-reports/:reportId',
+  validateParams(adminReportIdParamsSchema),
+  validateBody(adminReportStatusPatchBodySchema),
+  adminCommissionController.patchCommissionReport,
+);
+ownerRoutes.delete(
+  '/commission-reports/:reportId',
+  validateParams(adminReportIdParamsSchema),
+  adminCommissionController.destroyCommissionReport,
 );
 ownerRoutes.get(
   '/businesses',

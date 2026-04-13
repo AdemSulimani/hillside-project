@@ -4,6 +4,8 @@ import {
   listCommissionReportsForTenant,
   createCommissionReport,
   listAllCommissionReportsPage,
+  updateCommissionReportStatusById,
+  deleteCommissionReportById,
 } from '../db/models/commissionReport';
 import {
   findOrderById,
@@ -30,6 +32,7 @@ import type {
   AdminCommissionStatusPatchBody,
   AdminPeriodQueryRequired,
   AdminMarkCommissionPeriodBody,
+  AdminReportStatusPatchBody,
 } from '../validators/admin';
 
 function utcMonthBounds(reference: Date): { start: Date; endExclusive: Date } {
@@ -287,5 +290,38 @@ export async function markPaidForPeriod(req: Request, res: Response): Promise<vo
     sendSuccess(res, { updated_count: updatedCount }, 'Orders marked as paid for the selected period');
   } catch (err) {
     sendError(res, 'Failed to mark orders as paid', 500, err);
+  }
+}
+
+export async function patchCommissionReport(req: Request, res: Response): Promise<void> {
+  try {
+    const { reportId } = (req.validated?.params ?? req.params) as { reportId: string };
+    const { status } = req.body as AdminReportStatusPatchBody;
+
+    const updated = await updateCommissionReportStatusById(reportId, status);
+    if (!updated) {
+      sendError(res, 'Commission report not found', 404);
+      return;
+    }
+
+    sendSuccess(res, { report: updated }, 'Commission report updated successfully');
+  } catch (err) {
+    sendError(res, 'Failed to update commission report', 500, err);
+  }
+}
+
+export async function destroyCommissionReport(req: Request, res: Response): Promise<void> {
+  try {
+    const { reportId } = (req.validated?.params ?? req.params) as { reportId: string };
+
+    const deleted = await deleteCommissionReportById(reportId);
+    if (!deleted) {
+      sendError(res, 'Commission report not found', 404);
+      return;
+    }
+
+    sendSuccess(res, { deleted: true }, 'Commission report deleted successfully');
+  } catch (err) {
+    sendError(res, 'Failed to delete commission report', 500, err);
   }
 }
