@@ -106,7 +106,6 @@ function getScopesForType(type: 'facebook' | 'instagram'): string {
       'instagram_manage_messages',
       'pages_show_list',
       'pages_manage_metadata',
-      'pages_read_engagement',
       'pages_messaging',
     ].join(',');
   }
@@ -117,7 +116,6 @@ function getScopesForType(type: 'facebook' | 'instagram'): string {
     'instagram_manage_messages',
     'pages_show_list',
     'pages_manage_metadata',
-    'pages_read_engagement',
     'pages_messaging',
   ].join(',');
 }
