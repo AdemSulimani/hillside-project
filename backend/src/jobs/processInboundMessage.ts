@@ -49,9 +49,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     external_id: normalized.contactExternalId,
     name: normalized.contactName,
     avatar_url: normalized.contactAvatarUrl,
-    metadata: {
-      raw_payload_contact: normalized.rawPayload,
-    },
+    metadata: {},
   });
 
   const conversation = await upsertConversation({
