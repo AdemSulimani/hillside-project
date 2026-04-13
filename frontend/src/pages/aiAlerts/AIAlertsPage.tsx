@@ -13,7 +13,8 @@ import {
 } from '@/api/aiAlertsApi';
 import { orderChannelIcon } from '@/components/orders/orderChannelIcon';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Dialog,
@@ -223,9 +224,12 @@ export default function AIAlertsPage() {
                         )}
                       </blockquote>
                       <div className="flex flex-wrap gap-2">
-                        <Button type="button" size="sm" variant="secondary" asChild>
-                          <Link to={`/inbox?c=${alert.conversation_id}`}>View Conversation</Link>
-                        </Button>
+                        <Link
+                          to={`/inbox?c=${alert.conversation_id}`}
+                          className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }))}
+                        >
+                          View Conversation
+                        </Link>
                         {alert.status === 'unread' ? (
                           <Button
                             type="button"

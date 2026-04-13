@@ -1,5 +1,9 @@
+import type { PoolClient } from 'pg';
 import pool from '../pool';
-import { findConversationByIdForTenant } from './conversation';
+import {
+  findConversationByIdForTenant,
+  setConversationFullyAiHandled,
+} from './conversation';
 import { findContactById } from './contact';
 import { findChannelById, type Channel, type ChannelType } from './channel';
 
@@ -10,6 +14,8 @@ export type OrderStatus =
   | 'shipped'
   | 'delivered'
   | 'cancelled';
+
+export type CommissionStatus = 'unpaid' | 'billed' | 'paid';
 
 export interface Order {
   id: string;
@@ -27,6 +33,9 @@ export interface Order {
   delivery_address: string | null;
   notes: string | null;
   detected_by: string;
+  commission_amount: number | null;
+  is_commissionable: boolean;
+  commission_status: CommissionStatus;
   created_at: Date;
   updated_at: Date;
 }
@@ -46,6 +55,9 @@ export interface CreateOrderInput {
   delivery_address?: string | null;
   notes?: string | null;
   detected_by?: string;
+  is_commissionable?: boolean;
+  commission_amount?: number | null;
+  commission_status?: CommissionStatus;
 }
 
 export type OrderListSortColumn =
@@ -82,6 +94,9 @@ export interface OrderWithRelations extends Order {
     status: string;
     last_message_at: Date;
     human_override_until: Date | null;
+    ai_paused: boolean;
+    fully_ai_handled: boolean;
+    human_replied: boolean;
     created_at: Date;
     updated_at: Date;
   };
@@ -105,9 +120,10 @@ export interface UpdateDraftOrderInput {
   notes?: string | null;
 }
 
-type OrderRow = Omit<Order, 'unit_price' | 'total_price'> & {
+type OrderRow = Omit<Order, 'unit_price' | 'total_price' | 'commission_amount'> & {
   unit_price: string | number;
   total_price: string | number;
+  commission_amount: string | number | null;
 };
 
 function rowToOrder(row: OrderRow): Order {
@@ -115,16 +131,26 @@ function rowToOrder(row: OrderRow): Order {
     ...row,
     unit_price: Number(row.unit_price),
     total_price: Number(row.total_price),
+    commission_amount:
+      row.commission_amount !== null && row.commission_amount !== undefined
+        ? Number(row.commission_amount)
+        : null,
+    is_commissionable: row.is_commissionable ?? false,
+    commission_status: (row.commission_status as CommissionStatus) ?? 'unpaid',
   };
 }
 
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
   const qty = input.quantity ?? 1;
+  const isCommissionable = input.is_commissionable ?? false;
+  const commissionAmount = input.commission_amount ?? null;
+  const commissionStatus = input.commission_status ?? 'unpaid';
   const { rows } = await pool.query<OrderRow>(
     `INSERT INTO orders (
       tenant_id, conversation_id, contact_id, product_id, product_name, quantity,
-      unit_price, total_price, status, customer_name, customer_phone, delivery_address, notes, detected_by
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      unit_price, total_price, status, customer_name, customer_phone, delivery_address, notes, detected_by,
+      is_commissionable, commission_amount, commission_status
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
     RETURNING *`,
     [
       input.tenant_id,
@@ -141,6 +167,9 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
       input.delivery_address ?? null,
       input.notes ?? null,
       input.detected_by ?? 'ai',
+      isCommissionable,
+      commissionAmount,
+      commissionStatus,
     ],
   );
   return rowToOrder(rows[0]);
@@ -276,14 +305,110 @@ export async function updateOrderStatusForTenant(
   id: string,
   tenantId: string,
   status: OrderStatus,
+  client: PoolClient | typeof pool = pool,
 ): Promise<Order | null> {
-  const { rows } = await pool.query<OrderRow>(
+  const { rows } = await client.query<OrderRow>(
     `UPDATE orders SET status = $3, updated_at = now()
      WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
     [id, tenantId, status],
   );
   return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+/**
+ * Confirms an order and, when applicable, marks the conversation as fully AI-handled.
+ */
+export async function confirmOrderForTenant(id: string, tenantId: string): Promise<Order | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query<OrderRow>(
+      `UPDATE orders
+       SET status = 'confirmed', updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND status NOT IN ('confirmed', 'cancelled')
+       RETURNING *`,
+      [id, tenantId],
+    );
+
+    const row = rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    if (row.is_commissionable) {
+      await setConversationFullyAiHandled(row.conversation_id, tenantId, client);
+    }
+
+    await client.query('COMMIT');
+    return rowToOrder(row);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function findOrderById(id: string): Promise<Order | null> {
+  const { rows } = await pool.query<OrderRow>('SELECT * FROM orders WHERE id = $1 LIMIT 1', [id]);
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+export async function updateOrderCommissionStatusById(
+  orderId: string,
+  commissionStatus: CommissionStatus,
+): Promise<Order | null> {
+  const { rows } = await pool.query<OrderRow>(
+    `UPDATE orders
+     SET commission_status = $2, updated_at = now()
+     WHERE id = $1 AND is_commissionable = true
+     RETURNING *`,
+    [orderId, commissionStatus],
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+const COMMISSIONABLE_ORDER_STATUSES_SQL = "('confirmed', 'processing', 'shipped', 'delivered')";
+
+export async function markOrdersCommissionBilledInPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+): Promise<number> {
+  const result = await pool.query(
+    `UPDATE orders
+     SET commission_status = 'billed', updated_at = now()
+     WHERE tenant_id = $1
+       AND is_commissionable = true
+       AND commission_status = 'unpaid'
+       AND status IN ${COMMISSIONABLE_ORDER_STATUSES_SQL}
+       AND created_at >= $2::timestamptz
+       AND created_at < $3::timestamptz`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
+}
+
+export async function markOrdersCommissionPaidInPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+): Promise<number> {
+  const result = await pool.query(
+    `UPDATE orders
+     SET commission_status = 'paid', updated_at = now()
+     WHERE tenant_id = $1
+       AND is_commissionable = true
+       AND commission_status = 'billed'
+       AND status IN ${COMMISSIONABLE_ORDER_STATUSES_SQL}
+       AND created_at >= $2::timestamptz
+       AND created_at < $3::timestamptz`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
 }
 
 export async function updateDraftOrderForTenant(

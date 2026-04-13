@@ -202,6 +202,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     const unitPrice = matchedProduct ? Number(matchedProduct.price) : 0;
     const totalPrice = unitPrice * quantity;
 
+    const { rows: humanRows } = await pool.query<{ human_replied: boolean }>(
+      'SELECT human_replied FROM conversations WHERE id = $1 LIMIT 1',
+      [conversationId],
+    );
+    const humanReplied = humanRows[0]?.human_replied === true;
+    const isCommissionable = !humanReplied;
+    const commissionAmount = isCommissionable
+      ? Math.round(totalPrice * 0.05 * 100) / 100
+      : null;
+
     const meta = contact.metadata ?? {};
     const phoneRaw = meta.phone ?? meta.phone_number ?? meta.phoneNumber;
     const customerPhone =
@@ -222,6 +232,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       delivery_address: intent.delivery_address,
       notes: null,
       detected_by: 'ai',
+      is_commissionable: isCommissionable,
+      commission_amount: commissionAmount,
     });
 
     void logEvent(tenantId, 'order_created', {
