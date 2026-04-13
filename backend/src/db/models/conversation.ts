@@ -11,6 +11,8 @@ export interface Conversation {
   last_message_at: Date;
   human_override_until: Date | null;
   ai_paused: boolean;
+  fully_ai_handled: boolean;
+  human_replied: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -104,6 +106,32 @@ export async function setConversationAiPaused(
   return rows[0] ?? null;
 }
 
+export async function markConversationHumanReplied(
+  conversationId: string,
+  tenantId: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET human_replied = true, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [conversationId, tenantId],
+  );
+}
+
+export async function setConversationFullyAiHandled(
+  conversationId: string,
+  tenantId: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET fully_ai_handled = true, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [conversationId, tenantId],
+  );
+}
+
 export async function toggleAiPaused(
   id: string,
   tenantId: string,
@@ -143,6 +171,8 @@ export async function findPausedConversationsByTenant(
        c.last_message_at,
        c.human_override_until,
        c.ai_paused,
+       c.fully_ai_handled,
+       c.human_replied,
        c.created_at,
        c.updated_at,
        ct.name AS contact_name,
@@ -189,6 +219,8 @@ export async function listConversationsForContactForTenant(
        c.last_message_at,
        c.human_override_until,
        c.ai_paused,
+       c.fully_ai_handled,
+       c.human_replied,
        c.created_at,
        c.updated_at,
        ch.type AS channel_type,

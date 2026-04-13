@@ -63,6 +63,26 @@ export async function findChannelsByTenant(tenantId: string): Promise<Channel[]>
   return rows;
 }
 
+/** Safe fields for platform admin UI (no tokens). */
+export interface ChannelAdminSummary {
+  id: string;
+  type: ChannelType;
+  name: string;
+  webhook_verified: boolean;
+  ai_enabled: boolean;
+}
+
+export async function listChannelSummariesForTenant(tenantId: string): Promise<ChannelAdminSummary[]> {
+  const { rows } = await pool.query<ChannelAdminSummary>(
+    `SELECT id, type, name, webhook_verified, ai_enabled
+     FROM channels
+     WHERE tenant_id = $1
+     ORDER BY created_at DESC`,
+    [tenantId],
+  );
+  return rows;
+}
+
 export async function findChannelByExternalId(
   tenantId: string,
   type: ChannelType,

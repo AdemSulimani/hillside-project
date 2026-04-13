@@ -63,6 +63,9 @@ function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessage {
       raw.sent_by === 'ai' || raw.sent_by === 'human' ? raw.sent_by : 'customer',
     ai_processed: Boolean(raw.ai_processed),
     created_at: String(raw.created_at ?? ''),
+    quality_score: raw.quality_score != null ? Number(raw.quality_score) : null,
+    flagged: Boolean(raw.flagged),
+    flag_reason: raw.flag_reason != null ? String(raw.flag_reason) : null,
   };
 }
 

@@ -5,6 +5,7 @@ import { createMessage } from '../db/models/message';
 import {
   updateConversationStatus,
   touchConversationLastMessageAt,
+  markConversationHumanReplied,
 } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
 import { sendMessage } from '../services/channelSenderService';
@@ -128,6 +129,8 @@ export async function reply(req: Request, res: Response): Promise<void> {
       sendError(res, 'Contact not found', 404);
       return;
     }
+
+    await markConversationHumanReplied(id, tenantId);
 
     const messageType =
       attachmentUrls.length > 0 && !trimmedText ? 'image' : 'text';

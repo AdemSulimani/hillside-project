@@ -1,9 +1,11 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
+import AdminProtectedRoute from '@/components/auth/AdminProtectedRoute';
 import PublicOnlyRoute from '@/components/auth/PublicOnlyRoute';
 import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
+import AdminLayout from '@/components/layouts/AdminLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
 const HomePage = lazy(() => import('@/pages/Home'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
@@ -23,12 +25,29 @@ const FeedbackPage = lazy(() => import('@/pages/feedback/FeedbackPage'));
 const AIAlertsPage = lazy(() => import('@/pages/aiAlerts/AIAlertsPage'));
 const StatisticsPage = lazy(() => import('@/pages/statistics/StatisticsPage'));
 const ChatbotControlPage = lazy(() => import('@/pages/chatbotControl/ChatbotControlPage'));
+const AdminLoginPage = lazy(() => import('@/pages/admin/AdminLoginPage'));
+const AdminDashboardPage = lazy(() => import('@/pages/admin/AdminDashboardPage'));
+const AdminBusinessesPage = lazy(() => import('@/pages/admin/AdminBusinessesPage'));
+const AdminBusinessDetailPage = lazy(() => import('@/pages/admin/AdminBusinessDetailPage'));
+const AdminCommissionReportsPage = lazy(() => import('@/pages/admin/AdminCommissionReportsPage'));
 
 export default function App() {
   return (
     <Suspense fallback={<FullPageRouteFallback />}>
       <Routes>
         <Route path="/" element={<HomePage />} />
+
+        <Route path="/admin/login" element={<AdminLoginPage />} />
+
+        <Route element={<AdminProtectedRoute />}>
+          <Route path="/admin" element={<AdminLayout />}>
+            <Route index element={<Navigate to="/admin/dashboard" replace />} />
+            <Route path="dashboard" element={<AdminDashboardPage />} />
+            <Route path="businesses" element={<AdminBusinessesPage />} />
+            <Route path="businesses/:tenantId" element={<AdminBusinessDetailPage />} />
+            <Route path="commission-reports" element={<AdminCommissionReportsPage />} />
+          </Route>
+        </Route>
 
         <Route element={<PublicOnlyRoute />}>
           <Route path="/login" element={<LoginPage />} />

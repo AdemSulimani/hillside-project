@@ -5,6 +5,7 @@ import {
   updateDraftOrderForTenant,
   updateOrderStatusForTenant,
   findOrderByIdForTenant,
+  confirmOrderForTenant,
 } from '../db/models/order';
 import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import { logEvent } from '../services/analyticsService';
@@ -72,7 +73,7 @@ export async function confirm(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const order = await updateOrderStatusForTenant(id, tenantId, 'confirmed');
+    const order = await confirmOrderForTenant(id, tenantId);
     if (!order) {
       sendError(res, 'Order not found', 404);
       return;
