@@ -67,8 +67,9 @@ export default function TermsOfServicePage() {
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">5. Third-Party Platform Terms (Meta)</h2>
           <p>
-            Our integrations with Facebook, Instagram, and WhatsApp are subject to Meta terms and policies. You are
-            responsible for complying with all applicable Meta requirements for your use case.
+            Our integrations with Facebook, Instagram, and WhatsApp Business (including the WhatsApp Business Platform /
+            Cloud API) are subject to Meta terms and policies. You are responsible for complying with all applicable Meta
+            requirements for your use case.
           </p>
           <p>
             If Meta changes APIs, permissions, or policies, you agree to cooperate with reasonable implementation
