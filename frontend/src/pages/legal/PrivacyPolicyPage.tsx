@@ -33,7 +33,7 @@ export default function PrivacyPolicyPage() {
             </li>
             <li>
               <strong>Connected channel data:</strong> Page IDs, Instagram account IDs, WhatsApp phone number IDs,
-              and encrypted access credentials.
+              encrypted channel access tokens, and related connection metadata.
             </li>
             <li>
               <strong>Message and conversation data:</strong> inbound/outbound content, attachments, sender platform
@@ -145,7 +145,6 @@ export default function PrivacyPolicyPage() {
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">10. Data Deletion Requests</h2>
           <p>You can request deletion by contacting [privacy@yourdomain.com].</p>
-          <p>We may also provide in-app deletion tools where available.</p>
           <p>
             If you are an end customer messaging a business that uses our platform, you may contact that business
             directly, or contact us and we will assist where applicable.
