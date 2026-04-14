@@ -5,6 +5,7 @@ import { useAdminAuthStore } from '@/store/adminAuthStore';
 import { Button } from '@/components/ui/button';
 import { CRMRouteFallback } from '@/components/layouts/RouteFallback';
 import AdminSidebar from '@/components/layouts/AdminSidebar';
+import LegalFooter from '@/components/layouts/LegalFooter';
 import { useAppStore } from '@/store/app';
 
 export default function AdminLayout() {
@@ -49,6 +50,7 @@ export default function AdminLayout() {
           <Suspense fallback={<CRMRouteFallback />}>
             <Outlet />
           </Suspense>
+          <LegalFooter />
         </main>
       </div>
     </div>

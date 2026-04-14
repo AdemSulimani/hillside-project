@@ -8,6 +8,8 @@ import CRMLayout from '@/components/layouts/CRMLayout';
 import AdminLayout from '@/components/layouts/AdminLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
 const HomePage = lazy(() => import('@/pages/Home'));
+const PrivacyPolicyPage = lazy(() => import('@/pages/legal/PrivacyPolicyPage'));
+const TermsOfServicePage = lazy(() => import('@/pages/legal/TermsOfServicePage'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('@/pages/auth/RegisterPage'));
 const OnboardingPage = lazy(() => import('@/pages/onboarding/OnboardingPage'));
@@ -36,6 +38,8 @@ export default function App() {
     <Suspense fallback={<FullPageRouteFallback />}>
       <Routes>
         <Route path="/" element={<HomePage />} />
+        <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
+        <Route path="/terms-of-service" element={<TermsOfServicePage />} />
 
         <Route path="/admin/login" element={<AdminLoginPage />} />
 
