@@ -6,6 +6,7 @@ import { useOrderCreatedToast } from '@/hooks/useOrderCreatedToast';
 import { useAiAlertToast } from '@/hooks/useAiAlertToast';
 import Sidebar from './Sidebar';
 import Header from './Header';
+import LegalFooter from './LegalFooter';
 
 function CrmRealtimeListeners() {
   useOrderCreatedToast();
@@ -26,6 +27,7 @@ export default function CRMLayout() {
             <Suspense fallback={<CRMRouteFallback />}>
               <Outlet />
             </Suspense>
+            <LegalFooter />
           </main>
         </div>
       </div>

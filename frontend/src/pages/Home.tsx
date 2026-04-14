@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import api from '@/lib/api';
 import type { ApiResponse } from '@/types';
 import { Button } from '@/components/ui/button';
+import LegalFooter from '@/components/layouts/LegalFooter';
 
 interface HealthData {
   status: string;
@@ -68,6 +69,10 @@ export default function HomePage() {
           </p>
         </div>
       )}
+
+      <div className="w-full max-w-md">
+        <LegalFooter />
+      </div>
     </div>
   );
 }
