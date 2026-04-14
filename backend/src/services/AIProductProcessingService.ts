@@ -1,4 +1,4 @@
-import Groq from 'groq-sdk';
+import OpenAI from 'openai';
 import type { ExtractedProductData } from './documents/AttachDocumentService';
 
 const SYSTEM_PROMPT = `You are a product data extraction assistant. Given raw text extracted from a document or image, identify and structure product information.
@@ -18,16 +18,16 @@ Rules:
 - If no products can be identified, return an empty array []`;
 
 export class AIProductProcessingService {
-  private client: Groq;
+  private client: OpenAI;
   private model: string;
 
   constructor() {
-    const apiKey = process.env.GROQ_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      throw new Error('GROQ_API_KEY environment variable is required');
+      throw new Error('OPENAI_API_KEY environment variable is required');
     }
-    this.client = new Groq({ apiKey });
-    this.model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    this.client = new OpenAI({ apiKey });
+    this.model = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
   }
 
   async extractProducts(rawText: string): Promise<ExtractedProductData[]> {

@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { ensureAIConfigForTenant, updateAIConfig } from '../db/models/aiConfig';
 import { findTenantById } from '../db/models/tenant';
 import { searchProducts, type Product } from '../db/models/product';
-import { groq, GROQ_MODEL } from '../services/groqClient';
+import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
 import { sendSuccess, sendError } from '../utils/response';
 import type { TestAIConfigInput } from '../validators/aiConfig';
 
@@ -54,9 +54,9 @@ export async function test(req: Request, res: Response): Promise<void> {
     };
 
     const systemPrompt = buildTestSystemPrompt(tenant.name, config, products);
-    const model = config.custom_model_id || GROQ_MODEL;
+    const model = config.custom_model_id || OPENAI_CHAT_MODEL;
 
-    const completion = await groq.chat.completions.create({
+    const completion = await openai.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: systemPrompt },

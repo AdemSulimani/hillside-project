@@ -7,7 +7,7 @@ Use this list before and after shipping Hillside CRM to production. Adjust hostn
 - **PostgreSQL** 16+ with extensions used by migrations (including `pgcrypto`, `vector` where applicable).
 - **Redis** 7+ for BullMQ queues and rate limiting.
 - **Node.js** 22 LTS (or run the provided **Docker** images).
-- **Meta / Groq** credentials as required by your channels and AI features.
+- **Meta / OpenAI** credentials as required by your channels and AI features.
 - **Sentry** project (optional but recommended) for backend error monitoring.
 
 ## Configuration
@@ -15,7 +15,7 @@ Use this list before and after shipping Hillside CRM to production. Adjust hostn
 1. **Backend environment** — Copy `backend/.env.example` to `backend/.env` (or inject the same keys via your secret manager). Ensure at least:
    - `DATABASE_URL`, `REDIS_URL`
    - `JWT_SECRET`, `JWT_REFRESH_SECRET`
-   - `GROQ_API_KEY` (and embedding-related vars if you use product search embeddings)
+   - `OPENAI_API_KEY` (and embedding-related vars if you use product search embeddings)
    - `FRONTEND_URL` (exact browser origin, e.g. `https://app.example.com`)
    - `BACKEND_URL` (public API base used for attachment URLs, e.g. `https://api.example.com`)
    - `META_*`, `WEBHOOK_VERIFY_TOKEN`, `ENCRYPTION_KEY` for Meta channels
@@ -41,7 +41,7 @@ Use this list before and after shipping Hillside CRM to production. Adjust hostn
 1. Deploy the **backend** process (or container) with `NODE_ENV=production`.
 2. Deploy **BullMQ workers** if they run as a separate process in your setup (this repo starts workers from `server.ts` in the same Node process).
 3. Deploy the **frontend** static build behind **CDN or Nginx** with SPA fallback (`try_files … /index.html`).
-4. Configure **health checks** (e.g. HTTP `GET /api/health` and `npm run healthcheck` in CI for DB/Redis/Groq smoke tests).
+4. Configure **health checks** (e.g. HTTP `GET /api/health` and `npm run healthcheck` in CI for DB/Redis/OpenAI smoke tests).
 
 ## Webhooks and Meta
 

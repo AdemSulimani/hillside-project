@@ -1,11 +1,8 @@
 import { findTenantById } from '../db/models/tenant';
-import { groq } from './groqClient';
-
-const DEFAULT_EVAL_MODEL = 'meta-llama/llama-3.1-8b-instant';
+import { openai, OPENAI_EVAL_MODEL } from './openaiClient';
 
 function evalModel(): string {
-  const fromEnv = process.env.GROQ_EVAL_MODEL?.trim();
-  return fromEnv || DEFAULT_EVAL_MODEL;
+  return process.env.OPENAI_EVAL_MODEL?.trim() || OPENAI_EVAL_MODEL;
 }
 
 export const FLAG_REASON_VALUES = [
@@ -86,7 +83,7 @@ function parseEvaluationJson(raw: string): ReplyQualityEvaluation {
 }
 
 /**
- * Lightweight Groq call: judges whether the outbound AI reply fits the business context
+ * Lightweight OpenAI call: judges whether the outbound AI reply fits the business context
  * and the customer's question. Returns null if evaluation could not be completed.
  */
 export async function evaluateReply(
@@ -135,7 +132,7 @@ ${inbound || '(no text; attachments or images may have been sent)'}
 AI reply to evaluate:
 ${reply}`;
 
-    const completion = await groq.chat.completions.create({
+    const completion = await openai.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: systemPrompt },
