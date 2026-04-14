@@ -1,4 +1,4 @@
-import { groq, GROQ_MODEL, VISION_MODEL } from './groqClient';
+import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
 import { searchProducts, searchProductsBySimilarity, type Product } from '../db/models/product';
@@ -250,19 +250,19 @@ export async function generateReply(
   const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage, attachmentUrls);
 
   const model = hasImages
-    ? VISION_MODEL
-    : (config.custom_model_id || GROQ_MODEL);
+    ? OPENAI_VISION_MODEL
+    : (config.custom_model_id || OPENAI_CHAT_MODEL);
 
-  const completion = await groq.chat.completions.create({
+  const completion = await openai.chat.completions.create({
     model,
-    messages: messages as Parameters<typeof groq.chat.completions.create>[0]['messages'],
+    messages: messages as Parameters<typeof openai.chat.completions.create>[0]['messages'],
     temperature: 0.7,
     max_tokens: 1024,
   });
 
   const reply = completion.choices[0]?.message?.content;
   if (!reply) {
-    throw new Error('Groq returned an empty response');
+    throw new Error('OpenAI returned an empty response');
   }
 
   return reply.trim();

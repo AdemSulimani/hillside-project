@@ -124,7 +124,7 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
 
           <div className="flex items-center justify-between rounded-lg border px-3 py-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">Use AI (Groq)</Label>
+              <Label className="text-sm font-medium">Use AI (OpenAI)</Label>
               <p className="text-xs text-muted-foreground">
                 Improve structuring when a valid API key is configured on the server.
               </p>

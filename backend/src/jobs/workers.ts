@@ -5,6 +5,7 @@ import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
 import { processGenerateProductEmbedding, type GenerateProductEmbeddingJobData } from './generateProductEmbedding';
 import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
+import { checkFinetuningStatus, startFinetuningJob } from './checkFinetuningStatus';
 import { processNotificationJob } from './processNotificationJob';
 import { attachWorkerFailureHandler } from './failureHandler';
 
@@ -41,6 +42,14 @@ export const finetuningWorker = new Worker(
   async (job) => {
     if (job.name === 'prepareFinetuning') {
       await processPrepareFinetuning();
+      return;
+    }
+    if (job.name === 'startFinetuning') {
+      await startFinetuningJob(job.data as { tenantId: string; filePath: string });
+      return;
+    }
+    if (job.name === 'checkFinetuningStatus') {
+      await checkFinetuningStatus(job.data as { tenantId: string; fineTuningJobId: string });
       return;
     }
     console.warn('[jobs] finetuning queue: unknown job name', { name: job.name, id: job.id });

@@ -16,6 +16,10 @@ import {
 import { finetuningQueue } from './queues';
 
 export type PrepareFinetuningJobData = Record<string, never>;
+export interface StartFinetuningJobData {
+  tenantId: string;
+  filePath: string;
+}
 
 export type FinetuningChatRole = 'system' | 'user' | 'assistant';
 
@@ -217,6 +221,16 @@ export async function processPrepareFinetuning(): Promise<void> {
       path: filepath,
       rows: includedIds.length,
     });
+
+    await finetuningQueue.add(
+      'startFinetuning',
+      { tenantId, filePath: filepath },
+      {
+        attempts: 3,
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 100 },
+      },
+    );
   }
 }
 

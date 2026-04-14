@@ -1,5 +1,5 @@
 # Local full stack: Postgres, Redis, API, SPA (Nginx).
-# Requires backend/.env (copy from backend/.env.example) with JWT_*, GROQ_API_KEY, ENCRYPTION_KEY, etc.
+# Requires backend/.env (copy from backend/.env.example) with JWT_*, OPENAI_API_KEY, ENCRYPTION_KEY, etc.
 # From repo root: docker compose up --build
 
 services:

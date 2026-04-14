@@ -2,7 +2,7 @@ const REQUIRED = [
   { key: 'DATABASE_URL', description: 'PostgreSQL connection string' },
   { key: 'JWT_SECRET', description: 'Signing secret for access tokens' },
   { key: 'JWT_REFRESH_SECRET', description: 'Signing secret for refresh tokens' },
-  { key: 'GROQ_API_KEY', description: 'Groq API key for AI features' },
+  { key: 'OPENAI_API_KEY', description: 'OpenAI API key for AI features' },
 ] as const;
 
 /**

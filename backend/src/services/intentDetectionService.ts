@@ -1,6 +1,6 @@
 import type { Message } from '../db/models/message';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
-import { groq, GROQ_MODEL } from './groqClient';
+import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
 
 export interface IntentResult {
   intent_score: number;
@@ -63,7 +63,7 @@ function parseIntentJson(raw: string): IntentResult {
 }
 
 /**
- * Detects purchase intent from recent chat messages using the tenant's configured Groq model.
+ * Detects purchase intent from recent chat messages using the tenant's configured OpenAI model.
  */
 export async function detect(
   conversationMessages: Message[],
@@ -81,7 +81,7 @@ export async function detect(
   }
 
   const config = await findAIConfigByTenant(tenantId);
-  const model = config?.custom_model_id || GROQ_MODEL;
+  const model = config?.custom_model_id || OPENAI_CHAT_MODEL;
 
   const systemPrompt = `You analyze customer–business chat transcripts for purchase intent.
 Respond with a single JSON object only (no markdown), matching this shape exactly:
@@ -100,7 +100,7 @@ Rules:
 - delivery_address: shipping or delivery location if stated, else null.
 - is_ready_to_order: true only if the customer has clearly committed to placing an order (e.g. confirmed they want to buy, sent address, or equivalent).`;
 
-  const completion = await groq.chat.completions.create({
+  const completion = await openai.chat.completions.create({
     model,
     messages: [
       { role: 'system', content: systemPrompt },
@@ -116,7 +116,7 @@ Rules:
 
   const content = completion.choices[0]?.message?.content;
   if (!content) {
-    throw new Error('Groq returned an empty intent detection response');
+    throw new Error('OpenAI returned an empty intent detection response');
   }
 
   return parseIntentJson(content.trim());

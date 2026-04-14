@@ -45,9 +45,9 @@ async function checkRedis(): Promise<void> {
   }
 }
 
-async function checkGroq(): Promise<void> {
-  const key = requireEnv('GROQ_API_KEY');
-  const res = await fetch('https://api.groq.com/openai/v1/models', {
+async function checkOpenAI(): Promise<void> {
+  const key = requireEnv('OPENAI_API_KEY');
+  const res = await fetch('https://api.openai.com/v1/models', {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${key}`,
@@ -55,8 +55,8 @@ async function checkGroq(): Promise<void> {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    console.error('[healthcheck] Groq API response:', res.status, body.slice(0, 500));
-    fail(`Groq API reachability check failed with HTTP ${res.status}.`);
+    console.error('[healthcheck] OpenAI API response:', res.status, body.slice(0, 500));
+    fail(`OpenAI API reachability check failed with HTTP ${res.status}.`);
   }
 }
 
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   console.log('[healthcheck] Running checks…');
   await checkDatabase();
   await checkRedis();
-  await checkGroq();
+  await checkOpenAI();
   console.log('[healthcheck] All checks passed.');
 }
 

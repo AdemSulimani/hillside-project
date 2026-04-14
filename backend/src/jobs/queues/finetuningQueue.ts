@@ -1,8 +1,8 @@
 import { Queue } from 'bullmq';
 import { redisConnection } from '../redisConnection';
 
-/** Nightly fine-tuning dataset preparation — long-running, no retries. */
-export const finetuningQueue = new Queue<Record<string, never>, unknown, string>('finetuning', {
+/** Nightly fine-tuning dataset preparation and polling jobs. */
+export const finetuningQueue = new Queue<Record<string, unknown>, unknown, string>('finetuning', {
   connection: redisConnection,
   defaultJobOptions: {
     attempts: 1,

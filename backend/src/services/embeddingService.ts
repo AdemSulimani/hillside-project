@@ -1,22 +1,7 @@
-import axios from 'axios';
-
-const EMBEDDING_API_URL =
-  process.env.EMBEDDING_API_URL || 'https://api.groq.com/openai/v1/embeddings';
-const EMBEDDING_API_KEY =
-  process.env.EMBEDDING_API_KEY || process.env.GROQ_API_KEY || '';
-const EMBEDDING_MODEL =
-  process.env.EMBEDDING_MODEL || 'nomic-embed-text-v1_5';
-
-interface EmbeddingResponse {
-  data: { embedding: number[]; index: number }[];
-  model: string;
-  usage: { prompt_tokens: number; total_tokens: number };
-}
+import { openai, OPENAI_EMBEDDING_MODEL } from './openaiClient';
 
 /**
- * Generates an embedding vector via any OpenAI-compatible embedding endpoint.
- * Configure provider through EMBEDDING_API_URL, EMBEDDING_API_KEY, and
- * EMBEDDING_MODEL environment variables.
+ * Generates an embedding vector with OpenAI embeddings.
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   const input = text.trim();
@@ -24,17 +9,10 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     throw new Error('Cannot generate embedding for empty text');
   }
 
-  const { data } = await axios.post<EmbeddingResponse>(
-    EMBEDDING_API_URL,
-    { model: EMBEDDING_MODEL, input },
-    {
-      headers: {
-        Authorization: `Bearer ${EMBEDDING_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 30_000,
-    },
-  );
+  const data = await openai.embeddings.create({
+    model: process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL,
+    input,
+  });
 
   const vector = data.data?.[0]?.embedding;
   if (!vector || vector.length === 0) {
