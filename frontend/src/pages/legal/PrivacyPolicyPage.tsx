@@ -32,7 +32,8 @@ export default function PrivacyPolicyPage() {
               settings.
             </li>
             <li>
-              <strong>Connected channel data:</strong> Page IDs, Instagram account IDs, WhatsApp phone number IDs,
+              <strong>Connected channel data:</strong> Page IDs, Instagram account IDs, WhatsApp Business phone number
+              IDs,
               encrypted channel access tokens, and related connection metadata.
             </li>
             <li>
@@ -63,25 +64,54 @@ export default function PrivacyPolicyPage() {
           <ul className="list-disc space-y-1 pl-5">
             <li>Directly from you (account setup, onboarding, product setup, support requests).</li>
             <li>
-              From Meta platforms through APIs and webhooks when your connected channels receive customer messages.
+              From Meta platforms (Facebook, Instagram, and WhatsApp Business) through APIs and webhooks when your
+              connected channels receive customer messages.
             </li>
             <li>From your use of our dashboard and platform features.</li>
           </ul>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">4. Why We Process Data</h2>
+          <h2 className="text-xl font-semibold">4. Cookies and Similar Technologies</h2>
+          <p>
+            We use a small number of cookies and similar technologies that are needed to operate the service securely.
+          </p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              <strong>Authentication cookies:</strong> when you sign in, our servers may set an HTTP-only cookie used to
+              refresh your session and keep you signed in according to your &quot;remember me&quot; choice. These
+              cookies are used for security and session management, not for cross-site advertising.
+            </li>
+            <li>
+              <strong>Browser storage (admin tools):</strong> the platform owner admin interface may store an access
+              token in the browser&apos;s local storage so that admin sessions work. This is limited to that part of the
+              product.
+            </li>
+          </ul>
+          <p>
+            We do not use third-party advertising or behavioral tracking cookies in the product as we ship it today. If
+            we add optional analytics or similar technologies later, we will update this policy and provide any
+            controls or notices required by law.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-semibold">5. Why We Process Data</h2>
           <ul className="list-disc space-y-1 pl-5">
             <li>Provide channel connection, inbox, and reply functionality.</li>
             <li>Generate AI replies and assist sales conversations.</li>
             <li>Detect purchase intent and support order workflows.</li>
             <li>Provide analytics, quality monitoring, and service improvements.</li>
+            <li>
+              Prepare model fine-tuning and improve reply quality using AI feedback records (and associated message
+              content where necessary), as described in our subprocessors list.
+            </li>
             <li>Maintain account security, fraud prevention, and customer support.</li>
           </ul>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">5. Legal Basis (EU/UK)</h2>
+          <h2 className="text-xl font-semibold">6. Legal Basis (EU/UK)</h2>
           <p>Where required by law, we rely on one or more of the following legal bases:</p>
           <ul className="list-disc space-y-1 pl-5">
             <li>Performance of a contract.</li>
@@ -92,7 +122,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">6. Meta Platform Data and AI Processing</h2>
+          <h2 className="text-xl font-semibold">7. Meta Platform Data and AI Processing</h2>
           <p>
             We process Meta Platform Data solely to provide messaging, inbox, and automation features requested by our
             users. We do not sell Meta Platform Data and do not use it for unrelated advertising, profiling, or data
@@ -108,7 +138,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">7. How We Share Data</h2>
+          <h2 className="text-xl font-semibold">8. How We Share Data</h2>
           <p>We do not sell personal data.</p>
           <ul className="list-disc space-y-1 pl-5">
             <li>With service providers that operate our platform on our behalf.</li>
@@ -119,10 +149,14 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">8. Data Retention</h2>
+          <h2 className="text-xl font-semibold">9. Data Retention</h2>
           <p>
             We retain data only as long as needed for legitimate business purposes, legal obligations, dispute
             resolution, security, and enforcement of agreements. You can request deletion as described below.
+          </p>
+          <p>
+            We may retain and process AI feedback records (and associated message content where necessary) to prepare
+            model fine-tuning and improve reply quality, as described in our subprocessors list.
           </p>
           <p>
             If you publish specific retention periods elsewhere (for example in contracts or admin docs), those
@@ -131,7 +165,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">9. Your Rights</h2>
+          <h2 className="text-xl font-semibold">10. Your Rights</h2>
           <p>
             Depending on your location, you may have rights to access, correct, delete, restrict, or object to certain
             processing, and to request portability where applicable.
@@ -143,7 +177,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">10. Data Deletion Requests</h2>
+          <h2 className="text-xl font-semibold">11. Data Deletion Requests</h2>
           <p>You can request deletion by contacting [privacy@yourdomain.com].</p>
           <p>
             If you are an end customer messaging a business that uses our platform, you may contact that business
@@ -156,7 +190,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">11. Security</h2>
+          <h2 className="text-xl font-semibold">12. Security</h2>
           <p>
             We use technical and organizational safeguards designed to protect personal data, including encrypted
             transport, access controls, and operational security monitoring.
@@ -168,7 +202,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">12. International Transfers</h2>
+          <h2 className="text-xl font-semibold">13. International Transfers</h2>
           <p>
             We may process data in countries outside your own. Where required, we use appropriate safeguards for
             international transfers, such as contractual protections and legal transfer mechanisms.
@@ -176,7 +210,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">13. Children</h2>
+          <h2 className="text-xl font-semibold">14. Children</h2>
           <p>
             Our service is intended for businesses and is not directed to children under the applicable legal age in
             their jurisdiction.
@@ -184,7 +218,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">14. Changes to This Policy</h2>
+          <h2 className="text-xl font-semibold">15. Changes to This Policy</h2>
           <p>
             We may update this Privacy Policy from time to time. The latest version will always be available at
             [yourdomain.com/privacy-policy] with the effective date shown at the top.
