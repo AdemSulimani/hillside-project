@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 
-const EFFECTIVE_DATE = 'April 14, 2026';
-const LAST_UPDATED = 'April 14, 2026';
+const EFFECTIVE_DATE = 'April 15, 2026';
+const LAST_UPDATED = 'April 15, 2026';
 
 export default function PrivacyPolicyPage() {
   return (
@@ -54,6 +54,11 @@ export default function PrivacyPolicyPage() {
               encrypted channel access tokens, and related connection metadata.
             </li>
             <li>
+              <strong>Order automation and billing event data:</strong> AI order-completion status events, linked
+              business/company identifiers, internal admin completion notifications, and commission calculation records
+              (including configured commission rate, such as 5% where applicable).
+            </li>
+            <li>
               <strong>Message and conversation data:</strong> inbound/outbound content, attachments, sender platform
               identifiers, timestamps, and conversation history.
             </li>
@@ -90,6 +95,10 @@ export default function PrivacyPolicyPage() {
               a linked Facebook Page in our current integration flow, subject to Meta platform requirements and account
               configuration.
             </li>
+            <li>
+              From optional WhatsApp Business integration that you choose to connect, which is processed separately from
+              Facebook and Instagram authorization flows.
+            </li>
             <li>From your use of our dashboard and platform features.</li>
           </ul>
         </section>
@@ -124,6 +133,10 @@ export default function PrivacyPolicyPage() {
             <li>Provide channel connection, inbox, and reply functionality.</li>
             <li>Generate AI replies and assist sales conversations.</li>
             <li>Detect purchase intent and support order workflows.</li>
+            <li>
+              Determine when AI has fully completed an order workflow, trigger internal admin completion notifications,
+              and calculate contract-based commissions (such as 5% where applicable).
+            </li>
             <li>Provide analytics, quality monitoring, and service improvements.</li>
             <li>
               Prepare model fine-tuning and improve reply quality using AI feedback records (and associated message
