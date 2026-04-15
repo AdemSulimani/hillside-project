@@ -21,6 +21,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+/** Graph / Instagram IDs in JSON may be string or number; Meta dashboard tests use 0. */
+function coercePositiveGraphId(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return String(Math.trunc(value));
+  }
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (!s || s === '0') return null;
+    return s;
+  }
+  return null;
+}
+
 function pickMessageType(message: Record<string, unknown>): MessageType {
   if (typeof message.type === 'string') {
     const rawType = message.type.toLowerCase();
@@ -118,18 +132,10 @@ export class WebhookNormalizerService {
     const message =
       (value ? asRecord(value.message) : null) ?? (messagingItem ? asRecord(messagingItem.message) : null);
     const channelExternalId =
-      typeof recipient?.id === 'string'
-        ? recipient.id
-        : typeof entry?.id === 'string'
-          ? entry.id
-          : null;
+      coercePositiveGraphId(entry?.id) ?? coercePositiveGraphId(recipient?.id);
 
     const contactExternalId =
-      typeof sender?.id === 'string'
-        ? sender.id
-        : typeof recipient?.id === 'string'
-          ? recipient.id
-          : null;
+      coercePositiveGraphId(sender?.id) ?? coercePositiveGraphId(recipient?.id);
     const externalMessageId =
       typeof message?.mid === 'string'
         ? message.mid
@@ -167,9 +173,20 @@ export class WebhookNormalizerService {
   }
 
   normalizeFromWhatsApp(payload: Record<string, unknown>): InboundMessageDTO {
+    const normalized = extractMetaMessage(payload);
+    const entry = Array.isArray(payload.entry) ? asRecord(payload.entry[0]) : null;
+    const changes = entry && Array.isArray(entry.changes) ? asRecord(entry.changes[0]) : null;
+    const value = changes ? asRecord(changes.value) : null;
+    const metadata = value ? asRecord(value.metadata) : null;
+    const phoneNumberId =
+      typeof metadata?.phone_number_id === 'string' ? metadata.phone_number_id : null;
+
     return {
       channelType: 'whatsapp',
-      ...extractMetaMessage(payload),
+      ...normalized,
+      // For WhatsApp Cloud API we store channel.external_id as phone_number_id.
+      // Incoming webhook entry.id is usually WABA id, which does not match our channel lookup.
+      channelExternalId: phoneNumberId ?? normalized.channelExternalId,
     };
   }
 }

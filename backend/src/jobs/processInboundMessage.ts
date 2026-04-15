@@ -21,8 +21,25 @@ function normalize(channelType: ChannelType, payload: Record<string, unknown>): 
   return webhookNormalizerService.normalizeFromWhatsApp(payload);
 }
 
+function shouldIgnoreNormalizationError(channelType: ChannelType, err: unknown): boolean {
+  if (channelType !== 'whatsapp' && channelType !== 'instagram') return false;
+  if (!(err instanceof Error)) return false;
+  return err.message.includes('required message identifiers are missing');
+}
+
 export async function processInboundMessage(data: InboundWebhookJobData): Promise<void> {
-  const normalized = normalize(data.channelType, data.payload);
+  let normalized: InboundMessageDTO;
+  try {
+    normalized = normalize(data.channelType, data.payload);
+  } catch (err) {
+    if (shouldIgnoreNormalizationError(data.channelType, err)) {
+      console.info('[inbound] Ignoring non-message webhook event', {
+        channelType: data.channelType,
+      });
+      return;
+    }
+    throw err;
+  }
 
   const existingId = await findMessageIdByExternalMessageId(normalized.externalMessageId);
   if (existingId) {
