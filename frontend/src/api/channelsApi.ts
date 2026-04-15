@@ -9,6 +9,7 @@ function normalizeChannel(raw: Record<string, unknown>): Channel {
     type: String(raw.type) as Channel['type'],
     name: String(raw.name ?? ''),
     external_id: String(raw.external_id ?? ''),
+    connection_method: String(raw.connection_method ?? 'oauth_meta') as Channel['connection_method'],
     webhook_verified: Boolean(raw.webhook_verified),
     ai_enabled: Boolean(raw.ai_enabled),
     metadata:
@@ -37,10 +38,13 @@ export async function toggleChannelAI(id: string): Promise<Channel> {
   return normalizeChannel(data.data!.channel);
 }
 
-export async function getMetaRedirectUrl(type: 'facebook' | 'instagram'): Promise<string> {
-  const { data } = await api.get<ApiResponse<{ url: string }>>('/oauth/meta/redirect', {
-    params: { type },
-  });
+export async function getMetaRedirectUrl(): Promise<string> {
+  const { data } = await api.get<ApiResponse<{ url: string }>>('/oauth/meta/redirect');
+  return data.data!.url;
+}
+
+export async function getInstagramRedirectUrl(): Promise<string> {
+  const { data } = await api.get<ApiResponse<{ url: string }>>('/oauth/instagram/redirect');
   return data.data!.url;
 }
 

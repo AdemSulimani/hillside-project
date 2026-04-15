@@ -1,6 +1,7 @@
 import pool from '../pool';
 
 export type ChannelType = 'facebook' | 'instagram' | 'whatsapp';
+export type ChannelConnectionMethod = 'oauth_meta' | 'oauth_instagram' | 'manual';
 
 export interface Channel {
   id: string;
@@ -9,6 +10,7 @@ export interface Channel {
   name: string;
   external_id: string;
   access_token_encrypted: string;
+  connection_method: ChannelConnectionMethod;
   webhook_verified: boolean;
   ai_enabled: boolean;
   metadata: Record<string, unknown> | null;
@@ -22,6 +24,7 @@ export interface CreateChannelInput {
   name: string;
   external_id: string;
   access_token_encrypted: string;
+  connection_method?: ChannelConnectionMethod;
   webhook_verified?: boolean;
   ai_enabled?: boolean;
   metadata?: Record<string, unknown> | null;
@@ -30,6 +33,7 @@ export interface CreateChannelInput {
 export interface UpdateChannelInput {
   name?: string;
   access_token_encrypted?: string;
+  connection_method?: ChannelConnectionMethod;
   webhook_verified?: boolean;
   ai_enabled?: boolean;
   metadata?: Record<string, unknown> | null;
@@ -37,8 +41,18 @@ export interface UpdateChannelInput {
 
 export async function createChannel(input: CreateChannelInput): Promise<Channel> {
   const { rows } = await pool.query<Channel>(
-    `INSERT INTO channels (tenant_id, type, name, external_id, access_token_encrypted, webhook_verified, ai_enabled, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+    `INSERT INTO channels (
+      tenant_id,
+      type,
+      name,
+      external_id,
+      access_token_encrypted,
+      connection_method,
+      webhook_verified,
+      ai_enabled,
+      metadata
+    )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
      RETURNING *`,
     [
       input.tenant_id,
@@ -46,6 +60,7 @@ export async function createChannel(input: CreateChannelInput): Promise<Channel>
       input.name,
       input.external_id,
       input.access_token_encrypted,
+      input.connection_method ?? 'oauth_meta',
       input.webhook_verified ?? false,
       input.ai_enabled ?? true,
       input.metadata ? JSON.stringify(input.metadata) : null,
@@ -67,6 +82,7 @@ export async function findChannelsByTenant(tenantId: string): Promise<Channel[]>
 export interface ChannelAdminSummary {
   id: string;
   type: ChannelType;
+  connection_method: ChannelConnectionMethod;
   name: string;
   webhook_verified: boolean;
   ai_enabled: boolean;
@@ -74,7 +90,7 @@ export interface ChannelAdminSummary {
 
 export async function listChannelSummariesForTenant(tenantId: string): Promise<ChannelAdminSummary[]> {
   const { rows } = await pool.query<ChannelAdminSummary>(
-    `SELECT id, type, name, webhook_verified, ai_enabled
+    `SELECT id, type, connection_method, name, webhook_verified, ai_enabled
      FROM channels
      WHERE tenant_id = $1
      ORDER BY created_at DESC`,
