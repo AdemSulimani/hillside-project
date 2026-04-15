@@ -150,6 +150,12 @@ export default function LoginPage() {
             </Link>
             .
           </p>
+
+          <p className="text-center text-xs text-muted-foreground">
+            <Link to="/data-deletion" className="hover:text-foreground hover:underline">
+              Data deletion requests
+            </Link>
+          </p>
         </div>
       </div>
     </div>
