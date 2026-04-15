@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom';
+
 const EFFECTIVE_DATE = 'April 14, 2026';
 const LAST_UPDATED = 'April 14, 2026';
 
@@ -7,6 +9,21 @@ export default function PrivacyPolicyPage() {
       <h1 className="text-3xl font-bold tracking-tight">Privacy Policy</h1>
       <p className="mt-2 text-sm text-muted-foreground">Effective Date: {EFFECTIVE_DATE}</p>
       <p className="text-sm text-muted-foreground">Last Updated: {LAST_UPDATED}</p>
+
+      <div className="mt-6 rounded-lg border border-border bg-muted/40 p-4 sm:p-5">
+        <h2 className="text-base font-semibold text-foreground">Data deletion requests</h2>
+        <p className="mt-2 text-sm leading-6 text-foreground">
+          To request deletion of personal data, email{' '}
+          <a href="mailto:[privacy@yourdomain.com]" className="font-medium text-primary underline">
+            [privacy@yourdomain.com]
+          </a>
+          . Step-by-step instructions are on our{' '}
+          <Link to="/data-deletion" className="font-medium text-primary underline">
+            Data deletion requests
+          </Link>{' '}
+          page.
+        </p>
+      </div>
 
       <div className="mt-8 space-y-8 text-sm leading-6 text-foreground">
         <section className="space-y-3">
@@ -104,7 +121,7 @@ export default function PrivacyPolicyPage() {
             <li>Provide analytics, quality monitoring, and service improvements.</li>
             <li>
               Prepare model fine-tuning and improve reply quality using AI feedback records (and associated message
-              content where necessary), as described in our subprocessors list.
+              content where necessary), as described in Section 9 (Subprocessors).
             </li>
             <li>Maintain account security, fraud prevention, and customer support.</li>
           </ul>
@@ -149,14 +166,81 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">9. Data Retention</h2>
+          <h2 className="text-xl font-semibold">9. Subprocessors (service providers)</h2>
+          <p>
+            We engage the categories of providers below to host and operate the service. Replace bracketed entries with
+            your production vendors and regions before publishing.
+          </p>
+          <div className="overflow-x-auto rounded-md border border-border">
+            <table className="w-full min-w-[36rem] border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-border bg-muted/50">
+                  <th className="px-3 py-2 font-semibold">Provider</th>
+                  <th className="px-3 py-2 font-semibold">Purpose</th>
+                  <th className="px-3 py-2 font-semibold">Typical location</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-border">
+                  <td className="px-3 py-2 align-top">OpenAI, L.L.C.</td>
+                  <td className="px-3 py-2 align-top">
+                    AI-generated replies, vision over attachments where used, embeddings/product search, quality
+                    evaluation, and fine-tuning dataset preparation when enabled
+                  </td>
+                  <td className="px-3 py-2 align-top">United States (confirm in your OpenAI account settings)</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-3 py-2 align-top">Meta Platforms, Inc.</td>
+                  <td className="px-3 py-2 align-top">
+                    Delivering and receiving messages through Facebook, Instagram, and WhatsApp Business APIs
+                  </td>
+                  <td className="px-3 py-2 align-top">As described in Meta&apos;s terms and policies</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-3 py-2 align-top">Sentry (Functional Software, Inc.)</td>
+                  <td className="px-3 py-2 align-top">Error and performance monitoring when you configure Sentry</td>
+                  <td className="px-3 py-2 align-top">United States (or region per your Sentry project)</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-3 py-2 align-top">[Your application hosting provider]</td>
+                  <td className="px-3 py-2 align-top">Hosting the API and web application</td>
+                  <td className="px-3 py-2 align-top">[Region]</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-3 py-2 align-top">PostgreSQL</td>
+                  <td className="px-3 py-2 align-top">Primary application database (self-hosted or via your DB host)</td>
+                  <td className="px-3 py-2 align-top">[Region]</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-3 py-2 align-top">Redis</td>
+                  <td className="px-3 py-2 align-top">Background jobs and caching (self-hosted or via your Redis host)</td>
+                  <td className="px-3 py-2 align-top">[Region]</td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-2 align-top">Application file storage</td>
+                  <td className="px-3 py-2 align-top">
+                    Storing uploaded attachments and generated files on application servers or your object storage
+                  </td>
+                  <td className="px-3 py-2 align-top">[Region]</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            We may update this list when we change vendors. Material changes will be reflected in this policy or an
+            accompanying notice where required by law.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-semibold">10. Data Retention</h2>
           <p>
             We retain data only as long as needed for legitimate business purposes, legal obligations, dispute
             resolution, security, and enforcement of agreements. You can request deletion as described below.
           </p>
           <p>
             We may retain and process AI feedback records (and associated message content where necessary) to prepare
-            model fine-tuning and improve reply quality, as described in our subprocessors list.
+            model fine-tuning and improve reply quality, as described in Section 9 (Subprocessors).
           </p>
           <p>
             If you publish specific retention periods elsewhere (for example in contracts or admin docs), those
@@ -165,7 +249,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">10. Your Rights</h2>
+          <h2 className="text-xl font-semibold">11. Your Rights</h2>
           <p>
             Depending on your location, you may have rights to access, correct, delete, restrict, or object to certain
             processing, and to request portability where applicable.
@@ -177,8 +261,14 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">11. Data Deletion Requests</h2>
-          <p>You can request deletion by contacting [privacy@yourdomain.com].</p>
+          <h2 className="text-xl font-semibold">12. Data Deletion Requests</h2>
+          <p>
+            You can request deletion by contacting [privacy@yourdomain.com] or using our dedicated{' '}
+            <Link to="/data-deletion" className="font-medium text-primary underline">
+              Data deletion requests
+            </Link>{' '}
+            page.
+          </p>
           <p>
             If you are an end customer messaging a business that uses our platform, you may contact that business
             directly, or contact us and we will assist where applicable.
@@ -190,7 +280,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">12. Security</h2>
+          <h2 className="text-xl font-semibold">13. Security</h2>
           <p>
             We use technical and organizational safeguards designed to protect personal data, including encrypted
             transport, access controls, and operational security monitoring.
@@ -202,7 +292,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">13. International Transfers</h2>
+          <h2 className="text-xl font-semibold">14. International Transfers</h2>
           <p>
             We may process data in countries outside your own. Where required, we use appropriate safeguards for
             international transfers, such as contractual protections and legal transfer mechanisms.
@@ -210,7 +300,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">14. Children</h2>
+          <h2 className="text-xl font-semibold">15. Children</h2>
           <p>
             Our service is intended for businesses and is not directed to children under the applicable legal age in
             their jurisdiction.
@@ -218,7 +308,7 @@ export default function PrivacyPolicyPage() {
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">15. Changes to This Policy</h2>
+          <h2 className="text-xl font-semibold">16. Changes to This Policy</h2>
           <p>
             We may update this Privacy Policy from time to time. The latest version will always be available at
             [yourdomain.com/privacy-policy] with the effective date shown at the top.

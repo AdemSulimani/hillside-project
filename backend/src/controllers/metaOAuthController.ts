@@ -101,7 +101,6 @@ function verifyStateToken(state: string, jwtSecret: string): OAuthStatePayload {
 function getScopesForType(type: 'facebook' | 'instagram'): string {
   if (type === 'instagram') {
     return [
-      'business_management',
       'instagram_basic',
       'instagram_manage_messages',
       'pages_show_list',
@@ -111,7 +110,6 @@ function getScopesForType(type: 'facebook' | 'instagram'): string {
   }
 
   return [
-    'business_management',
     'instagram_basic',
     'instagram_manage_messages',
     'pages_show_list',
