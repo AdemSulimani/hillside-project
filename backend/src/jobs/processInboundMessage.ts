@@ -33,8 +33,22 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     normalized = normalize(data.channelType, data.payload);
   } catch (err) {
     if (shouldIgnoreNormalizationError(data.channelType, err)) {
+      const keys = Object.keys(data.payload);
+      const entry0 = Array.isArray(data.payload.entry) ? data.payload.entry[0] : null;
+      const entryObj =
+        entry0 && typeof entry0 === 'object' && !Array.isArray(entry0)
+          ? (entry0 as Record<string, unknown>)
+          : null;
+      const changes0 =
+        entryObj && Array.isArray(entryObj.changes) ? entryObj.changes[0] : null;
+      const ch =
+        changes0 && typeof changes0 === 'object' && !Array.isArray(changes0)
+          ? (changes0 as Record<string, unknown>)
+          : null;
       console.info('[inbound] Ignoring non-message webhook event', {
         channelType: data.channelType,
+        payloadKeys: keys,
+        changeField: typeof ch?.field === 'string' ? ch.field : undefined,
       });
       return;
     }
@@ -55,6 +69,12 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     normalized.channelExternalId,
   );
   if (!channel) {
+    console.error('[inbound] Channel not found — check channels.external_id matches webhook recipient/entry id', {
+      channelType: normalized.channelType,
+      channelExternalId: normalized.channelExternalId,
+      contactExternalId: normalized.contactExternalId,
+      externalMessageId: normalized.externalMessageId,
+    });
     throw new Error(
       `Channel not found for type=${normalized.channelType} external_id=${normalized.channelExternalId}`,
     );

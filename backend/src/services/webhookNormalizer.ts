@@ -35,6 +35,84 @@ function coercePositiveGraphId(value: unknown): string | null {
   return null;
 }
 
+function instagramMessageText(message: Record<string, unknown> | null): string | null {
+  if (!message) return null;
+  if (typeof message.text === 'string') return message.text;
+  const textObj = asRecord(message.text);
+  if (typeof textObj?.body === 'string') return textObj.body;
+  return null;
+}
+
+function instagramExternalMessageId(message: Record<string, unknown> | null): string | null {
+  if (!message) return null;
+  if (typeof message.mid === 'string' && message.mid.trim()) return message.mid.trim();
+  if (typeof message.id === 'string' && message.id.trim()) return message.id.trim();
+  const idNum = typeof message.id === 'number' && Number.isFinite(message.id) ? message.id : null;
+  if (idNum !== null && idNum > 0) return String(Math.trunc(idNum));
+  return null;
+}
+
+/** URLs or Graph media attachment_ids (resolved later in attachmentStorageService). */
+function instagramAttachmentRefs(message: Record<string, unknown> | null): string[] {
+  if (!message) return [];
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const refs: string[] = [];
+  for (const raw of attachments) {
+    const att = asRecord(raw);
+    const payload = asRecord(att?.payload);
+    if (typeof payload?.url === 'string' && payload.url.trim()) {
+      refs.push(payload.url.trim());
+      continue;
+    }
+    if (typeof payload?.attachment_id === 'string' && payload.attachment_id.trim()) {
+      refs.push(payload.attachment_id.trim());
+      continue;
+    }
+    if (typeof att?.url === 'string' && att.url.trim()) {
+      refs.push(att.url.trim());
+      continue;
+    }
+  }
+  return refs;
+}
+
+function instagramAttachmentMessageType(message: Record<string, unknown> | null): MessageType {
+  if (!message) return 'text';
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const first = attachments.length > 0 ? asRecord(attachments[0]) : null;
+  const t = typeof first?.type === 'string' ? first.type.toLowerCase() : '';
+  if (t === 'image' || t === 'video' || t === 'audio' || t === 'file') {
+    if (t === 'video') return 'video';
+    if (t === 'audio') return 'audio';
+    if (t === 'file') return 'document';
+    return 'image';
+  }
+  return instagramAttachmentRefs(message).length > 0 ? 'image' : 'text';
+}
+
+function instagramContactName(
+  sender: Record<string, unknown> | null,
+  value: Record<string, unknown> | null,
+): string {
+  if (sender && typeof sender.name === 'string' && sender.name.trim()) return sender.name.trim();
+  if (value && typeof value.from_username === 'string' && value.from_username.trim()) {
+    return value.from_username.trim();
+  }
+  return 'Unknown';
+}
+
+function instagramContactExternalId(
+  message: Record<string, unknown> | null,
+  sender: Record<string, unknown> | null,
+  recipient: Record<string, unknown> | null,
+): string | null {
+  const isEcho = message?.is_echo === true;
+  if (isEcho) {
+    return coercePositiveGraphId(recipient?.id) ?? coercePositiveGraphId(sender?.id);
+  }
+  return coercePositiveGraphId(sender?.id) ?? coercePositiveGraphId(recipient?.id);
+}
+
 function pickMessageType(message: Record<string, unknown>): MessageType {
   if (typeof message.type === 'string') {
     const rawType = message.type.toLowerCase();
@@ -136,25 +214,12 @@ export class WebhookNormalizerService {
       coercePositiveGraphId(value?.id) ??
       coercePositiveGraphId(recipient?.id);
 
-    const contactExternalId =
-      coercePositiveGraphId(sender?.id) ?? coercePositiveGraphId(recipient?.id);
-    const externalMessageId =
-      typeof message?.mid === 'string'
-        ? message.mid
-        : typeof message?.id === 'string'
-          ? message.id
-          : null;
-    const content = typeof message?.text === 'string' ? message.text : null;
+    const contactExternalId = instagramContactExternalId(message, sender, recipient);
+    const externalMessageId = instagramExternalMessageId(message);
+    const content = instagramMessageText(message);
 
-    // Handle attachments.
-    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
-    const attachmentUrls = attachments
-      .map((a: unknown) => {
-        const att = asRecord(a);
-        const attachPayload = asRecord(att?.payload);
-        return typeof attachPayload?.url === 'string' ? attachPayload.url : null;
-      })
-      .filter((url): url is string => url !== null);
+    const attachmentUrls = instagramAttachmentRefs(message);
+    const messageType = instagramAttachmentMessageType(message);
 
     if (!channelExternalId || !externalMessageId || !contactExternalId) {
       throw new Error('Invalid webhook payload: required message identifiers are missing');
@@ -165,9 +230,9 @@ export class WebhookNormalizerService {
       channelExternalId,
       externalMessageId,
       contactExternalId,
-      contactName: 'Unknown',
+      contactName: instagramContactName(sender, value),
       contactAvatarUrl: null,
-      messageType: attachmentUrls.length > 0 ? 'image' : 'text',
+      messageType,
       content,
       attachmentUrls,
       rawPayload: payload,
