@@ -44,6 +44,21 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
       ? (req.body as Record<string, unknown>)
       : {};
 
+  const entry = Array.isArray(parsedPayload.entry)
+    ? (parsedPayload.entry[0] as Record<string, unknown> | undefined)
+    : undefined;
+  const webhookObject =
+    typeof parsedPayload.object === 'string' ? parsedPayload.object : 'unknown';
+  const entryId =
+    typeof entry?.id === 'string' || typeof entry?.id === 'number'
+      ? String(entry.id)
+      : 'unknown';
+  console.info('[webhook] inbound request received', {
+    channelType: channelTypeParam,
+    object: webhookObject,
+    entryId,
+  });
+
   const enqueueInboundPayload = async (): Promise<void> => {
     try {
       await webhookQueue.add('message.inbound', {

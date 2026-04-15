@@ -7,6 +7,7 @@ import { sendError, sendSuccess } from '../utils/response';
 
 const INSTAGRAM_OAUTH_BASE = 'https://api.instagram.com/oauth';
 const INSTAGRAM_GRAPH_BASE = 'https://graph.instagram.com/v25.0';
+const META_GRAPH_BASE = 'https://graph.facebook.com/v25.0';
 
 interface OAuthStatePayload {
   tenantId: string;
@@ -24,6 +25,44 @@ interface InstagramIdentityResponse {
   name?: string;
   account_type?: string;
   profile_picture_url?: string;
+}
+
+type SubscriptionAttemptResult = {
+  endpoint: string;
+  ok: boolean;
+  data?: unknown;
+  error?: unknown;
+};
+
+async function attemptSubscribeOnBase(
+  baseUrl: string,
+  igUserId: string,
+  accessToken: string,
+): Promise<SubscriptionAttemptResult> {
+  try {
+    await axios.post(`${baseUrl}/${igUserId}/subscribed_apps`, null, {
+      params: {
+        access_token: accessToken,
+        subscribed_fields: 'messages',
+      },
+    });
+
+    const verifyResp = await axios.get(`${baseUrl}/${igUserId}/subscribed_apps`, {
+      params: { access_token: accessToken },
+    });
+
+    return {
+      endpoint: baseUrl,
+      ok: true,
+      data: verifyResp.data,
+    };
+  } catch (err) {
+    return {
+      endpoint: baseUrl,
+      ok: false,
+      error: axios.isAxiosError(err) ? err.response?.data ?? err.message : err,
+    };
+  }
 }
 
 function getOAuthConfig() {
@@ -119,6 +158,24 @@ export async function callback(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const subscriptionAttempts = await Promise.all([
+      attemptSubscribeOnBase(INSTAGRAM_GRAPH_BASE, externalId, accessToken),
+      attemptSubscribeOnBase(META_GRAPH_BASE, externalId, accessToken),
+    ]);
+    const successfulAttempt = subscriptionAttempts.find((attempt) => attempt.ok);
+    if (successfulAttempt) {
+      console.info('[instagram] subscribed_apps configured', {
+        igUserId: externalId,
+        endpoint: successfulAttempt.endpoint,
+        subscribedApps: successfulAttempt.data,
+      });
+    } else {
+      console.warn('[instagram] could not configure subscribed_apps during OAuth callback', {
+        igUserId: externalId,
+        attempts: subscriptionAttempts,
+      });
+    }
+
     const encrypted = cryptoService.encrypt(accessToken);
     const channelName = identity.username || identity.name || `Instagram ${externalId}`;
     const metadata = {
@@ -129,6 +186,8 @@ export async function callback(req: Request, res: Response): Promise<void> {
       profile_picture_url: identity.profile_picture_url ?? null,
       token_type: tokenResp.data.token_type ?? null,
       expires_in: tokenResp.data.expires_in ?? null,
+      subscribed_apps_configured: Boolean(successfulAttempt),
+      subscribed_apps_endpoint: successfulAttempt?.endpoint ?? null,
     };
 
     const existing = await findChannelByExternalId(parsedState.tenantId, 'instagram', externalId);

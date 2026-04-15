@@ -132,7 +132,9 @@ export class WebhookNormalizerService {
     const message =
       (value ? asRecord(value.message) : null) ?? (messagingItem ? asRecord(messagingItem.message) : null);
     const channelExternalId =
-      coercePositiveGraphId(entry?.id) ?? coercePositiveGraphId(recipient?.id);
+      coercePositiveGraphId(entry?.id) ??
+      coercePositiveGraphId(value?.id) ??
+      coercePositiveGraphId(recipient?.id);
 
     const contactExternalId =
       coercePositiveGraphId(sender?.id) ?? coercePositiveGraphId(recipient?.id);
