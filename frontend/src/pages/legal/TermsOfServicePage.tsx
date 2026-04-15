@@ -1,5 +1,5 @@
-const EFFECTIVE_DATE = 'April 14, 2026';
-const LAST_UPDATED = 'April 14, 2026';
+const EFFECTIVE_DATE = 'April 15, 2026';
+const LAST_UPDATED = 'April 15, 2026';
 
 export default function TermsOfServicePage() {
   return (
@@ -77,6 +77,10 @@ export default function TermsOfServicePage() {
             independently from Facebook Page connection, subject to Meta platform requirements and account configuration.
           </p>
           <p>
+            You may also integrate WhatsApp Business as a separate channel. WhatsApp Business authorization and usage
+            permissions are managed independently from Facebook and Instagram connections.
+          </p>
+          <p>
             If Meta changes APIs, permissions, or policies, you agree to cooperate with reasonable implementation
             changes needed to maintain compliance and service continuity.
           </p>
@@ -126,6 +130,12 @@ export default function TermsOfServicePage() {
           <p>
             Unless required by law, fees are non-refundable. We may update pricing with prior notice as required by
             applicable law or contract.
+          </p>
+          <p>
+            Where your commercial plan includes commission-based billing, we may mark an order as completed when AI has
+            fully completed that order workflow according to configured logic. In those cases, our admin dashboard may
+            generate an internal completion notification that includes the relevant company identifier, and a 5%
+            commission may be applied to that completed order where stated in your plan or order form.
           </p>
         </section>
 
