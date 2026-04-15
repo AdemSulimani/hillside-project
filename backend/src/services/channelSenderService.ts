@@ -42,6 +42,12 @@ async function sendInstagramMessage(
   recipientExternalId: string,
   messageText: string,
 ): Promise<void> {
+  if (channel.connection_method === 'oauth_instagram') {
+    throw new Error(
+      'Instagram Login send path is not enabled yet; verify endpoint/payload for this product first',
+    );
+  }
+
   const accessToken = decryptToken(channel);
 
   await axios.post(
@@ -91,6 +97,18 @@ const senders: Record<
   whatsapp: sendWhatsAppMessage,
 };
 
+function assertSupportedConnectionMethod(channel: Channel): void {
+  if (channel.type === 'facebook' && channel.connection_method !== 'oauth_meta') {
+    throw new Error(
+      `Unsupported connection method for facebook channel: ${channel.connection_method}`,
+    );
+  }
+
+  if (channel.type === 'instagram' && channel.connection_method === 'manual') {
+    throw new Error('Unsupported connection method for instagram channel: manual');
+  }
+}
+
 export async function sendMessage(
   channel: Channel,
   recipientExternalId: string,
@@ -104,6 +122,7 @@ export async function sendMessage(
 
   try {
     await acquireOutboundSendToken(channel.id);
+    assertSupportedConnectionMethod(channel);
     await sender(channel, recipientExternalId, messageText);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -131,5 +150,6 @@ export async function sendMessageStrict(
   }
 
   await acquireOutboundSendToken(channel.id);
+  assertSupportedConnectionMethod(channel);
   await sender(channel, recipientExternalId, messageText);
 }

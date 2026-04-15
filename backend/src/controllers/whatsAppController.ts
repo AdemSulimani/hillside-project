@@ -34,6 +34,7 @@ export async function connect(req: Request, res: Response): Promise<void> {
       const updated = await updateChannel(existing.id, tenantId, {
         name: channelName,
         access_token_encrypted: encryptedToken,
+        connection_method: 'manual',
         metadata: {
           phone_number_id: externalId,
           display_phone_number: verifyResp.data.display_phone_number ?? null,
@@ -55,6 +56,7 @@ export async function connect(req: Request, res: Response): Promise<void> {
       name: channelName,
       external_id: externalId,
       access_token_encrypted: encryptedToken,
+      connection_method: 'manual',
       metadata: {
         phone_number_id: externalId,
         display_phone_number: verifyResp.data.display_phone_number ?? null,

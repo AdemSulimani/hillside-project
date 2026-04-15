@@ -8,6 +8,7 @@ import {
   connectWhatsApp,
   deleteChannel,
   fetchChannels,
+  getInstagramRedirectUrl,
   getMetaRedirectUrl,
 } from '@/api/channelsApi';
 import { ChannelCard } from '@/components/channels/ChannelCard';
@@ -45,13 +46,23 @@ export default function ChannelsPage() {
     queryFn: fetchChannels,
   });
 
-  const connectMetaMutation = useMutation({
-    mutationFn: (type: 'facebook' | 'instagram') => getMetaRedirectUrl(type),
+  const connectFacebookMutation = useMutation({
+    mutationFn: getMetaRedirectUrl,
     onSuccess: (url) => {
       window.location.assign(url);
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Failed to start Meta OAuth flow'));
+      toast.error(extractMessage(err, 'Failed to start Facebook OAuth flow'));
+    },
+  });
+
+  const connectInstagramMutation = useMutation({
+    mutationFn: getInstagramRedirectUrl,
+    onSuccess: (url) => {
+      window.location.assign(url);
+    },
+    onError: (err) => {
+      toast.error(extractMessage(err, 'Failed to start Instagram OAuth flow'));
     },
   });
 
@@ -140,24 +151,20 @@ export default function ChannelsPage() {
           <Button
             type="button"
             variant="outline"
-            onClick={() => connectMetaMutation.mutate('facebook')}
-            disabled={connectMetaMutation.isPending}
+            onClick={() => connectFacebookMutation.mutate()}
+            disabled={connectFacebookMutation.isPending}
           >
-            {connectMetaMutation.isPending && connectMetaMutation.variables === 'facebook' && (
-              <Loader2 className="animate-spin" />
-            )}
+            {connectFacebookMutation.isPending && <Loader2 className="animate-spin" />}
             <Plus className="size-4" />
             Connect Facebook
           </Button>
           <Button
             type="button"
             variant="outline"
-            onClick={() => connectMetaMutation.mutate('instagram')}
-            disabled={connectMetaMutation.isPending}
+            onClick={() => connectInstagramMutation.mutate()}
+            disabled={connectInstagramMutation.isPending}
           >
-            {connectMetaMutation.isPending && connectMetaMutation.variables === 'instagram' && (
-              <Loader2 className="animate-spin" />
-            )}
+            {connectInstagramMutation.isPending && <Loader2 className="animate-spin" />}
             <Plus className="size-4" />
             Connect Instagram
           </Button>

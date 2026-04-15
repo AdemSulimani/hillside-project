@@ -11,7 +11,6 @@ const META_OAUTH_VERSION = 'v25.0';
 
 interface OAuthStatePayload {
   tenantId: string;
-  type?: 'facebook' | 'instagram';
 }
 
 interface MetaTokenResponse {
@@ -24,48 +23,6 @@ interface MetaPage {
   id: string;
   name: string;
   access_token?: string;
-  instagram_business_account?: {
-    id: string;
-  };
-}
-
-/**
- * /me/accounts sometimes omits instagram_business_account even when the Page has IG linked.
- * A direct Page fetch with the page access token usually returns it.
- */
-async function resolveInstagramBusinessAccountId(
-  page: MetaPage,
-  userToken: string,
-): Promise<string | undefined> {
-  const nested = page.instagram_business_account?.id;
-  if (nested) return nested;
-
-  const fetchIgId = async (token: string) => {
-    const { data } = await axios.get<{
-      instagram_business_account?: { id: string };
-    }>(`${META_API_BASE}/${page.id}`, {
-      params: {
-        access_token: token,
-        fields: 'instagram_business_account{id}',
-      },
-    });
-    return data.instagram_business_account?.id;
-  };
-
-  if (page.access_token) {
-    try {
-      const id = await fetchIgId(page.access_token);
-      if (id) return id;
-    } catch {
-      /* fall through to user token */
-    }
-  }
-
-  try {
-    return await fetchIgId(userToken);
-  } catch {
-    return undefined;
-  }
 }
 
 function getOAuthConfig() {
@@ -82,36 +39,16 @@ function getOAuthConfig() {
   return { appId, appSecret, callbackUrl, jwtSecret };
 }
 
-function buildStateToken(
-  tenantId: string,
-  jwtSecret: string,
-  type?: 'facebook' | 'instagram',
-): string {
-  return jwt.sign({ tenantId, type } satisfies OAuthStatePayload, jwtSecret, { expiresIn: '15m' });
+function buildStateToken(tenantId: string, jwtSecret: string): string {
+  return jwt.sign({ tenantId } satisfies OAuthStatePayload, jwtSecret, { expiresIn: '15m' });
 }
 
 function verifyStateToken(state: string, jwtSecret: string): OAuthStatePayload {
   return jwt.verify(state, jwtSecret) as OAuthStatePayload;
 }
 
-/**
- * Instagram scopes require the same permissions to be added in the Meta app
- * (App Review → Permissions, or Instagram API → Permissions and features) until they show “Ready for testing”.
- */
-function getScopesForType(type: 'facebook' | 'instagram'): string {
-  if (type === 'instagram') {
-    return [
-      'instagram_basic',
-      'instagram_manage_messages',
-      'pages_show_list',
-      'pages_manage_metadata',
-      'pages_messaging',
-    ].join(',');
-  }
-
+function getFacebookScopes(): string {
   return [
-    'instagram_basic',
-    'instagram_manage_messages',
     'pages_show_list',
     'pages_manage_metadata',
     'pages_messaging',
@@ -122,11 +59,8 @@ export async function redirect(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = req.user!.tenantId!;
     const { appId, callbackUrl, jwtSecret } = getOAuthConfig();
-
-    const typeQuery = req.query.type as string | undefined;
-    const requestedType = typeQuery === 'instagram' ? 'instagram' : 'facebook';
-    const state = buildStateToken(tenantId, jwtSecret, requestedType);
-    const scopes = getScopesForType(requestedType);
+    const state = buildStateToken(tenantId, jwtSecret);
+    const scopes = getFacebookScopes();
 
     const url = new URL(`https://www.facebook.com/${META_OAUTH_VERSION}/dialog/oauth`);
     url.searchParams.set('client_id', appId);
@@ -188,61 +122,36 @@ export async function callback(req: Request, res: Response): Promise<void> {
     });
 
     const pages = pagesResp.data.data ?? [];
-    const targetType = parsedState.type ?? 'facebook';
     let connectedCount = 0;
     for (const page of pages) {
       const tokenToStore = page.access_token || longLivedToken;
       const encrypted = cryptoService.encrypt(tokenToStore);
-
-      if (targetType === 'facebook') {
-        const existingFacebook = await findChannelByExternalId(parsedState.tenantId, 'facebook', page.id);
-        if (existingFacebook) {
-          await updateChannel(existingFacebook.id, parsedState.tenantId, {
-            name: page.name,
-            access_token_encrypted: encrypted,
-            metadata: { source: 'meta_oauth' },
-          });
-        } else {
-          await createChannel({
-            tenant_id: parsedState.tenantId,
-            type: 'facebook',
-            name: page.name,
-            external_id: page.id,
-            access_token_encrypted: encrypted,
-            metadata: { source: 'meta_oauth' },
-          });
-        }
-        connectedCount++;
+      const existingFacebook = await findChannelByExternalId(parsedState.tenantId, 'facebook', page.id);
+      if (existingFacebook) {
+        await updateChannel(existingFacebook.id, parsedState.tenantId, {
+          name: page.name,
+          access_token_encrypted: encrypted,
+          connection_method: 'oauth_meta',
+          metadata: { source: 'meta_oauth' },
+        });
+      } else {
+        await createChannel({
+          tenant_id: parsedState.tenantId,
+          type: 'facebook',
+          name: page.name,
+          external_id: page.id,
+          access_token_encrypted: encrypted,
+          connection_method: 'oauth_meta',
+          metadata: { source: 'meta_oauth' },
+        });
       }
-
-      const igId = await resolveInstagramBusinessAccountId(page, longLivedToken);
-      if (targetType === 'instagram' && igId) {
-        const existingInstagram = await findChannelByExternalId(parsedState.tenantId, 'instagram', igId);
-        if (existingInstagram) {
-          await updateChannel(existingInstagram.id, parsedState.tenantId, {
-            name: `${page.name} (Instagram)`,
-            access_token_encrypted: encrypted,
-            metadata: { source_page_id: page.id, source: 'meta_oauth' },
-          });
-        } else {
-          await createChannel({
-            tenant_id: parsedState.tenantId,
-            type: 'instagram',
-            name: `${page.name} (Instagram)`,
-            external_id: igId,
-            access_token_encrypted: encrypted,
-            metadata: { source_page_id: page.id, source: 'meta_oauth' },
-          });
-        }
-        connectedCount++;
-      }
+      connectedCount++;
     }
 
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const type = targetType;
     const redirectUrl = new URL('/channels', frontendUrl);
     redirectUrl.searchParams.set('status', 'connected');
-    redirectUrl.searchParams.set('type', type);
+    redirectUrl.searchParams.set('type', 'facebook');
     redirectUrl.searchParams.set('count', String(connectedCount));
     res.redirect(302, redirectUrl.toString());
   } catch (err) {

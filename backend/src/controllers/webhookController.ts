@@ -17,6 +17,18 @@ function isValidChannelType(value: string): value is ChannelType {
   return allowedTypes.includes(value as ChannelType);
 }
 
+function getWebhookAppSecret(channelType: ChannelType): string | null {
+  if (channelType === 'instagram') {
+    return process.env.INSTAGRAM_APP_SECRET || process.env.META_APP_SECRET || null;
+  }
+
+  if (channelType === 'facebook') {
+    return process.env.META_APP_SECRET || null;
+  }
+
+  return process.env.META_APP_SECRET || null;
+}
+
 export async function ingestWebhook(req: Request, res: Response): Promise<void> {
   const channelTypeValue = req.params.channelType;
   const channelTypeParam = Array.isArray(channelTypeValue)
@@ -43,9 +55,9 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
     }
   };
 
-  const appSecret = process.env.META_APP_SECRET;
+  const appSecret = getWebhookAppSecret(channelTypeParam);
   if (!appSecret) {
-    sendError(res, 'META_APP_SECRET is not configured', 500);
+    sendError(res, `Webhook app secret is not configured for ${channelTypeParam}`, 500);
     return;
   }
 
