@@ -72,6 +72,11 @@ export default function TermsOfServicePage() {
             requirements for your use case.
           </p>
           <p>
+            Facebook and Instagram connections are offered as separate authorization flows. Connecting one channel does
+            not automatically connect the other, and Instagram Login in our current flow is intended to operate
+            independently from Facebook Page connection, subject to Meta platform requirements and account configuration.
+          </p>
+          <p>
             If Meta changes APIs, permissions, or policies, you agree to cooperate with reasonable implementation
             changes needed to maintain compliance and service continuity.
           </p>

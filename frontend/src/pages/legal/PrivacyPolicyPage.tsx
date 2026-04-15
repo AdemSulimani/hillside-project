@@ -84,6 +84,12 @@ export default function PrivacyPolicyPage() {
               From Meta platforms (Facebook, Instagram, and WhatsApp Business) through APIs and webhooks when your
               connected channels receive customer messages.
             </li>
+            <li>
+              From channel authorizations you choose in our product. Facebook and Instagram can be connected as
+              separate integrations, and Instagram may be connected through Instagram Login without generally requiring
+              a linked Facebook Page in our current integration flow, subject to Meta platform requirements and account
+              configuration.
+            </li>
             <li>From your use of our dashboard and platform features.</li>
           </ul>
         </section>
@@ -144,6 +150,10 @@ export default function PrivacyPolicyPage() {
             We process Meta Platform Data solely to provide messaging, inbox, and automation features requested by our
             users. We do not sell Meta Platform Data and do not use it for unrelated advertising, profiling, or data
             brokerage purposes.
+          </p>
+          <p>
+            In our current architecture, Facebook and Instagram are authorized through separate connection flows. If you
+            connect both, we process data from each authorized channel independently for the features you enable.
           </p>
           <p>
             Message content and attachments may be processed by AI and infrastructure providers acting on our behalf to
