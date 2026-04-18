@@ -5,9 +5,28 @@ import { searchProducts, searchProductsBySimilarity, type Product } from '../db/
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
-import { inboundMessageIndicatesInstagramSharedContext } from './webhookNormalizer';
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
+
+/** Matches normalized inbound text from webhookNormalizer (Feature 22). */
+const SHARED_CONTENT_SYSTEM_APPEND =
+  '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
+
+function inboundTextIsPostShare(content: string): boolean {
+  return content.trimStart().startsWith('Customer shared a post:');
+}
+
+function inboundTextIsStoryMentionOrReply(content: string): boolean {
+  const t = content;
+  return (
+    t.includes('Customer mentioned you in their story') || t.includes('Customer replied to your story')
+  );
+}
+
+/** Post shares and story threads get the extra catalog-alignment instruction (not reel/product-only lines). */
+function inboundNeedsSharedContentInstruction(content: string): boolean {
+  return inboundTextIsPostShare(content) || inboundTextIsStoryMentionOrReply(content);
+}
 
 const DEFAULT_AI_CONFIG: Pick<
   AIConfig,
@@ -248,10 +267,14 @@ export async function generateReply(
 
   const hasImages = attachmentUrls.length > 0;
   let systemPrompt = buildSystemPrompt(tenant.name, config, products);
-  if (inboundMessageIndicatesInstagramSharedContext(inboundMessage)) {
-    systemPrompt +=
-      '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
+
+  if (inboundNeedsSharedContentInstruction(inboundMessage)) {
+    systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
   }
+
+  // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
+  // other images). `buildMessagesArray` turns any non-empty `attachmentUrls` into vision `image_url`
+  // parts next to the user text (Step 16 path).
   const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage, attachmentUrls);
 
   const model = hasImages
