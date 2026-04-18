@@ -68,6 +68,7 @@ function summarizeInstagramWebhookPayload(payload: Record<string, unknown>): Rec
   };
 }
 
+/** Ingest channel webhooks. Native Messenger/Instagram echoes need the `message_echoes` field on Page and Instagram webhook subscriptions. */
 export async function ingestWebhook(req: Request, res: Response): Promise<void> {
   const channelTypeValue = req.params.channelType;
   const channelTypeParam = Array.isArray(channelTypeValue)

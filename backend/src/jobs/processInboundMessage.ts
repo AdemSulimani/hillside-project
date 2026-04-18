@@ -1,11 +1,16 @@
 import { findChannelByTypeAndExternalId, type ChannelType } from '../db/models/channel';
 import { upsertContact } from '../db/models/contact';
-import { upsertConversation, touchConversationLastMessageAt } from '../db/models/conversation';
+import {
+  upsertConversation,
+  touchConversationLastMessageAt,
+  markConversationHumanReplied,
+} from '../db/models/conversation';
 import { createMessage, findMessageIdByExternalMessageId } from '../db/models/message';
 import {
   webhookNormalizerService,
   type InboundMessageDTO,
 } from '../services/webhookNormalizer';
+import { setHumanOverride24h } from '../services/conversationService';
 import { downloadAndStore } from '../services/attachmentStorageService';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
@@ -22,7 +27,9 @@ function normalize(channelType: ChannelType, payload: Record<string, unknown>): 
 }
 
 function shouldIgnoreNormalizationError(channelType: ChannelType, err: unknown): boolean {
-  if (channelType !== 'whatsapp' && channelType !== 'instagram') return false;
+  if (channelType !== 'whatsapp' && channelType !== 'instagram' && channelType !== 'facebook') {
+    return false;
+  }
   if (!(err instanceof Error)) return false;
   return err.message.includes('required message identifiers are missing');
 }
@@ -121,6 +128,40 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     }
   }
 
+  const isNativeEcho =
+    (normalized.channelType === 'instagram' || normalized.channelType === 'facebook') &&
+    normalized.isEcho === true;
+
+  if (isNativeEcho) {
+    await markConversationHumanReplied(conversation.id, channel.tenant_id);
+
+    const outboundMessage = await createMessage({
+      tenant_id: channel.tenant_id,
+      conversation_id: conversation.id,
+      external_message_id: normalized.externalMessageId,
+      direction: 'outbound',
+      type: normalized.messageType,
+      content: normalized.content,
+      attachment_urls: permanentAttachmentUrls,
+      sent_by: 'human',
+    });
+
+    await setHumanOverride24h(conversation.id, channel.tenant_id);
+    await touchConversationLastMessageAt(conversation.id);
+
+    void logEvent(channel.tenant_id, 'human_reply_sent', {
+      conversation_id: conversation.id,
+      channel_id: channel.id,
+      channel_type: channel.type,
+      message_id: outboundMessage.id,
+      source: 'native_echo',
+    });
+
+    socketService.emitNewMessage(channel.tenant_id, outboundMessage);
+    socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
+    return;
+  }
+
   const inboundMessage = await createMessage({
     tenant_id: channel.tenant_id,
     conversation_id: conversation.id,
@@ -144,10 +185,12 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   socketService.emitNewMessage(channel.tenant_id, inboundMessage);
   socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
 
-  await aiQueue.add('ai.reply', {
-    tenantId: channel.tenant_id,
-    channelId: channel.id,
-    conversationId: conversation.id,
-    messageExternalId: normalized.externalMessageId,
-  });
+  if (normalized.skipAiReply !== true) {
+    await aiQueue.add('ai.reply', {
+      tenantId: channel.tenant_id,
+      channelId: channel.id,
+      conversationId: conversation.id,
+      messageExternalId: normalized.externalMessageId,
+    });
+  }
 }

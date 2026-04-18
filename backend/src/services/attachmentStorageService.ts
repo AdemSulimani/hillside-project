@@ -76,7 +76,11 @@ export async function downloadAndStore(
   if (!isUrl && accessToken) {
     downloadUrl = await resolveMetaMediaUrl(attachmentRef, accessToken);
     headers['Authorization'] = `Bearer ${accessToken}`;
-  } else if (isUrl && (channelType === 'whatsapp' || channelType === 'facebook') && accessToken) {
+  } else if (
+    isUrl &&
+    (channelType === 'whatsapp' || channelType === 'facebook' || channelType === 'instagram') &&
+    accessToken
+  ) {
     headers['Authorization'] = `Bearer ${accessToken}`;
   }
 

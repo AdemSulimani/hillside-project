@@ -25,6 +25,26 @@ interface MetaPage {
   access_token?: string;
 }
 
+async function attemptSubscribePageMessageEchoes(
+  pageId: string,
+  pageAccessToken: string,
+): Promise<{ ok: boolean; error?: unknown }> {
+  try {
+    await axios.post(`${META_API_BASE}/${pageId}/subscribed_apps`, null, {
+      params: {
+        access_token: pageAccessToken,
+        subscribed_fields: 'messages,message_echoes',
+      },
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: axios.isAxiosError(err) ? err.response?.data ?? err.message : err,
+    };
+  }
+}
+
 function getOAuthConfig() {
   const appId = process.env.META_APP_ID;
   const appSecret = process.env.META_APP_SECRET;
@@ -126,13 +146,25 @@ export async function callback(req: Request, res: Response): Promise<void> {
     for (const page of pages) {
       const tokenToStore = page.access_token || longLivedToken;
       const encrypted = cryptoService.encrypt(tokenToStore);
+      const subscription = await attemptSubscribePageMessageEchoes(page.id, tokenToStore);
+      if (!subscription.ok) {
+        console.warn('[meta_oauth] could not subscribe Page webhook fields (messages,message_echoes)', {
+          pageId: page.id,
+          error: subscription.error,
+        });
+      }
+      const fbMetadata = {
+        source: 'meta_oauth',
+        subscribed_apps_configured: subscription.ok,
+        subscribed_apps_error: subscription.ok ? null : subscription.error,
+      };
       const existingFacebook = await findChannelByExternalId(parsedState.tenantId, 'facebook', page.id);
       if (existingFacebook) {
         await updateChannel(existingFacebook.id, parsedState.tenantId, {
           name: page.name,
           access_token_encrypted: encrypted,
           connection_method: 'oauth_meta',
-          metadata: { source: 'meta_oauth' },
+          metadata: fbMetadata,
         });
       } else {
         await createChannel({
@@ -142,7 +174,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
           external_id: page.id,
           access_token_encrypted: encrypted,
           connection_method: 'oauth_meta',
-          metadata: { source: 'meta_oauth' },
+          metadata: fbMetadata,
         });
       }
       connectedCount++;

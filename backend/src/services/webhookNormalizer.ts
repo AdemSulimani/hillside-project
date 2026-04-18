@@ -3,6 +3,10 @@ import type { MessageType } from '../db/models/message';
 
 export interface InboundMessageDTO {
   channelType: ChannelType;
+  /** True when Meta delivers a message echo (e.g. native Instagram app reply). */
+  isEcho?: boolean;
+  /** Inbound stored but AI reply job is skipped (reactions; Facebook stickers). */
+  skipAiReply?: boolean;
   channelExternalId: string;
   externalMessageId: string;
   contactExternalId: string;
@@ -52,35 +56,32 @@ function instagramExternalMessageId(message: Record<string, unknown> | null): st
   return null;
 }
 
-/** URLs or Graph media attachment_ids (resolved later in attachmentStorageService). */
+/**
+ * Media refs for download (Graph attachment_id or URL). Skips `share` payloads so post/reel links
+ * are not treated as image downloads — those are represented in `content` by rich extraction.
+ */
 function instagramAttachmentRefs(message: Record<string, unknown> | null): string[] {
   if (!message) return [];
-  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
   const refs: string[] = [];
-  for (const raw of attachments) {
-    const att = asRecord(raw);
-    const payload = asRecord(att?.payload);
-    if (typeof payload?.url === 'string' && payload.url.trim()) {
-      refs.push(payload.url.trim());
-      continue;
-    }
-    if (typeof payload?.attachment_id === 'string' && payload.attachment_id.trim()) {
-      refs.push(payload.attachment_id.trim());
-      continue;
-    }
-    if (typeof att?.url === 'string' && att.url.trim()) {
-      refs.push(att.url.trim());
-      continue;
-    }
+  for (const node of instagramAttachmentNodes(message)) {
+    const type = strTrim(node.type).toLowerCase();
+    if (type === 'share') continue;
+    const payload = readPayload(node);
+    const url = strTrim(payload.url) || strTrim(node.url);
+    if (url) refs.push(url);
+    const attId = strTrim(payload.attachment_id);
+    if (attId) refs.push(attId);
   }
-  return refs;
+  return uniqStrings(refs);
 }
 
 function instagramAttachmentMessageType(message: Record<string, unknown> | null): MessageType {
   if (!message) return 'text';
-  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
-  const first = attachments.length > 0 ? asRecord(attachments[0]) : null;
-  const t = typeof first?.type === 'string' ? first.type.toLowerCase() : '';
+  const roots = instagramAttachmentRoots(message);
+  const first = roots.length > 0 ? asRecord(roots[0]) : null;
+  const nested = first && Array.isArray(first.data) ? asRecord(first.data[0]) : first;
+  const t = typeof nested?.type === 'string' ? nested.type.toLowerCase() : '';
+  if (t === 'sticker') return 'image';
   if (t === 'image' || t === 'video' || t === 'audio' || t === 'file') {
     if (t === 'video') return 'video';
     if (t === 'audio') return 'audio';
@@ -88,6 +89,313 @@ function instagramAttachmentMessageType(message: Record<string, unknown> | null)
     return 'image';
   }
   return instagramAttachmentRefs(message).length > 0 ? 'image' : 'text';
+}
+
+function instagramAttachmentRoots(message: Record<string, unknown> | null): unknown[] {
+  if (!message) return [];
+  const root = message.attachments;
+  if (Array.isArray(root)) return root;
+  const attObj = asRecord(root);
+  if (attObj && Array.isArray(attObj.data)) return attObj.data;
+  return [];
+}
+
+/** Flattened attachment items (Messenger-style `attachments` or `attachments.data[]`). */
+function instagramAttachmentNodes(message: Record<string, unknown> | null): Record<string, unknown>[] {
+  const nodes: Record<string, unknown>[] = [];
+  for (const raw of instagramAttachmentRoots(message)) {
+    const att = asRecord(raw);
+    if (!att) continue;
+    const data = att.data;
+    if (Array.isArray(data)) {
+      for (const d of data) {
+        const dr = asRecord(d);
+        if (dr) nodes.push(dr);
+      }
+    } else {
+      nodes.push(att);
+    }
+  }
+  return nodes;
+}
+
+function strTrim(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function uniqStrings(urls: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of urls) {
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+}
+
+function isHttpUrl(s: string): boolean {
+  return s.startsWith('http://') || s.startsWith('https://');
+}
+
+function isLikelyVideoShareUrl(url: string): boolean {
+  const u = url.toLowerCase();
+  if (u.endsWith('.mp4') || u.includes('.mp4?')) return true;
+  if (u.includes('/reel/') || u.includes('/reels/')) return true;
+  if (u.includes('video') && u.includes('instagram')) return true;
+  return false;
+}
+
+function readPayload(node: Record<string, unknown>): Record<string, unknown> {
+  return asRecord(node.payload) ?? {};
+}
+
+function formatPostShareLine(title: string, link: string, description: string): string {
+  const titlePart = title || 'Post';
+  const linkPart = link || titlePart;
+  let line = `Customer shared a post: ${titlePart} — ${linkPart}`;
+  if (description && description !== titlePart && description !== linkPart) {
+    line += `\n${description}`;
+  }
+  return line;
+}
+
+function formatVideoReelLine(title: string, description: string): string {
+  const parts = [`Customer shared a video/reel: ${title || 'Video'}`];
+  if (description) parts.push(description);
+  return parts.join('\n');
+}
+
+function extractProductCustomerLine(node: Record<string, unknown>): string | null {
+  const payload = readPayload(node);
+  const productRoot = asRecord(payload.product) ?? asRecord(node.product);
+  if (productRoot) {
+    const id = strTrim(productRoot.id ?? productRoot.product_id ?? productRoot.retailer_id);
+    const name = strTrim(productRoot.name ?? productRoot.title);
+    const price = strTrim(productRoot.price);
+    const currency = strTrim(productRoot.currency);
+    const desc = strTrim(productRoot.description ?? productRoot.subtitle);
+    if (!name && !id) return null;
+    const bits = [`Customer shared a product: ${name || 'Product'}`];
+    if (id) bits.push(`id: ${id}`);
+    if (price) bits.push(currency ? `${price} ${currency}` : price);
+    if (desc) bits.push(desc);
+    return bits.join(' — ');
+  }
+
+  const elements = Array.isArray(payload.elements) ? payload.elements : [];
+  const first = elements.length > 0 ? asRecord(elements[0]) : null;
+  if (first) {
+    const title = strTrim(first.title);
+    const subtitle = strTrim(first.subtitle);
+    const id = strTrim(first.id ?? first.product_id);
+    if (!title && !id) return null;
+    const bits = [`Customer shared a product: ${title || 'Product'}`];
+    if (id) bits.push(`id: ${id}`);
+    if (subtitle) bits.push(subtitle);
+    return bits.join(' — ');
+  }
+
+  const type = strTrim(node.type).toLowerCase();
+  if (type.includes('product') && (strTrim(payload.title) || strTrim(payload.name))) {
+    const name = strTrim(payload.name) || strTrim(payload.title);
+    const id = strTrim(payload.id ?? payload.product_id);
+    const bits = [`Customer shared a product: ${name}`];
+    if (id) bits.push(`id: ${id}`);
+    return bits.join(' — ');
+  }
+
+  return null;
+}
+
+/**
+ * True when inbound text was produced from Instagram rich templates (post/share/story/product).
+ * Used by the AI layer to add shared-content guidance.
+ */
+export function inboundMessageIndicatesInstagramSharedContext(content: string | null | undefined): boolean {
+  const t = (content ?? '').trim();
+  if (!t) return false;
+  return (
+    t.startsWith('Customer shared a post:') ||
+    t.includes('Customer mentioned you in their story') ||
+    t.includes('Customer replied to your story') ||
+    t.startsWith('Customer shared a video/reel:') ||
+    t.startsWith('Customer shared a product:')
+  );
+}
+
+type MetaMessengerRichChannel = 'facebook' | 'instagram';
+
+interface MessengerRichExtract {
+  contentLines: string[];
+  attachmentRefs: string[];
+  messageType: MessageType | null;
+  skipAiReply?: boolean;
+}
+
+/**
+ * Rich attachment handling for Page Messenger (Facebook) and Instagram DM.
+ * Stories / reels / product tags are Instagram-only; stickers skip AI on Facebook only.
+ */
+function extractMessengerRichContent(
+  message: Record<string, unknown> | null,
+  channel: MetaMessengerRichChannel,
+): MessengerRichExtract {
+  const contentLines: string[] = [];
+  const attachmentRefs: string[] = [];
+  let messageType: MessageType | null = null;
+  let skipAiReply = false;
+  let voiceLineAdded = false;
+
+  const isInstagram = channel === 'instagram';
+
+  const storyReply = message ? asRecord(message.story_reply) : null;
+  if (isInstagram && storyReply) {
+    contentLines.push('Customer replied to your story');
+    const url = strTrim(storyReply.url);
+    const id = strTrim(storyReply.id);
+    if (url && isHttpUrl(url)) {
+      attachmentRefs.push(url);
+      messageType = 'image';
+    } else if (id) {
+      attachmentRefs.push(id);
+      messageType = 'image';
+    }
+  }
+
+  for (const node of instagramAttachmentNodes(message)) {
+    const type = strTrim(node.type).toLowerCase();
+    const payload = readPayload(node);
+    const urlFromPayload = strTrim(payload.url);
+    const urlFromNode = strTrim(node.url);
+    const url = urlFromPayload || urlFromNode;
+
+    if (type === 'sticker') {
+      if (url) attachmentRefs.push(url);
+      const attId = strTrim(payload.sticker_id ?? payload.attachment_id);
+      if (attId) attachmentRefs.push(attId);
+      if (channel === 'facebook') {
+        skipAiReply = true;
+      }
+      if (!messageType) messageType = 'image';
+      continue;
+    }
+
+    if (isInstagram && type === 'story_mention') {
+      contentLines.push('Customer mentioned you in their story');
+      if (url) {
+        attachmentRefs.push(url);
+        messageType = 'image';
+      }
+      const attId = strTrim(payload.attachment_id);
+      if (attId) attachmentRefs.push(attId);
+      continue;
+    }
+
+    if (isInstagram) {
+      const productLine = extractProductCustomerLine(node);
+      if (productLine) {
+        contentLines.push(productLine);
+        continue;
+      }
+    }
+
+    if (type === 'share') {
+      const title = strTrim(payload.title);
+      const description = strTrim(
+        payload.description ?? payload.subtitle ?? (typeof payload.caption === 'string' ? payload.caption : ''),
+      );
+      const link = url || strTrim(payload.share_url) || strTrim(payload.target_url);
+
+      if (isInstagram && link && isLikelyVideoShareUrl(link)) {
+        contentLines.push(formatVideoReelLine(title, description));
+        continue;
+      }
+
+      if (link || title) {
+        contentLines.push(formatPostShareLine(title, link || title, description));
+      }
+      continue;
+    }
+
+    if (type === 'image' || type === 'animated_image') {
+      if (url) attachmentRefs.push(url);
+      const attId = strTrim(payload.attachment_id);
+      if (attId) attachmentRefs.push(attId);
+      if (!messageType) messageType = 'image';
+      continue;
+    }
+
+    if (type === 'video' || type === 'audio' || type === 'file') {
+      if (url) attachmentRefs.push(url);
+      const attId = strTrim(payload.attachment_id);
+      if (attId) attachmentRefs.push(attId);
+      if (channel === 'facebook' && type === 'audio' && !voiceLineAdded) {
+        contentLines.push('Customer sent a voice message');
+        voiceLineAdded = true;
+      }
+      if (!messageType) {
+        if (type === 'video') messageType = 'video';
+        else if (type === 'audio') messageType = 'audio';
+        else messageType = 'document';
+      }
+    }
+  }
+
+  return {
+    contentLines,
+    attachmentRefs: uniqStrings(attachmentRefs),
+    messageType,
+    skipAiReply: skipAiReply || undefined,
+  };
+}
+
+function buildReactionInboundDto(
+  channelType: 'facebook' | 'instagram',
+  entry: Record<string, unknown> | null,
+  messagingItem: Record<string, unknown>,
+  reaction: Record<string, unknown>,
+  rawPayload: Record<string, unknown>,
+): InboundMessageDTO {
+  const sender = asRecord(messagingItem.sender);
+  const recipient = asRecord(messagingItem.recipient);
+  const channelExternalId =
+    coercePositiveGraphId(entry?.id) ?? coercePositiveGraphId(recipient?.id);
+  const contactExternalId =
+    coercePositiveGraphId(sender?.id) ?? coercePositiveGraphId(recipient?.id);
+  const mid = strTrim(reaction.mid);
+  const action = strTrim(reaction.action);
+  const emoji = strTrim(reaction.emoji ?? reaction.reaction);
+  const ts =
+    messagingItem.timestamp != null && messagingItem.timestamp !== ''
+      ? String(messagingItem.timestamp)
+      : '0';
+  const contactPart = contactExternalId ?? 'unknown';
+  const baseId = `reaction_${mid || 'nomid'}_${action || 'react'}_${ts}_${contactPart}`.replace(/\s+/g, '_');
+  const externalMessageId = baseId.length > 250 ? baseId.slice(0, 250) : baseId;
+  const emojiChar = emoji || 'reaction';
+  const content = `Customer sent a reaction: ${emojiChar}${action && action !== 'react' ? ` (${action})` : ''}`;
+  const contactName =
+    sender && typeof sender.name === 'string' && sender.name.trim() ? sender.name.trim() : 'Unknown';
+
+  if (!channelExternalId || !contactExternalId) {
+    throw new Error('Invalid webhook payload: required message identifiers are missing');
+  }
+
+  return {
+    channelType,
+    skipAiReply: true,
+    isEcho: false,
+    channelExternalId,
+    externalMessageId,
+    contactExternalId,
+    contactName,
+    contactAvatarUrl: null,
+    messageType: 'text',
+    content,
+    attachmentUrls: [],
+    rawPayload,
+  };
 }
 
 function instagramContactName(
@@ -189,10 +497,96 @@ function extractMetaMessage(
   };
 }
 
+/** Page Messenger webhooks (`entry[].messaging[]`), including `message.is_echo` for native sends. */
+function extractFacebookMessengerMessage(payload: Record<string, unknown>): InboundMessageDTO | null {
+  const entry = Array.isArray(payload.entry) ? asRecord(payload.entry[0]) : null;
+  if (!entry || !Array.isArray(entry.messaging) || entry.messaging.length === 0) {
+    return null;
+  }
+  const messagingItem = asRecord(entry.messaging[0]);
+  if (!messagingItem) return null;
+  const sender = asRecord(messagingItem.sender);
+  const recipient = asRecord(messagingItem.recipient);
+  const reaction = asRecord(messagingItem.reaction);
+  const message = asRecord(messagingItem.message);
+
+  if (reaction && !message) {
+    return buildReactionInboundDto('facebook', entry, messagingItem, reaction, payload);
+  }
+
+  if (!message) {
+    throw new Error('Invalid webhook payload: required message identifiers are missing');
+  }
+
+  const isEcho = message.is_echo === true;
+  const channelExternalId = isEcho
+    ? coercePositiveGraphId(entry.id) ?? coercePositiveGraphId(sender?.id)
+    : coercePositiveGraphId(entry.id) ?? coercePositiveGraphId(recipient?.id);
+
+  const contactExternalId = isEcho
+    ? coercePositiveGraphId(recipient?.id) ?? coercePositiveGraphId(sender?.id)
+    : coercePositiveGraphId(sender?.id) ?? coercePositiveGraphId(recipient?.id);
+
+  const externalMessageId = instagramExternalMessageId(message);
+  const baseText = instagramMessageText(message);
+  const rich = extractMessengerRichContent(message, 'facebook');
+  const legacyRefs = instagramAttachmentRefs(message);
+
+  const contentParts: string[] = [];
+  if (rich.contentLines.length > 0) {
+    contentParts.push(rich.contentLines.join('\n'));
+  }
+  const user = baseText?.trim() ?? '';
+  if (user) contentParts.push(user);
+  const content = contentParts.length > 0 ? contentParts.join('\n\n') : baseText;
+
+  const attachmentUrls = uniqStrings([...rich.attachmentRefs, ...legacyRefs]);
+
+  let messageType: MessageType =
+    rich.messageType ?? instagramAttachmentMessageType(message);
+  if (messageType === 'image' && attachmentUrls.length === 0) {
+    messageType = 'text';
+  }
+
+  if (!channelExternalId || !externalMessageId || !contactExternalId) {
+    throw new Error('Invalid webhook payload: required message identifiers are missing');
+  }
+
+  const contactName = isEcho
+    ? recipient && typeof recipient.name === 'string' && recipient.name.trim()
+      ? recipient.name.trim()
+      : 'Unknown'
+    : sender && typeof sender.name === 'string' && sender.name.trim()
+      ? sender.name.trim()
+      : 'Unknown';
+
+  const skipAiReply = rich.skipAiReply === true;
+
+  return {
+    channelType: 'facebook',
+    isEcho,
+    skipAiReply: skipAiReply || undefined,
+    channelExternalId,
+    externalMessageId,
+    contactExternalId,
+    contactName,
+    contactAvatarUrl: null,
+    messageType,
+    content,
+    attachmentUrls,
+    rawPayload: payload,
+  };
+}
+
 export class WebhookNormalizerService {
   normalizeFromFacebook(payload: Record<string, unknown>): InboundMessageDTO {
+    const fromMessenger = extractFacebookMessengerMessage(payload);
+    if (fromMessenger) {
+      return fromMessenger;
+    }
     return {
       channelType: 'facebook',
+      isEcho: false,
       ...extractMetaMessage(payload),
     };
   }
@@ -203,23 +597,49 @@ export class WebhookNormalizerService {
     const value = changes ? asRecord(changes.value) : null;
     const messagingItem = entry && Array.isArray(entry.messaging) ? asRecord(entry.messaging[0]) : null;
 
+    const reactionFromMessaging = messagingItem ? asRecord(messagingItem.reaction) : null;
+    const messageFromMessaging = messagingItem ? asRecord(messagingItem.message) : null;
+    if (messagingItem && reactionFromMessaging && !messageFromMessaging) {
+      return buildReactionInboundDto('instagram', entry, messagingItem, reactionFromMessaging, payload);
+    }
+
     const sender = (value ? asRecord(value.sender) : null) ?? (messagingItem ? asRecord(messagingItem.sender) : null);
     const recipient =
       (value ? asRecord(value.recipient) : null) ??
       (messagingItem ? asRecord(messagingItem.recipient) : null);
     const message =
       (value ? asRecord(value.message) : null) ?? (messagingItem ? asRecord(messagingItem.message) : null);
-    const channelExternalId =
-      coercePositiveGraphId(entry?.id) ??
-      coercePositiveGraphId(value?.id) ??
-      coercePositiveGraphId(recipient?.id);
 
     const contactExternalId = instagramContactExternalId(message, sender, recipient);
     const externalMessageId = instagramExternalMessageId(message);
-    const content = instagramMessageText(message);
+    const baseText = instagramMessageText(message);
+    const rich = extractMessengerRichContent(message, 'instagram');
+    const legacyRefs = instagramAttachmentRefs(message);
 
-    const attachmentUrls = instagramAttachmentRefs(message);
-    const messageType = instagramAttachmentMessageType(message);
+    const contentParts: string[] = [];
+    if (rich.contentLines.length > 0) {
+      contentParts.push(rich.contentLines.join('\n'));
+    }
+    const user = baseText?.trim() ?? '';
+    if (user) contentParts.push(user);
+    const content = contentParts.length > 0 ? contentParts.join('\n\n') : baseText;
+
+    const attachmentUrls = uniqStrings([...rich.attachmentRefs, ...legacyRefs]);
+
+    let messageType: MessageType =
+      rich.messageType ?? instagramAttachmentMessageType(message);
+    if (messageType === 'image' && attachmentUrls.length === 0) {
+      messageType = 'text';
+    }
+
+    const isEcho = message?.is_echo === true;
+    const channelExternalId = isEcho
+      ? coercePositiveGraphId(entry?.id) ??
+        coercePositiveGraphId(sender?.id) ??
+        coercePositiveGraphId(value?.id)
+      : coercePositiveGraphId(entry?.id) ??
+        coercePositiveGraphId(value?.id) ??
+        coercePositiveGraphId(recipient?.id);
 
     if (!channelExternalId || !externalMessageId || !contactExternalId) {
       throw new Error('Invalid webhook payload: required message identifiers are missing');
@@ -227,6 +647,8 @@ export class WebhookNormalizerService {
 
     return {
       channelType: 'instagram',
+      isEcho,
+      skipAiReply: rich.skipAiReply === true ? true : undefined,
       channelExternalId,
       externalMessageId,
       contactExternalId,
