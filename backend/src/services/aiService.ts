@@ -5,6 +5,7 @@ import { searchProducts, searchProductsBySimilarity, type Product } from '../db/
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
+import { inboundMessageIndicatesInstagramSharedContext } from './webhookNormalizer';
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
 
@@ -246,7 +247,11 @@ export async function generateReply(
   }
 
   const hasImages = attachmentUrls.length > 0;
-  const systemPrompt = buildSystemPrompt(tenant.name, config, products);
+  let systemPrompt = buildSystemPrompt(tenant.name, config, products);
+  if (inboundMessageIndicatesInstagramSharedContext(inboundMessage)) {
+    systemPrompt +=
+      '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
+  }
   const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage, attachmentUrls);
 
   const model = hasImages

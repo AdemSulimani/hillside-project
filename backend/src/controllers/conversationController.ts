@@ -1,7 +1,7 @@
-import crypto from 'crypto';
+import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { findChannelById } from '../db/models/channel';
-import { createMessage } from '../db/models/message';
+import { createMessage, findMessageByExternalMessageId, type Message } from '../db/models/message';
 import {
   updateConversationStatus,
   touchConversationLastMessageAt,
@@ -24,6 +24,12 @@ import type {
   ConversationMessagesQuery,
   ConversationReplyBody,
 } from '../validators/conversation';
+
+function isPgUniqueViolation(err: unknown): boolean {
+  return Boolean(
+    err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === '23505',
+  );
+}
 
 export async function index(req: Request, res: Response): Promise<void> {
   try {
@@ -135,35 +141,45 @@ export async function reply(req: Request, res: Response): Promise<void> {
     const messageType =
       attachmentUrls.length > 0 && !trimmedText ? 'image' : 'text';
 
-    const outboundMessage = await createMessage({
-      tenant_id: tenantId,
-      conversation_id: id,
-      external_message_id: `human_${crypto.randomUUID()}`,
-      direction: 'outbound',
-      type: messageType,
-      content: trimmedText || null,
-      attachment_urls: attachmentUrls,
-      sent_by: 'human',
-    });
+    const textForChannel =
+      trimmedText ||
+      (attachmentUrls.length > 0 ? '[Image from team]' : '');
+
+    const sendResult = textForChannel
+      ? await sendMessage(channel, contact.external_id, textForChannel)
+      : { ok: true, graphMessageId: null as string | null };
+    const channelDelivered = !textForChannel || sendResult.ok;
+
+    const extId = sendResult.graphMessageId ?? `human_${randomUUID()}`;
+
+    let outboundMessage: Message;
+    try {
+      outboundMessage = await createMessage({
+        tenant_id: tenantId,
+        conversation_id: id,
+        external_message_id: extId,
+        direction: 'outbound',
+        type: messageType,
+        content: trimmedText || null,
+        attachment_urls: attachmentUrls,
+        sent_by: 'human',
+      });
+    } catch (err) {
+      if (!isPgUniqueViolation(err)) {
+        throw err;
+      }
+      const existing = await findMessageByExternalMessageId(extId);
+      if (!existing || existing.tenant_id !== tenantId || existing.conversation_id !== id) {
+        throw err;
+      }
+      outboundMessage = existing;
+    }
 
     void logEvent(tenantId, 'human_reply_sent', {
       conversation_id: id,
       channel_id: channel.id,
       message_id: outboundMessage.id,
     });
-
-    const textForChannel =
-      trimmedText ||
-      (attachmentUrls.length > 0 ? '[Image from team]' : '');
-
-    let channelDelivered = true;
-    try {
-      if (textForChannel) {
-        await sendMessage(channel, contact.external_id, textForChannel);
-      }
-    } catch {
-      channelDelivered = false;
-    }
 
     await setHumanOverride24h(id, tenantId);
     await touchConversationLastMessageAt(id);

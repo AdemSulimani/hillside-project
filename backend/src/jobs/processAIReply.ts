@@ -76,6 +76,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const recentMessages = await findMessagesByConversation(conversationId, 10);
   const lastInbound = [...recentMessages].reverse().find((m) => m.direction === 'inbound');
   const inboundText = (lastInbound?.content ?? '').trim();
+  if (inboundText.startsWith('Customer sent a reaction:')) {
+    console.info('[ai.reply] Skipping automated reply for reaction-only inbound', { conversationId });
+    return;
+  }
   const rawUrls = lastInbound?.attachment_urls;
   const attachmentUrls = Array.isArray(rawUrls)
     ? rawUrls.filter((u): u is string => typeof u === 'string' && u.length > 0)

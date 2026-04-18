@@ -10,14 +10,21 @@ function decryptToken(channel: Channel): string {
   return cryptoService.decrypt(channel.access_token_encrypted);
 }
 
+function readGraphSendMessageId(data: unknown): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const mid = (data as { message_id?: unknown }).message_id;
+  if (typeof mid === 'string' && mid.trim()) return mid.trim();
+  return null;
+}
+
 async function sendFacebookMessage(
   channel: Channel,
   recipientExternalId: string,
   messageText: string,
-): Promise<void> {
+): Promise<string | null> {
   const accessToken = decryptToken(channel);
 
-  await axios.post(
+  const resp = await axios.post(
     `${GRAPH_API_BASE}/me/messages`,
     {
       recipient: { id: recipientExternalId },
@@ -29,6 +36,8 @@ async function sendFacebookMessage(
       headers: { 'Content-Type': 'application/json' },
     },
   );
+
+  return readGraphSendMessageId(resp.data);
 }
 
 /**
@@ -41,7 +50,7 @@ async function sendInstagramMessage(
   channel: Channel,
   recipientExternalId: string,
   messageText: string,
-): Promise<void> {
+): Promise<string | null> {
   if (channel.connection_method === 'oauth_instagram') {
     throw new Error(
       'Instagram Login send path is not enabled yet; verify endpoint/payload for this product first',
@@ -50,7 +59,7 @@ async function sendInstagramMessage(
 
   const accessToken = decryptToken(channel);
 
-  await axios.post(
+  const resp = await axios.post(
     `${GRAPH_API_BASE}/me/messages`,
     {
       recipient: { id: recipientExternalId },
@@ -61,13 +70,15 @@ async function sendInstagramMessage(
       headers: { 'Content-Type': 'application/json' },
     },
   );
+
+  return readGraphSendMessageId(resp.data);
 }
 
 async function sendWhatsAppMessage(
   channel: Channel,
   recipientExternalId: string,
   messageText: string,
-): Promise<void> {
+): Promise<string | null> {
   const accessToken = decryptToken(channel);
   const phoneNumberId = channel.external_id;
 
@@ -86,11 +97,14 @@ async function sendWhatsAppMessage(
       },
     },
   );
+  return null;
 }
+
+export type SendMessageResult = { ok: boolean; graphMessageId: string | null };
 
 const senders: Record<
   ChannelType,
-  (channel: Channel, recipientExternalId: string, messageText: string) => Promise<void>
+  (channel: Channel, recipientExternalId: string, messageText: string) => Promise<string | null>
 > = {
   facebook: sendFacebookMessage,
   instagram: sendInstagramMessage,
@@ -113,17 +127,18 @@ export async function sendMessage(
   channel: Channel,
   recipientExternalId: string,
   messageText: string,
-): Promise<void> {
+): Promise<SendMessageResult> {
   const sender = senders[channel.type];
   if (!sender) {
     console.error(`[channelSender] Unsupported channel type: ${channel.type}`);
-    return;
+    return { ok: false, graphMessageId: null };
   }
 
   try {
     await acquireOutboundSendToken(channel.id);
     assertSupportedConnectionMethod(channel);
-    await sender(channel, recipientExternalId, messageText);
+    const graphMessageId = await sender(channel, recipientExternalId, messageText);
+    return { ok: true, graphMessageId: graphMessageId ?? null };
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     const graphBody =
@@ -135,6 +150,7 @@ export async function sendMessage(
       errMsg,
       graphBody ? `Graph: ${graphBody}` : '',
     );
+    return { ok: false, graphMessageId: null };
   }
 }
 

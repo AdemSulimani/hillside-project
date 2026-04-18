@@ -1,8 +1,13 @@
-import { useEffect, useState } from 'react';
-import { ThumbsDown } from 'lucide-react';
+import { useMemo, useState, useEffect } from 'react';
+import { Link2, ShoppingBag, ThumbsDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import type { InboxMessage } from '@/types/conversation';
+import {
+  attachmentUrlsAfterRichUse,
+  parseInstagramRichDisplay,
+  type InstagramRichParsed,
+} from '@/lib/instagramRichMessageDisplay';
 import { AiMessageFeedbackForm } from '@/components/inbox/AiMessageFeedbackForm';
 import { MessageImageAttachments } from '@/components/inbox/MessageImageAttachments';
 import { Button } from '@/components/ui/button';
@@ -12,6 +17,177 @@ interface MessageBubbleProps {
   agentDisplayName: string;
   /** Emphasize AI messages that failed automated quality checks. */
   qualityFlagged?: boolean;
+}
+
+function displayUrlHost(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url.length > 42 ? `${url.slice(0, 40)}…` : url;
+  }
+}
+
+function InstagramRichBody({
+  parsed,
+  variant,
+}: {
+  parsed: InstagramRichParsed;
+  variant: 'inbound' | 'outbound';
+}) {
+  const isIn = variant === 'inbound';
+  const cardBorder = isIn ? 'border-border/80 bg-background/95' : 'border-primary-foreground/25 bg-primary-foreground/10';
+  const muted = isIn ? 'text-muted-foreground' : 'text-primary-foreground/75';
+  const strong = isIn ? 'text-foreground' : 'text-primary-foreground';
+  const linkClass = isIn
+    ? 'text-primary underline-offset-2 hover:underline'
+    : 'text-primary-foreground underline underline-offset-2 hover:opacity-90';
+
+  const userCaptionBlock =
+    parsed.userCaption != null && parsed.userCaption.trim() !== '' ? (
+      <p className={cn('mt-2 whitespace-pre-wrap break-words text-sm', strong)}>{parsed.userCaption}</p>
+    ) : null;
+
+  if (parsed.kind === 'post_share') {
+    return (
+      <div className="space-y-2">
+        <div className={cn('overflow-hidden rounded-lg border', cardBorder)}>
+          <div className="flex gap-2.5 p-2.5">
+            {parsed.thumbnailUrl ? (
+              <img
+                src={parsed.thumbnailUrl}
+                alt=""
+                className="size-14 shrink-0 rounded-md border border-border/60 object-cover"
+                loading="lazy"
+              />
+            ) : (
+              <div
+                className={cn(
+                  'flex size-14 shrink-0 items-center justify-center rounded-md border border-dashed',
+                  isIn ? 'border-border/80 bg-muted/50' : 'border-primary-foreground/30 bg-primary-foreground/5',
+                )}
+              >
+                <Link2 className={cn('size-5', muted)} aria-hidden />
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className={cn('line-clamp-2 text-sm font-medium leading-snug', strong)}>{parsed.title}</p>
+              <a
+                href={parsed.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn('mt-1 block truncate text-xs', linkClass)}
+              >
+                {displayUrlHost(parsed.url)}
+              </a>
+            </div>
+          </div>
+          {parsed.description ? (
+            <p className={cn('border-t border-border/50 px-2.5 py-2 text-xs leading-relaxed', muted, !isIn && 'border-primary-foreground/20')}>
+              {parsed.description}
+            </p>
+          ) : null}
+        </div>
+        {userCaptionBlock}
+      </div>
+    );
+  }
+
+  if (parsed.kind === 'story_mention' || parsed.kind === 'story_reply') {
+    const label = parsed.kind === 'story_mention' ? 'Story mention' : 'Story reply';
+    const badgeClass = isIn
+      ? 'bg-violet-500/15 text-violet-800 dark:bg-violet-400/20 dark:text-violet-100'
+      : 'bg-primary-foreground/20 text-primary-foreground';
+
+    return (
+      <div className="space-y-2">
+        <div
+          className={cn(
+            'flex flex-wrap gap-2',
+            isIn ? 'items-start' : 'items-start justify-end',
+          )}
+        >
+          <span
+            className={cn(
+              'inline-flex shrink-0 rounded-full px-2.5 py-0.5 text-[0.7rem] font-semibold tracking-tight',
+              badgeClass,
+            )}
+          >
+            {label}
+          </span>
+          {parsed.previewUrl ? (
+            <MessageImageAttachments
+              urls={[parsed.previewUrl]}
+              align={isIn ? 'start' : 'end'}
+              className="-mt-0.5"
+            />
+          ) : null}
+        </div>
+        {parsed.extraRichLines ? (
+          <p className={cn('whitespace-pre-wrap text-xs leading-relaxed', muted)}>{parsed.extraRichLines}</p>
+        ) : null}
+        {userCaptionBlock}
+      </div>
+    );
+  }
+
+  if (parsed.kind === 'reel_share') {
+    const badgeClass = isIn
+      ? 'bg-sky-500/15 text-sky-900 dark:bg-sky-400/15 dark:text-sky-100'
+      : 'bg-primary-foreground/20 text-primary-foreground';
+
+    return (
+      <div className="space-y-2">
+        <div className="flex flex-col items-start gap-1.5">
+          <span
+            className={cn(
+              'inline-flex rounded-full px-2.5 py-0.5 text-[0.7rem] font-semibold tracking-tight',
+              badgeClass,
+            )}
+          >
+            Reel shared
+          </span>
+          <p className={cn('text-sm font-semibold leading-snug', strong)}>{parsed.title}</p>
+          {parsed.description ? (
+            <p className={cn('whitespace-pre-wrap text-xs leading-relaxed', muted)}>{parsed.description}</p>
+          ) : null}
+        </div>
+        {userCaptionBlock}
+      </div>
+    );
+  }
+
+  if (parsed.kind === 'product_tag') {
+    const productShell = isIn
+      ? 'border-emerald-600/25 bg-emerald-600/[0.07] dark:border-emerald-400/30 dark:bg-emerald-400/10'
+      : 'border-primary-foreground/25 bg-primary-foreground/10';
+
+    return (
+      <div className="space-y-2">
+        <div className={cn('rounded-lg border p-3', productShell)}>
+          <div className="flex items-start gap-2.5">
+            <div
+              className={cn(
+                'flex size-9 shrink-0 items-center justify-center rounded-md border',
+                isIn ? 'border-emerald-600/30 bg-emerald-600/10 dark:border-emerald-400/35' : 'border-primary-foreground/25',
+              )}
+            >
+              <ShoppingBag className={cn('size-4', isIn ? 'text-emerald-800 dark:text-emerald-200' : 'text-primary-foreground')} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className={cn('text-[0.65rem] font-semibold uppercase tracking-wide', muted)}>Product</p>
+              <p className={cn('mt-0.5 text-sm font-semibold leading-snug', strong)}>{parsed.productName}</p>
+              {parsed.subtitle ? (
+                <p className={cn('mt-1 whitespace-pre-wrap text-xs leading-relaxed', muted)}>{parsed.subtitle}</p>
+              ) : null}
+            </div>
+          </div>
+        </div>
+        {userCaptionBlock}
+      </div>
+    );
+  }
+
+  return null;
 }
 
 export function MessageBubble({
@@ -25,6 +201,18 @@ export function MessageBubble({
     message.content?.trim() ||
     (hasAttachments ? '' : message.type !== 'text' ? `[${message.type}]` : '');
   const time = formatRelativeShort(message.created_at);
+
+  const richParsed = useMemo(
+    () => parseInstagramRichDisplay(message.content, message.attachment_urls),
+    [message.content, message.attachment_urls],
+  );
+
+  const attachmentUrlsForGallery = useMemo(
+    () => (richParsed ? attachmentUrlsAfterRichUse(richParsed, message.attachment_urls) : message.attachment_urls),
+    [richParsed, message.attachment_urls],
+  );
+
+  const hasGallery = attachmentUrlsForGallery.length > 0;
 
   const [feedbackOpen, setFeedbackOpen] = useState(false);
 
@@ -41,15 +229,19 @@ export function MessageBubble({
             'bg-muted text-foreground',
           )}
         >
-          {text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null}
-          {hasAttachments ? (
+          {richParsed ? (
+            <InstagramRichBody parsed={richParsed} variant="inbound" />
+          ) : text ? (
+            <p className="whitespace-pre-wrap break-words">{text}</p>
+          ) : null}
+          {hasGallery ? (
             <MessageImageAttachments
-              urls={message.attachment_urls}
+              urls={attachmentUrlsForGallery}
               align="start"
-              className={text ? 'mt-2' : undefined}
+              className={richParsed || text ? 'mt-2' : undefined}
             />
           ) : null}
-          {!text && !hasAttachments ? (
+          {!richParsed && !text && !hasGallery ? (
             <p className="whitespace-pre-wrap break-words text-muted-foreground">[Empty message]</p>
           ) : null}
         </div>
@@ -89,7 +281,9 @@ export function MessageBubble({
             <ThumbsDown className="size-3.5" />
           </Button>
         ) : null}
-        {text ? (
+        {richParsed ? (
+          <InstagramRichBody parsed={richParsed} variant="outbound" />
+        ) : text ? (
           <p
             className={cn(
               'whitespace-pre-wrap break-words',
@@ -100,14 +294,14 @@ export function MessageBubble({
             {text}
           </p>
         ) : null}
-        {hasAttachments ? (
+        {hasGallery ? (
           <MessageImageAttachments
-            urls={message.attachment_urls}
+            urls={attachmentUrlsForGallery}
             align="end"
-            className={text ? 'mt-2' : undefined}
+            className={richParsed || text ? 'mt-2' : undefined}
           />
         ) : null}
-        {!text && !hasAttachments ? (
+        {!richParsed && !text && !hasGallery ? (
           <p
             className={cn(
               'whitespace-pre-wrap break-words',

@@ -43,7 +43,7 @@ async function attemptSubscribeOnBase(
     await axios.post(`${baseUrl}/${igUserId}/subscribed_apps`, null, {
       params: {
         access_token: accessToken,
-        subscribed_fields: 'messages',
+        subscribed_fields: 'messages,message_echoes',
       },
     });
 
