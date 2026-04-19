@@ -137,7 +137,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
     const pagesResp = await axios.get<{ data: MetaPage[] }>(`${META_API_BASE}/me/accounts`, {
       params: {
         access_token: longLivedToken,
-        fields: 'id,name,access_token,instagram_business_account{id}',
+        fields: 'id,name,access_token',
       },
     });
 
