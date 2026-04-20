@@ -403,9 +403,24 @@ function instagramContactName(
   value: Record<string, unknown> | null,
 ): string {
   if (sender && typeof sender.name === 'string' && sender.name.trim()) return sender.name.trim();
+  if (sender && typeof sender.username === 'string' && sender.username.trim()) {
+    return sender.username.trim();
+  }
   if (value && typeof value.from_username === 'string' && value.from_username.trim()) {
     return value.from_username.trim();
   }
+  const from = value ? asRecord(value.from) : null;
+  if (from && typeof from.username === 'string' && from.username.trim()) {
+    return from.username.trim();
+  }
+  if (from && typeof from.name === 'string' && from.name.trim()) {
+    return from.name.trim();
+  }
+  const senderId =
+    coercePositiveGraphId(sender?.id) ??
+    coercePositiveGraphId(from?.id) ??
+    coercePositiveGraphId(value?.sender_id);
+  if (senderId) return `IG user ${senderId}`;
   return 'Unknown';
 }
 

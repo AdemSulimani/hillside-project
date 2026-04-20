@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { findChannelByTypeAndExternalId, type ChannelType } from '../db/models/channel';
 import { upsertContact } from '../db/models/contact';
 import {
@@ -20,6 +21,9 @@ import type { InboundWebhookJobData } from './jobTypes';
 
 export type { InboundWebhookJobData } from './jobTypes';
 
+const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
+const INSTAGRAM_GRAPH_API_BASE = 'https://graph.instagram.com/v25.0';
+
 function normalize(channelType: ChannelType, payload: Record<string, unknown>): InboundMessageDTO {
   if (channelType === 'facebook') return webhookNormalizerService.normalizeFromFacebook(payload);
   if (channelType === 'instagram') return webhookNormalizerService.normalizeFromInstagram(payload);
@@ -32,6 +36,148 @@ function shouldIgnoreNormalizationError(channelType: ChannelType, err: unknown):
   }
   if (!(err instanceof Error)) return false;
   return err.message.includes('required message identifiers are missing');
+}
+
+function isUnknownContactName(name: string | null | undefined): boolean {
+  const value = (name ?? '').trim().toLowerCase();
+  return value.length === 0 || value === 'unknown' || /^ig user \d+$/.test(value);
+}
+
+function isProfileLookupDebugEnabled(): boolean {
+  const v = process.env.WEBHOOK_DEBUG?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+async function resolveInstagramContactProfile(
+  contactExternalId: string,
+  accessToken: string,
+): Promise<{ name: string | null; avatarUrl: string | null; username: string | null }> {
+  const endpoints: Array<{ base: string; fields: string }> = [
+    // Instagram Graph supports `profile_pic` (not `profile_picture_url`).
+    { base: INSTAGRAM_GRAPH_API_BASE, fields: 'name,username,profile_pic' },
+    // Fallback for Meta Graph style payloads.
+    { base: GRAPH_API_BASE, fields: 'name,username,profile_picture_url' },
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const resp = await axios.get(`${endpoint.base}/${contactExternalId}`, {
+        params: {
+          fields: endpoint.fields,
+          access_token: accessToken,
+        },
+      });
+      const data = resp.data as {
+        name?: unknown;
+        username?: unknown;
+        profile_pic?: unknown;
+        profile_picture_url?: unknown;
+      };
+      const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : null;
+      const username =
+        typeof data.username === 'string' && data.username.trim() ? data.username.trim() : null;
+      const avatarUrl =
+        typeof data.profile_pic === 'string' && data.profile_pic.trim()
+          ? data.profile_pic.trim()
+          : typeof data.profile_picture_url === 'string' && data.profile_picture_url.trim()
+            ? data.profile_picture_url.trim()
+          : null;
+
+      if (name || username || avatarUrl) {
+        return { name, avatarUrl, username };
+      }
+      if (isProfileLookupDebugEnabled()) {
+        console.info('[inbound] Instagram profile lookup returned no display fields', {
+          endpoint: endpoint.base,
+          contactExternalId,
+        });
+      }
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const graphError = err.response?.data as
+          | {
+              error?: {
+                message?: unknown;
+                type?: unknown;
+                code?: unknown;
+                error_subcode?: unknown;
+                fbtrace_id?: unknown;
+              };
+            }
+          | undefined;
+        const e = graphError?.error;
+        if (isProfileLookupDebugEnabled()) {
+          console.warn('[inbound] Instagram profile lookup failed', {
+            endpoint: endpoint.base,
+            contactExternalId,
+            status: err.response?.status ?? null,
+            code: typeof e?.code === 'number' ? e.code : e?.code ?? null,
+            subcode: typeof e?.error_subcode === 'number' ? e.error_subcode : e?.error_subcode ?? null,
+            type: typeof e?.type === 'string' ? e.type : null,
+            message: typeof e?.message === 'string' ? e.message : err.message,
+            fbtraceId: typeof e?.fbtrace_id === 'string' ? e.fbtrace_id : null,
+          });
+        }
+        continue;
+      }
+      if (isProfileLookupDebugEnabled()) {
+        console.warn('[inbound] Instagram profile lookup failed (non-axios)', {
+          endpoint: endpoint.base,
+          contactExternalId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // Try next endpoint; if both fail, caller falls back to current values.
+    }
+  }
+
+  return { name: null, avatarUrl: null, username: null };
+}
+
+async function resolveFacebookContactProfile(
+  contactExternalId: string,
+  accessToken: string,
+): Promise<{ name: string | null; avatarUrl: string | null }> {
+  try {
+    const resp = await axios.get(`${GRAPH_API_BASE}/${contactExternalId}`, {
+      params: {
+        fields: 'name,profile_pic',
+        access_token: accessToken,
+      },
+    });
+    const data = resp.data as { name?: unknown; profile_pic?: unknown };
+    const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : null;
+    const avatarUrl =
+      typeof data.profile_pic === 'string' && data.profile_pic.trim()
+        ? data.profile_pic.trim()
+        : null;
+    return { name, avatarUrl };
+  } catch (err) {
+    if (isProfileLookupDebugEnabled() && axios.isAxiosError(err)) {
+      const graphError = err.response?.data as
+        | {
+            error?: {
+              message?: unknown;
+              type?: unknown;
+              code?: unknown;
+              error_subcode?: unknown;
+              fbtrace_id?: unknown;
+            };
+          }
+        | undefined;
+      const e = graphError?.error;
+      console.warn('[inbound] Facebook profile lookup failed', {
+        contactExternalId,
+        status: err.response?.status ?? null,
+        code: typeof e?.code === 'number' ? e.code : e?.code ?? null,
+        subcode: typeof e?.error_subcode === 'number' ? e.error_subcode : e?.error_subcode ?? null,
+        type: typeof e?.type === 'string' ? e.type : null,
+        message: typeof e?.message === 'string' ? e.message : err.message,
+        fbtraceId: typeof e?.fbtrace_id === 'string' ? e.fbtrace_id : null,
+      });
+    }
+    return { name: null, avatarUrl: null };
+  }
 }
 
 export async function processInboundMessage(data: InboundWebhookJobData): Promise<void> {
@@ -87,13 +233,56 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     );
   }
 
+  let contactName = normalized.contactName;
+  let contactAvatarUrl = normalized.contactAvatarUrl;
+  let contactMetadata: Record<string, unknown> = {};
+
+  if (normalized.channelType === 'instagram' && isUnknownContactName(contactName)) {
+    try {
+      const accessToken = cryptoService.decrypt(channel.access_token_encrypted);
+      const profile = await resolveInstagramContactProfile(normalized.contactExternalId, accessToken);
+      if (profile.name || profile.username) {
+        contactName = profile.name ?? profile.username!;
+      }
+      if (profile.avatarUrl) {
+        contactAvatarUrl = profile.avatarUrl;
+      }
+      if (profile.username) {
+        contactMetadata = { username: profile.username };
+      }
+    } catch (err) {
+      console.warn('[inbound] Could not resolve instagram contact profile', {
+        contactExternalId: normalized.contactExternalId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (normalized.channelType === 'facebook' && isUnknownContactName(contactName)) {
+    try {
+      const accessToken = cryptoService.decrypt(channel.access_token_encrypted);
+      const profile = await resolveFacebookContactProfile(normalized.contactExternalId, accessToken);
+      if (profile.name) {
+        contactName = profile.name;
+      }
+      if (profile.avatarUrl) {
+        contactAvatarUrl = profile.avatarUrl;
+      }
+    } catch (err) {
+      console.warn('[inbound] Could not resolve facebook contact profile', {
+        contactExternalId: normalized.contactExternalId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const contact = await upsertContact({
     tenant_id: channel.tenant_id,
     channel_id: channel.id,
     external_id: normalized.contactExternalId,
-    name: normalized.contactName,
-    avatar_url: normalized.contactAvatarUrl,
-    metadata: {},
+    name: contactName,
+    avatar_url: contactAvatarUrl,
+    metadata: contactMetadata,
   });
 
   const conversation = await upsertConversation({
