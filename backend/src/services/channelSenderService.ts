@@ -5,6 +5,7 @@ import { acquireOutboundSendToken } from './outboundChannelRateLimiter';
 
 /** Keep in sync with Meta OAuth / Graph usage elsewhere (e.g. metaOAuthController). */
 const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
+const INSTAGRAM_GRAPH_API_BASE = 'https://graph.instagram.com/v25.0';
 
 function decryptToken(channel: Channel): string {
   return cryptoService.decrypt(channel.access_token_encrypted);
@@ -51,13 +52,26 @@ async function sendInstagramMessage(
   recipientExternalId: string,
   messageText: string,
 ): Promise<string | null> {
-  if (channel.connection_method === 'oauth_instagram') {
-    throw new Error(
-      'Instagram Login send path is not enabled yet; verify endpoint/payload for this product first',
-    );
-  }
-
   const accessToken = decryptToken(channel);
+  if (channel.connection_method === 'oauth_instagram') {
+    /**
+     * Instagram business login channels are stored with IG account id in `external_id`.
+     * Sending is done against that IG id using the Instagram access token.
+     */
+    const resp = await axios.post(
+      `${INSTAGRAM_GRAPH_API_BASE}/${channel.external_id}/messages`,
+      {
+        recipient: { id: recipientExternalId },
+        message: { text: messageText },
+      },
+      {
+        params: { access_token: accessToken },
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+
+    return readGraphSendMessageId(resp.data);
+  }
 
   const resp = await axios.post(
     `${GRAPH_API_BASE}/me/messages`,
