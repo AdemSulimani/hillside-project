@@ -13,7 +13,7 @@ These Terms govern all access to and use of the Platform, including any software
 To access the Platform, you must:
 be at least 18 years of age;
 be duly authorized to act on behalf of your business entity and bind it to these Terms;
-provide accurate, complete, and current registration and billing information; and
+provide accurate, complete, and current registration information; and
 operate a legitimate business with a lawful use case compatible with the Platform's intended purpose.
 
 2.2 Account Security
