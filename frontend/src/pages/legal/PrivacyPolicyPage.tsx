@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 
-const EFFECTIVE_DATE = 'April 15, 2026';
-const LAST_UPDATED = 'April 15, 2026';
+const EFFECTIVE_DATE = 'April 14, 2026';
+const LAST_UPDATED = 'April 21, 2026';
 
 export default function PrivacyPolicyPage() {
   return (
@@ -14,8 +14,8 @@ export default function PrivacyPolicyPage() {
         <h2 className="text-base font-semibold text-foreground">Data deletion requests</h2>
         <p className="mt-2 text-sm leading-6 text-foreground">
           To request deletion of personal data, email{' '}
-          <a href="mailto:[privacy@yourdomain.com]" className="font-medium text-primary underline">
-            [privacy@yourdomain.com]
+          <a href="mailto:privacy@thehillside.io" className="font-medium text-primary underline">
+            privacy@thehillside.io
           </a>
           . Step-by-step instructions are on our{' '}
           <Link to="/data-deletion" className="font-medium text-primary underline">
@@ -27,314 +27,528 @@ export default function PrivacyPolicyPage() {
 
       <div className="mt-8 space-y-8 text-sm leading-6 text-foreground">
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">1. Who We Are</h2>
           <p>
-            [Your Company Legal Name] (&quot;we&quot;, &quot;us&quot;, &quot;our&quot;) operates [Platform Name], an AI-powered
-            social messaging and sales automation platform for businesses.
+            This Privacy Policy describes how Hillside L.L.C. (&quot;Hillside&quot;, &quot;we&quot;, &quot;us&quot;, or
+            &quot;our&quot;) collects, uses, discloses, and handles personal data in connection with the Hillside
+            platform and related services. It applies to: (a) business customers and authorized users who access the
+            platform; and (b) to the extent applicable, end users whose data is processed through the platform on
+            behalf of our business customers.
           </p>
           <p>
-            Contact us:
+            For questions about this Privacy Policy or to exercise your rights, contact us at:
             <br />
-            Email: [support@yourdomain.com]
+            Email: privacy@thehillside.io
             <br />
-            Address: [Full legal address]
+            Address: St. Ndue Përlleshi, 207, Floor 2, No. 8, Matiçan, Pristina, Kosovo
           </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">2. What Data We Collect</h2>
+          <h2 className="text-xl font-semibold">1. Who We Are</h2>
+          <p>
+            Hillside L.L.C. is a limited liability company registered in Kosovo. We operate Hillside, an AI-powered
+            social messaging and sales automation platform for businesses. For the purposes of applicable data
+            protection law, Hillside is the data controller with respect to account and platform data of our business
+            customers and their authorized users. With respect to end-user data processed through the platform on
+            behalf of business customers (including Meta Platform Data), Hillside acts as a data processor operating
+            under the instructions of the relevant business customer.
+          </p>
+          <p>
+            Data Deletion: To request deletion of your personal data, contact privacy@thehillside.io with the subject
+            line &quot;Data Deletion Request&quot;. For Meta Platform Data, use the subject line &quot;Meta Data
+            Deletion Request&quot;. We will process requests in accordance with applicable law and Meta platform
+            requirements.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-semibold">2. Data We Collect</h2>
+          <h3 className="text-base font-semibold">2.1 Account and Business Data</h3>
+          <p>When you register and configure your account, we collect:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>business and account holder identifiers: name, email address, business name, and profile details;</li>
+            <li>
+              onboarding and configuration data: platform setup preferences, business settings, and feature
+              configurations; and
+            </li>
+            <li>
+              billing and payment information: as necessary to process fees, including payment method details handled
+              via our payment processors.
+            </li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.2 Connected Channel Data</h3>
+          <p>When you connect Meta channels to the platform, we collect:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>channel identifiers: Facebook Page IDs, Instagram account IDs, and WhatsApp Business phone number IDs;</li>
+            <li>
+              access credentials: encrypted OAuth tokens and authorization credentials necessary to send and receive
+              messages through connected channels; and
+            </li>
+            <li>channel configuration settings: per-channel feature settings and integration parameters.</li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.3 Message and Conversation Data</h3>
+          <p>When your connected channels receive or send messages, we process:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>inbound and outbound message content, including text, attachments, and media;</li>
+            <li>sender and recipient platform identifiers (as provided by the Meta API);</li>
+            <li>message timestamps and delivery metadata; and</li>
+            <li>conversation history and thread context necessary to provide reply and automation functionality.</li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.4 Order and Contact Data</h3>
+          <p>In connection with order automation workflows, we collect:</p>
           <ul className="list-disc space-y-1 pl-5">
             <li>
-              <strong>Account and business data:</strong> name, email, business profile details, and onboarding
+              customer contact details provided during conversations (e.g., name, delivery address, contact
+              information) as entered or confirmed by the end user in the course of a transaction;
+            </li>
+            <li>order records and associated product information; and</li>
+            <li>
+              order status data, including system-determined order completion status used for workflow automation and
+              commission calculation.
+            </li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.5 Billing Event and Commission Data</h3>
+          <p>For usage-based and commission-based billing, we generate and retain:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              system-generated records of billable events, including confirmed order completions and resolved support
+              cases;
+            </li>
+            <li>commission calculation data, including applicable rates and business account identifiers; and</li>
+            <li>internal administrative notifications and audit logs related to billing events.</li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.6 Product Catalog and AI Configuration Data</h3>
+          <p>We collect:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              product catalog data: names, descriptions, pricing, and availability settings you upload or configure;
+              and
+            </li>
+            <li>
+              AI configuration settings: AI tone preferences, response restrictions, workflow logic, and related
+              configurations.
+            </li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.7 Usage and Security Logs</h3>
+          <p>We collect technical and operational data including:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>IP addresses, browser type, device identifiers, and operating system information;</li>
+            <li>access and session events, login history, and authentication records; and</li>
+            <li>platform usage activity, feature interaction logs, and error reports.</li>
+          </ul>
+
+          <h3 className="text-base font-semibold">2.8 AI Feedback Data</h3>
+          <p>Where you or your authorized users submit corrections or ratings on AI-generated responses, we collect:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>feedback content and the associated AI output; and</li>
+            <li>where necessary for model improvement, the message context associated with the AI output.</li>
+          </ul>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-semibold">3. Sources of Data</h2>
+          <p>We collect personal data from the following sources:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              Directly from you: through account registration, onboarding, product configuration, support requests, and
+              in-platform settings.
+            </li>
+            <li>
+              From Meta Platforms: through the Facebook Graph API, Instagram Graph API, and WhatsApp Business Cloud
+              API, via webhooks and API calls initiated when your connected channels receive or send customer messages.
+            </li>
+            <li>
+              From your use of the platform: through your interactions with platform features, dashboards, and
               settings.
             </li>
             <li>
-              <strong>Connected channel data:</strong> Page IDs, Instagram account IDs, WhatsApp Business phone number
-              IDs,
-              encrypted channel access tokens, and related connection metadata.
-            </li>
-            <li>
-              <strong>Order automation and billing event data:</strong> AI order-completion status events, linked
-              business/company identifiers, internal admin completion notifications, and commission calculation records
-              (including configured commission rate, such as 5% where applicable).
-            </li>
-            <li>
-              <strong>Message and conversation data:</strong> inbound/outbound content, attachments, sender platform
-              identifiers, timestamps, and conversation history.
-            </li>
-            <li>
-              <strong>Order and contact data:</strong> customer details provided during conversations and related order
-              records.
-            </li>
-            <li>
-              <strong>Product catalog and AI settings:</strong> products, pricing, AI tone, restrictions, and related
-              configuration.
-            </li>
-            <li>
-              <strong>Usage and security logs:</strong> technical and operational logs (which may include IP address,
-              browser/device information, and access/session events) where available through our platform
-              infrastructure and security tooling.
-            </li>
-            <li>
-              <strong>AI feedback data:</strong> feedback and corrections submitted on AI responses.
+              From your customers: customer data is provided during conversations and order workflows within your
+              connected channels, and is processed on your behalf as the business customer.
             </li>
           </ul>
+          <p>
+            If you disconnect a Meta channel or third-party integration from the platform, we will cease ongoing
+            collection of data from that source. Data previously collected will be retained and processed in accordance
+            with this Privacy Policy and applicable legal obligations, unless you request deletion as described in
+            Section 12.
+          </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">3. Where Data Comes From</h2>
+          <h2 className="text-xl font-semibold">4. Meta Platform Data: Processing Principles</h2>
+          <p>
+            This section sets out Hillside&apos;s specific obligations and commitments with respect to data obtained
+            from Meta&apos;s platforms through API access (&quot;Meta Platform Data&quot;), in accordance with Meta
+            Platform Terms and Developer Policies.
+          </p>
+          <h3 className="text-base font-semibold">4.1 Processor Role</h3>
+          <p>
+            Hillside processes Meta Platform Data solely as a data processor on behalf of, and under the instructions
+            of, our business customers. Hillside does not independently determine the purposes or means of processing
+            Meta Platform Data beyond what is necessary to deliver the services requested by the business customer.
+          </p>
+          <h3 className="text-base font-semibold">4.2 Permitted Use</h3>
+          <p>Meta Platform Data is processed exclusively to:</p>
           <ul className="list-disc space-y-1 pl-5">
-            <li>Directly from you (account setup, onboarding, product setup, support requests).</li>
+            <li>deliver inbound and outbound messaging functionality through your connected Meta channels;</li>
+            <li>generate AI-assisted responses and support sales automation workflows authorized by you;</li>
+            <li>provide customer support and inbox management features; and</li>
             <li>
-              From Meta platforms (Facebook, Instagram, and WhatsApp Business) through APIs and webhooks when your
-              connected channels receive customer messages.
+              enable analytics, quality monitoring, and service improvement features within the scope of your
+              configured account.
             </li>
-            <li>
-              From channel authorizations you choose in our product. Facebook and Instagram can be connected as
-              separate integrations, and Instagram may be connected through Instagram Login without generally requiring
-              a linked Facebook Page in our current integration flow, subject to Meta platform requirements and account
-              configuration.
-            </li>
-            <li>
-              From optional WhatsApp Business integration that you choose to connect, which is processed separately from
-              Facebook and Instagram authorization flows.
-            </li>
-            <li>From your use of our dashboard and platform features.</li>
           </ul>
+          <h3 className="text-base font-semibold">4.3 Prohibited Uses of Meta Platform Data</h3>
+          <p>Hillside expressly does not, and will not:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>sell, license, or transfer Meta Platform Data to any third party for their independent use;</li>
+            <li>
+              use Meta Platform Data for advertising, retargeting, or marketing purposes unrelated to the specific
+              business interaction through which the data was collected;
+            </li>
+            <li>
+              create or contribute to independent user profiles by combining Meta Platform Data with data from other
+              businesses or external sources;
+            </li>
+            <li>
+              aggregate Meta Platform Data across multiple business customers for purposes of cross-business analytics,
+              profiling, or data monetization;
+            </li>
+            <li>
+              use Meta Platform Data for credit scoring, fraud scoring unrelated to platform security, surveillance, or
+              law enforcement purposes (except where required by law); or
+            </li>
+            <li>
+              use Meta Platform Data in any manner inconsistent with the specific permissions granted by the end user
+              or business customer.
+            </li>
+          </ul>
+          <h3 className="text-base font-semibold">4.4 Messaging Initiation</h3>
+          <p>
+            All automated or AI-assisted messaging through Meta channels is initiated, configured, or explicitly
+            authorized by the business customer. The platform does not autonomously initiate outbound communications
+            with end users outside of the workflows, message templates, and configurations established by the business
+            customer. Business customers are responsible for ensuring that all automated communications comply with
+            applicable Meta messaging policies, including opt-in requirements and permitted message windows.
+          </p>
+          <h3 className="text-base font-semibold">4.5 Data Segregation</h3>
+          <p>
+            Meta Platform Data is processed on a per-business-customer basis. Data from one business customer&apos;s
+            connected channels is not shared with, aggregated with, or used to benefit any other business customer.
+            Each authorized Meta channel integration is processed independently within the scope of the specific
+            permissions granted by the business customer.
+          </p>
+          <h3 className="text-base font-semibold">4.6 AI Processing of Meta Platform Data</h3>
+          <p>
+            Message content and related metadata obtained through Meta channels may be processed by AI providers acting
+            as Hillside&apos;s authorized subprocessors. Such processing is limited to generating AI-assisted replies,
+            detecting purchase intent, supporting order workflows, and conducting quality checks&mdash;all on behalf of the
+            relevant business customer. AI providers are bound by written agreements that restrict their use of the
+            data to providing services on Hillside&apos;s behalf.
+          </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">4. Cookies and Similar Technologies</h2>
+          <h2 className="text-xl font-semibold">5. Cookies and Similar Technologies</h2>
+          <h3 className="text-base font-semibold">5.1 Authentication Cookies</h3>
           <p>
-            We use a small number of cookies and similar technologies that are needed to operate the service securely.
+            We use HTTP-only session cookies to manage authentication and maintain your login state. These cookies are
+            strictly necessary for platform security and are not used for advertising or behavioral tracking.
           </p>
+          <h3 className="text-base font-semibold">5.2 Browser Storage</h3>
+          <p>
+            Certain platform features may store session tokens or operational data in browser local storage to enable
+            specific application functionality. This is limited to operational use within the platform.
+          </p>
+          <h3 className="text-base font-semibold">5.3 No Third-Party Advertising Cookies</h3>
+          <p>
+            We do not use third-party advertising cookies, behavioral tracking pixels, or cross-site tracking
+            technologies in the platform as currently operated. If this changes, we will update this Privacy Policy,
+            provide appropriate notice, and implement required consent mechanisms.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-semibold">6. Purposes and Legal Bases for Processing</h2>
+          <h3 className="text-base font-semibold">6.1 Purposes</h3>
+          <p>We process personal data for the following purposes:</p>
           <ul className="list-disc space-y-1 pl-5">
             <li>
-              <strong>Authentication cookies:</strong> when you sign in, our servers may set an HTTP-only cookie used to
-              refresh your session and keep you signed in according to your &quot;remember me&quot; choice. These
-              cookies are used for security and session management, not for cross-site advertising.
+              Providing the platform: enabling channel connection, inbox management, AI-assisted reply, order workflow
+              automation, and related features.
             </li>
             <li>
-              <strong>Browser storage (admin tools):</strong> the platform owner admin interface may store an access
-              token in the browser&apos;s local storage so that admin sessions work. This is limited to that part of the
-              product.
+              Billing and fee calculation: calculating subscription, usage-based, and commission fees; generating
+              invoices; and processing payments.
             </li>
-          </ul>
-          <p>
-            We do not use third-party advertising or behavioral tracking cookies in the product as we ship it today. If
-            we add optional analytics or similar technologies later, we will update this policy and provide any
-            controls or notices required by law.
-          </p>
-        </section>
-
-        <section className="space-y-3">
-          <h2 className="text-xl font-semibold">5. Why We Process Data</h2>
-          <ul className="list-disc space-y-1 pl-5">
-            <li>Provide channel connection, inbox, and reply functionality.</li>
-            <li>Generate AI replies and assist sales conversations.</li>
-            <li>Detect purchase intent and support order workflows.</li>
             <li>
-              Determine when AI has fully completed an order workflow, trigger internal admin completion notifications,
-              and calculate contract-based commissions (such as 5% where applicable).
+              Security and fraud prevention: authenticating users, monitoring for unauthorized access, and maintaining
+              platform integrity.
             </li>
-            <li>Provide analytics, quality monitoring, and service improvements.</li>
+            <li>Customer support: responding to account inquiries and resolving platform issues.</li>
             <li>
-              Prepare model fine-tuning and improve reply quality using AI feedback records (and associated message
-              content where necessary), as described in Section 9 (Subprocessors).
+              Service improvement: using AI feedback data, usage logs, and anonymized analytics to improve platform
+              performance and response quality.
             </li>
-            <li>Maintain account security, fraud prevention, and customer support.</li>
+            <li>Legal compliance: retaining records and fulfilling obligations under applicable law.</li>
           </ul>
-        </section>
-
-        <section className="space-y-3">
-          <h2 className="text-xl font-semibold">6. Legal Basis (EU/UK)</h2>
-          <p>Where required by law, we rely on one or more of the following legal bases:</p>
+          <h3 className="text-base font-semibold">6.2 Legal Basis (EU/UK Customers)</h3>
+          <p>
+            Where applicable data protection law (such as the GDPR or UK GDPR) requires a legal basis, we rely on:
+          </p>
           <ul className="list-disc space-y-1 pl-5">
-            <li>Performance of a contract.</li>
-            <li>Legitimate interests (for example, security and product operations).</li>
-            <li>Consent (where legally required, such as optional marketing communications).</li>
-            <li>Compliance with legal obligations.</li>
+            <li>Performance of a contract: processing necessary to provide the platform services under these Terms.</li>
+            <li>
+              Legitimate interests: security operations, fraud prevention, service improvement, and enforcement of our
+              terms, where not overridden by your rights.
+            </li>
+            <li>Legal obligation: compliance with applicable laws, regulations, and legal process.</li>
+            <li>Consent: where required by law, such as optional marketing communications (if any).</li>
           </ul>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">7. Meta Platform Data and AI Processing</h2>
+          <h2 className="text-xl font-semibold">7. Disclosure of Data</h2>
+          <p>We do not sell personal data. We disclose personal data only in the following circumstances:</p>
+          <h3 className="text-base font-semibold">7.1 Service Providers (Subprocessors)</h3>
           <p>
-            We process Meta Platform Data solely to provide messaging, inbox, and automation features requested by our
-            users. We do not sell Meta Platform Data and do not use it for unrelated advertising, profiling, or data
-            brokerage purposes.
+            We share data with authorized subprocessors who process data on our behalf to operate and support the
+            platform. All subprocessors are bound by written agreements that restrict their use of data to providing
+            services on our behalf, impose data protection obligations, and prohibit use for any independent purpose.
+            See Section 9 for a list of key subprocessors.
           </p>
+          <h3 className="text-base font-semibold">7.2 Meta APIs</h3>
           <p>
-            In our current architecture, Facebook and Instagram are authorized through separate connection flows. If you
-            connect both, we process data from each authorized channel independently for the features you enable.
+            When you send replies or interact with customers through connected Meta channels, message content is
+            transmitted via Meta&apos;s APIs as part of the platform&apos;s core functionality.
           </p>
+          <h3 className="text-base font-semibold">7.3 Legal Requirements</h3>
           <p>
-            Message content and attachments may be processed by AI and infrastructure providers acting on our behalf to
-            power replies, quality checks, and product functionality.
+            We may disclose personal data when required by applicable law, valid legal process (such as a court order
+            or regulatory demand), or where necessary to protect the rights, property, or safety of Hillside, our
+            users, or third parties. Where legally permissible, we will notify you of such requests.
           </p>
+          <h3 className="text-base font-semibold">7.4 Business Transfers</h3>
           <p>
-            We use service providers under contractual terms requiring appropriate data protection and restricted use.
+            In connection with a merger, acquisition, reorganization, or sale of all or substantially all of our
+            assets, personal data may be transferred to the successor entity, subject to appropriate confidentiality
+            and data protection obligations.
           </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">8. How We Share Data</h2>
-          <p>We do not sell personal data.</p>
+          <h2 className="text-xl font-semibold">8. AI Processing and Model Improvement</h2>
+          <p>
+            AI-generated outputs are produced using AI infrastructure provided by our authorized subprocessors
+            (including OpenAI, L.L.C.). When you or your authorized users submit feedback on AI responses, we may use
+            that feedback data&mdash;and, where necessary, the associated message context&mdash;to:
+          </p>
           <ul className="list-disc space-y-1 pl-5">
-            <li>With service providers that operate our platform on our behalf.</li>
-            <li>With Meta APIs when sending replies through connected channels.</li>
-            <li>When required by law or valid legal process.</li>
-            <li>In a merger, acquisition, or asset sale with appropriate safeguards.</li>
+            <li>improve the accuracy and quality of AI-generated responses;</li>
+            <li>fine-tune and optimize AI models used in the platform; and</li>
+            <li>conduct quality assurance and monitoring of automated reply functionality.</li>
           </ul>
+          <p>
+            This processing is conducted in accordance with the contractual terms between Hillside and its AI
+            subprocessors, which include data use restrictions applicable to the processing of customer data.
+          </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">9. Subprocessors (service providers)</h2>
+          <h2 className="text-xl font-semibold">9. Subprocessors</h2>
           <p>
-            We engage the categories of providers below to host and operate the service. Replace bracketed entries with
-            your production vendors and regions before publishing.
+            Hillside uses the following categories of authorized subprocessors to operate and support the platform. All
+            subprocessors are bound by contractual data protection obligations restricting them to processing data
+            solely on Hillside&apos;s behalf.
           </p>
-          <div className="overflow-x-auto rounded-md border border-border">
-            <table className="w-full min-w-[36rem] border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/50">
-                  <th className="px-3 py-2 font-semibold">Provider</th>
-                  <th className="px-3 py-2 font-semibold">Purpose</th>
-                  <th className="px-3 py-2 font-semibold">Typical location</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 align-top">OpenAI, L.L.C.</td>
-                  <td className="px-3 py-2 align-top">
-                    AI-generated replies, vision over attachments where used, embeddings/product search, quality
-                    evaluation, and fine-tuning dataset preparation when enabled
-                  </td>
-                  <td className="px-3 py-2 align-top">United States (confirm in your OpenAI account settings)</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 align-top">Meta Platforms, Inc.</td>
-                  <td className="px-3 py-2 align-top">
-                    Delivering and receiving messages through Facebook, Instagram, and WhatsApp Business APIs
-                  </td>
-                  <td className="px-3 py-2 align-top">As described in Meta&apos;s terms and policies</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 align-top">Sentry (Functional Software, Inc.)</td>
-                  <td className="px-3 py-2 align-top">Error and performance monitoring when you configure Sentry</td>
-                  <td className="px-3 py-2 align-top">United States (or region per your Sentry project)</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 align-top">[Your application hosting provider]</td>
-                  <td className="px-3 py-2 align-top">Hosting the API and web application</td>
-                  <td className="px-3 py-2 align-top">[Region]</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 align-top">PostgreSQL</td>
-                  <td className="px-3 py-2 align-top">Primary application database (self-hosted or via your DB host)</td>
-                  <td className="px-3 py-2 align-top">[Region]</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-3 py-2 align-top">Redis</td>
-                  <td className="px-3 py-2 align-top">Background jobs and caching (self-hosted or via your Redis host)</td>
-                  <td className="px-3 py-2 align-top">[Region]</td>
-                </tr>
-                <tr>
-                  <td className="px-3 py-2 align-top">Application file storage</td>
-                  <td className="px-3 py-2 align-top">
-                    Storing uploaded attachments and generated files on application servers or your object storage
-                  </td>
-                  <td className="px-3 py-2 align-top">[Region]</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            We may update this list when we change vendors. Material changes will be reflected in this policy or an
-            accompanying notice where required by law.
+          <p>Key Subprocessors:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              OpenAI, L.L.C. (United States): AI-generated response infrastructure, content processing, and model
+              improvement features.
+            </li>
+            <li>
+              Meta Platforms, Inc. (United States): Delivery and receipt of messages through Facebook, Instagram, and
+              WhatsApp Business APIs.
+            </li>
+            <li>
+              Cloud infrastructure and hosting providers: Application hosting, database management, and related
+              infrastructure services.
+            </li>
+            <li>
+              Monitoring and observability providers: System performance tracking, error detection, and operational
+              logging.
+            </li>
+          </ul>
+          <p>
+            These providers may process data in jurisdictions outside your own, including the United States. Where
+            required by applicable law, we ensure appropriate safeguards are in place (such as Standard Contractual
+            Clauses or equivalent mechanisms) for international data transfers.
+          </p>
+          <p>
+            We may update our subprocessors from time to time. Material updates to key subprocessors will be reflected
+            in this Privacy Policy with a revised Effective Date.
           </p>
         </section>
 
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">10. Data Retention</h2>
+          <h3 className="text-base font-semibold">10.1 General Retention Principles</h3>
           <p>
-            We retain data only as long as needed for legitimate business purposes, legal obligations, dispute
-            resolution, security, and enforcement of agreements. You can request deletion as described below.
+            We retain personal data only for as long as necessary to fulfill the purposes described in this Privacy
+            Policy, comply with applicable legal obligations, resolve disputes, enforce our agreements, and maintain
+            platform security. When data is no longer required for these purposes, we securely delete or anonymize it.
           </p>
+          <h3 className="text-base font-semibold">10.2 Meta Platform Data Retention</h3>
           <p>
-            We may retain and process AI feedback records (and associated message content where necessary) to prepare
-            model fine-tuning and improve reply quality, as described in Section 9 (Subprocessors).
+            Meta Platform Data is retained only for as long as necessary to provide the platform&apos;s messaging,
+            automation, and customer support functionality to the relevant business customer, or as required by
+            applicable legal obligations. We do not retain Meta Platform Data for unrelated purposes following the
+            termination of a business customer&apos;s account.
           </p>
+          <h3 className="text-base font-semibold">10.3 AI Feedback Data</h3>
           <p>
-            If you publish specific retention periods elsewhere (for example in contracts or admin docs), those
-            published periods govern unless legal obligations require longer retention.
+            AI feedback data, including associated message context where necessary, may be retained for the purpose of
+            model improvement and quality optimization, subject to applicable contractual and legal limitations. Where
+            retention periods are specified in your service agreement or order, those periods govern.
+          </p>
+          <h3 className="text-base font-semibold">10.4 Billing Records</h3>
+          <p>
+            Billing event records, invoices, and commission calculation data are retained for the period required by
+            applicable tax, accounting, and commercial law, or as otherwise required by applicable legal obligations.
           </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">11. Your Rights</h2>
+          <h2 className="text-xl font-semibold">11. Your Privacy Rights</h2>
           <p>
-            Depending on your location, you may have rights to access, correct, delete, restrict, or object to certain
-            processing, and to request portability where applicable.
+            Depending on your location and applicable law, you may have the following rights with respect to your
+            personal data:
           </p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>
+              Access: the right to request confirmation of whether we process your personal data and to receive a copy
+              of that data.
+            </li>
+            <li>Correction: the right to request correction of inaccurate or incomplete personal data.</li>
+            <li>
+              Erasure: the right to request deletion of your personal data where it is no longer necessary for the
+              purposes for which it was collected, or where you withdraw consent (where consent is the legal basis).
+            </li>
+            <li>Restriction: the right to request restriction of processing in certain circumstances.</li>
+            <li>Objection: the right to object to processing based on legitimate interests.</li>
+            <li>
+              Portability: the right to receive your personal data in a structured, machine-readable format where
+              technically feasible.
+            </li>
+          </ul>
           <p>
-            To exercise these rights, contact: [privacy@yourdomain.com]. We will respond within the timeframe required
-            by applicable law.
+            To exercise any of these rights, contact privacy@thehillside.io. We will respond within the timeframe
+            required by applicable law (generally within 30 days under the GDPR). We may require verification of your
+            identity before processing your request.
           </p>
         </section>
 
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">12. Data Deletion Requests</h2>
+          <h3 className="text-base font-semibold">12.1 Business Customer Requests</h3>
           <p>
-            You can request deletion by contacting [privacy@yourdomain.com] or using our dedicated{' '}
-            <Link to="/data-deletion" className="font-medium text-primary underline">
-              Data deletion requests
-            </Link>{' '}
-            page.
+            Business customers may request deletion of their account data by contacting privacy@thehillside.io. We will
+            process deletion requests in accordance with our data retention obligations, applicable law, and any
+            binding legal holds.
           </p>
+          <h3 className="text-base font-semibold">12.2 End User Requests</h3>
           <p>
-            If you are an end customer messaging a business that uses our platform, you may contact that business
-            directly, or contact us and we will assist where applicable.
+            If you are an end user whose data has been processed through a business customer&apos;s connected channels,
+            you may submit a deletion request either to the relevant business directly or to Hillside at
+            privacy@thehillside.io. We will assist in processing such requests within the scope of our role as data
+            processor.
           </p>
+          <h3 className="text-base font-semibold">12.3 Meta Platform Data Deletion</h3>
           <p>
-            For Meta platform-related deletion instructions, contact [privacy@yourdomain.com] with subject line
-            &quot;Meta Data Deletion Request&quot; and include identifying details needed to locate your records.
+            To submit a deletion request specifically relating to Meta Platform Data, contact privacy@thehillside.io
+            with the subject line &quot;Meta Data Deletion Request&quot; and include sufficient information to identify
+            your records (e.g., platform account identifier or connected channel identifier). We will process such
+            requests in accordance with applicable Meta platform requirements and applicable law.
+          </p>
+          <h3 className="text-base font-semibold">12.4 Processing Timeframe</h3>
+          <p>
+            We aim to confirm receipt of deletion requests within five (5) business days and to complete processing
+            within thirty (30) calendar days, except where extended timelines are required by legal or operational
+            constraints.
           </p>
         </section>
 
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">13. Security</h2>
           <p>
-            We use technical and organizational safeguards designed to protect personal data, including encrypted
-            transport, access controls, and operational security monitoring.
+            Hillside implements appropriate technical and organizational security measures designed to protect personal
+            data against unauthorized access, disclosure, alteration, or destruction. These measures include, without
+            limitation:
           </p>
+          <ul className="list-disc space-y-1 pl-5">
+            <li>encrypted data transmission using TLS;</li>
+            <li>access controls and authentication requirements for platform access;</li>
+            <li>operational security monitoring and logging; and</li>
+            <li>vendor security assessments for key subprocessors.</li>
+          </ul>
           <p>
-            No method of transmission or storage is perfectly secure. If you believe you found a security issue, please
-            contact [security@yourdomain.com].
+            No security measure can guarantee absolute protection. If you identify a security vulnerability or
+            incident, please contact security@thehillside.io promptly.
           </p>
         </section>
 
         <section className="space-y-3">
-          <h2 className="text-xl font-semibold">14. International Transfers</h2>
+          <h2 className="text-xl font-semibold">14. International Data Transfers</h2>
           <p>
-            We may process data in countries outside your own. Where required, we use appropriate safeguards for
-            international transfers, such as contractual protections and legal transfer mechanisms.
+            Personal data may be transferred to and processed in countries outside your country of residence, including
+            the United States (where Meta Platforms, Inc. and OpenAI, L.L.C. are based). Where required by applicable
+            data protection law, we ensure that such international transfers are conducted in accordance with
+            appropriate safeguards, including Standard Contractual Clauses approved by the relevant supervisory
+            authority or equivalent legally recognized transfer mechanisms.
           </p>
         </section>
 
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">15. Children</h2>
           <p>
-            Our service is intended for businesses and is not directed to children under the applicable legal age in
-            their jurisdiction.
+            The platform is intended exclusively for use by business entities and adult individuals operating in a
+            professional capacity. The platform is not directed to, and we do not knowingly collect personal data
+            from, children under the applicable minimum age in their jurisdiction (in most cases, 13 years of age, or
+            16 years of age under the GDPR). If we become aware that we have inadvertently collected personal data from
+            a child, we will promptly delete it.
           </p>
         </section>
 
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">16. Changes to This Policy</h2>
           <p>
-            We may update this Privacy Policy from time to time. The latest version will always be available at
-            [yourdomain.com/privacy-policy] with the effective date shown at the top.
+            We may update this Privacy Policy from time to time to reflect changes in our practices, platform features,
+            or applicable law. The updated Policy will be posted at thehillside.io/privacy-policy with a revised
+            Effective Date. We will provide reasonable notice of material changes (for example, by email or in-platform
+            notification) before they take effect. Your continued use of the platform following the effective date of a
+            revised Policy constitutes your acceptance of the changes.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-semibold">17. Contact</h2>
+          <p>
+            For questions, concerns, or requests related to this Privacy Policy or your data rights:
+            <br />
+            Hillside L.L.C.
+            <br />
+            St. Ndue Përlleshi, 207, Floor 2, No. 8, Matiçan, Pristina, Kosovo
+            <br />
+            Privacy: privacy@thehillside.io
+            <br />
+            Security: security@thehillside.io
           </p>
         </section>
       </div>
