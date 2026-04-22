@@ -81,7 +81,7 @@ export async function detect(
   }
 
   const config = await findAIConfigByTenant(tenantId);
-  const model = config?.custom_model_id || OPENAI_CHAT_MODEL;
+  const model = process.env.OPENAI_INTENT_MODEL?.trim() || 'gpt-4o-mini';
 
   const systemPrompt = `You analyze customer–business chat transcripts for purchase intent.
 Respond with a single JSON object only (no markdown), matching this shape exactly:

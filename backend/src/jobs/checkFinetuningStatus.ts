@@ -2,6 +2,7 @@ import { createReadStream } from 'fs';
 import { finetuningQueue } from './queues';
 import { openai, OPENAI_FINETUNING_BASE_MODEL } from '../services/openaiClient';
 import { updateAIConfig } from '../db/models/aiConfig';
+import pool from '../db/pool';
 
 export interface CheckFinetuningStatusJobData extends Record<string, unknown> {
   tenantId: string;
@@ -49,6 +50,20 @@ export async function checkFinetuningStatus(
 
   if (status === 'succeeded' && job.fine_tuned_model) {
     await updateAIConfig(data.tenantId, { custom_model_id: job.fine_tuned_model });
+    try {
+      await pool.query(
+        `UPDATE feedback_logs
+         SET status = 'trained'
+         WHERE tenant_id = $1 AND status = 'included_in_training'`,
+        [data.tenantId],
+      );
+    } catch (err) {
+      console.error('[finetuning] failed to mark included feedback as trained', {
+        tenantId: data.tenantId,
+        fineTuningJobId: data.fineTuningJobId,
+        err,
+      });
+    }
     return;
   }
 
