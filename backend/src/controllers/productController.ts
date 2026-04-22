@@ -14,6 +14,7 @@ import { AIProductProcessingService } from '../services/AIProductProcessingServi
 import { defaultQueue } from '../jobs/queues';
 import type { CreateProductInput, UpdateProductInput } from '../validators/product';
 import type { ProductQuery } from '../validators/product';
+import { redisConnection } from '../jobs/redisConnection';
 
 export async function index(req: Request, res: Response): Promise<void> {
   try {
@@ -84,6 +85,7 @@ export async function store(req: Request, res: Response): Promise<void> {
       productId: product.id,
       tenantId,
     });
+    await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, { product }, 'Product created successfully', 201);
   } catch (err) {
@@ -132,6 +134,7 @@ export async function update(req: Request, res: Response): Promise<void> {
         tenantId,
       });
     }
+    await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, { product }, 'Product updated successfully');
   } catch (err) {
@@ -150,6 +153,7 @@ export async function destroy(req: Request, res: Response): Promise<void> {
       sendError(res, 'Product not found', 404);
       return;
     }
+    await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, null, 'Product deleted successfully');
   } catch (err) {

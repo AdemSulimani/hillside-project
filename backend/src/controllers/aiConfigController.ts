@@ -5,6 +5,7 @@ import { searchProducts, type Product } from '../db/models/product';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
 import { sendSuccess, sendError } from '../utils/response';
 import type { TestAIConfigInput } from '../validators/aiConfig';
+import { redisConnection } from '../jobs/redisConnection';
 
 export async function show(req: Request, res: Response): Promise<void> {
   try {
@@ -24,6 +25,7 @@ export async function update(req: Request, res: Response): Promise<void> {
     await ensureAIConfigForTenant(tenantId);
 
     const updated = await updateAIConfig(tenantId, req.body);
+    await redisConnection.del(`ai_config:${tenantId}`);
     sendSuccess(res, updated, 'AI configuration updated successfully');
   } catch (err) {
     sendError(res, 'Failed to update AI configuration', 500, err);

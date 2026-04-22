@@ -375,11 +375,23 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
 
   if (normalized.skipAiReply !== true) {
+    const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
+    const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
+    const existingJob = pendingAiReplyJobs.find(
+      (job) => job.name === 'ai.reply' && job.data?.conversationId === conversation.id,
+    );
+
+    if (existingJob) {
+      await existingJob.remove();
+    }
+
     await aiQueue.add('ai.reply', {
       tenantId: channel.tenant_id,
       channelId: channel.id,
       conversationId: conversation.id,
       messageExternalId: normalized.externalMessageId,
+    }, {
+      delay: Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000,
     });
   }
 }
