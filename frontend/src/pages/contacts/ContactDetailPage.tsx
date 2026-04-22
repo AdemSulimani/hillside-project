@@ -41,11 +41,6 @@ const InternalNotesSection = memo(function InternalNotesSection({
   const debouncedNotes = useDebouncedValue(notesDraft, NOTES_DEBOUNCE_MS);
   const skippedRef = useRef(true);
 
-  useEffect(() => {
-    setNotesDraft(serverNotes ?? '');
-    skippedRef.current = true;
-  }, [serverNotes]);
-
   const mutation = useMutation({
     mutationFn: (notes: string | null) => updateContact(contactId, { notes }),
     onSuccess: (updated) => {
@@ -65,7 +60,7 @@ const InternalNotesSection = memo(function InternalNotesSection({
     const current = serverNotes ?? '';
     if ((nextNotes ?? '') === current) return;
     mutation.mutate(nextNotes);
-  }, [debouncedNotes, serverNotes, contactId, mutation.mutate]);
+  }, [debouncedNotes, serverNotes, contactId, mutation]);
 
   return (
     <section className="space-y-2 rounded-xl border border-border bg-card p-4">
@@ -100,6 +95,11 @@ function lastMessagePreview(messages: { content: string | null; type: string }[]
   return last.type !== 'text' ? `(${last.type})` : '(No text)';
 }
 
+function renderOrderChannelIcon(channelType: Parameters<typeof orderChannelIcon>[0]) {
+  const Icon = orderChannelIcon(channelType);
+  return <Icon className="mx-auto size-4 text-muted-foreground" />;
+}
+
 export default function ContactDetailPage() {
   const { id } = useParams<{ id: string }>();
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
@@ -107,7 +107,6 @@ export default function ContactDetailPage() {
 
   const [convPage, setConvPage] = useState(1);
   const [ordersPage, setOrdersPage] = useState(1);
-  const [nameEdit, setNameEdit] = useState('');
 
   const { data: channels = [] } = useQuery({
     queryKey: ['channels', 'list', tenantId],
@@ -138,11 +137,6 @@ export default function ContactDetailPage() {
 
   const contact = detailQuery.data?.contact;
 
-  useEffect(() => {
-    if (!contact) return;
-    setNameEdit(contact.name);
-  }, [contact?.id, contact?.name]);
-
   const setDetailCache = useCallback(
     (updater: (prev: ContactDetailPayload) => ContactDetailPayload) => {
       queryClient.setQueryData<ContactDetailPayload>(
@@ -164,15 +158,13 @@ export default function ContactDetailPage() {
     },
   });
 
-  const handleNameBlur = () => {
-    if (!contact) return;
-    const parsed = nameSchema.safeParse(nameEdit);
+  const handleNameBlur = (rawName: string, currentName: string) => {
+    const parsed = nameSchema.safeParse(rawName);
     if (!parsed.success) {
       toast.error(parsed.error.issues[0]?.message ?? 'Invalid name');
-      setNameEdit(contact.name);
       return;
     }
-    if (parsed.data === contact.name) return;
+    if (parsed.data === currentName) return;
     nameMutation.mutate(parsed.data);
   };
 
@@ -254,9 +246,9 @@ export default function ContactDetailPage() {
           <div className="min-w-0 flex-1 space-y-3">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
               <Input
-                value={nameEdit}
-                onChange={(e) => setNameEdit(e.target.value)}
-                onBlur={handleNameBlur}
+                key={contact.id}
+                defaultValue={contact.name}
+                onBlur={(e) => handleNameBlur(e.currentTarget.value, contact.name)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
@@ -359,7 +351,6 @@ export default function ContactDetailPage() {
                 </thead>
                 <tbody>
                   {orders.data.map((o) => {
-                    const Icon = orderChannelIcon(o.channel_type);
                     return (
                       <tr key={o.id} className="border-b border-border last:border-0">
                         <td className="max-w-[200px] truncate px-3 py-2" title={o.product_name}>
@@ -370,7 +361,7 @@ export default function ContactDetailPage() {
                           ${o.total_price.toFixed(2)}
                         </td>
                         <td className="px-3 py-2 text-center">
-                          <Icon className="mx-auto size-4 text-muted-foreground" />
+                          {renderOrderChannelIcon(o.channel_type)}
                         </td>
                         <td className="px-3 py-2">
                           <OrderStatusBadge status={o.status} />
@@ -414,7 +405,7 @@ export default function ContactDetailPage() {
       </Tabs>
 
       <InternalNotesSection
-        key={contact.id}
+        key={`${contact.id}:${contact.notes ?? ''}`}
         contactId={contact.id}
         serverNotes={contact.notes}
         onUpdateCache={(updated) => {

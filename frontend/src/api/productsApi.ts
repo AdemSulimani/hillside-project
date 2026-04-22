@@ -48,6 +48,12 @@ type ProductsListJson = {
   message?: string;
 };
 
+type ProductTagsJson = {
+  success: boolean;
+  data?: { tags?: unknown[] };
+  message?: string;
+};
+
 export async function fetchProducts(
   params: ProductListParams,
 ): Promise<{ products: Product[]; pagination: PaginatedResponse<Product>['pagination'] }> {
@@ -71,6 +77,12 @@ export async function fetchProducts(
     totalPages: 0,
   };
   return { products, pagination };
+}
+
+export async function fetchProductTags(): Promise<string[]> {
+  const { data } = await api.get<ProductTagsJson>('/products/tags');
+  const tags = data.data?.tags ?? [];
+  return tags.map(String).sort((a, b) => a.localeCompare(b));
 }
 
 export async function fetchProduct(id: string): Promise<Product> {

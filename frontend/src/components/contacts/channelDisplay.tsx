@@ -1,18 +1,11 @@
-import { Globe, Image, MessageCircleMore, type LucideIcon } from 'lucide-react';
 import type { ChannelType } from '@/types/conversation';
 import { Badge } from '@/components/ui/badge';
+import { channelIcon, channelLabel } from '@/components/contacts/channelMeta';
 import { cn } from '@/lib/utils';
 
-export function channelIcon(type: ChannelType): LucideIcon {
-  if (type === 'facebook') return Globe;
-  if (type === 'instagram') return Image;
-  return MessageCircleMore;
-}
-
-export function channelLabel(type: ChannelType): string {
-  if (type === 'facebook') return 'Facebook';
-  if (type === 'instagram') return 'Instagram';
-  return 'WhatsApp';
+function renderChannelIcon(type: ChannelType) {
+  const Icon = channelIcon(type);
+  return <Icon className="size-3" aria-hidden />;
 }
 
 export function ChannelTypeBadge({
@@ -24,10 +17,9 @@ export function ChannelTypeBadge({
   className?: string;
   showLabel?: boolean;
 }) {
-  const Icon = channelIcon(type);
   return (
     <Badge variant="secondary" className={cn('gap-1 font-normal capitalize', className)}>
-      <Icon className="size-3" aria-hidden />
+      {renderChannelIcon(type)}
       {showLabel ? channelLabel(type) : null}
     </Badge>
   );

@@ -221,7 +221,8 @@ export async function searchProducts(
   const { rows } = await pool.query<Product>(
     `SELECT * FROM products
      WHERE tenant_id = $1 AND deleted_at IS NULL
-       AND (name ILIKE $2 OR description ILIKE $2 OR (sku IS NOT NULL AND sku ILIKE $2) OR (category IS NOT NULL AND category ILIKE $2))
+       AND is_active = true
+       AND (name ILIKE $2 OR description ILIKE $2 OR tags::text ILIKE $2)
      ORDER BY name ASC
      LIMIT $3`,
     [tenantId, `%${query}%`, limit],

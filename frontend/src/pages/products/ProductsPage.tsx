@@ -8,7 +8,7 @@ import {
   Search,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { deleteProduct, fetchProducts } from '@/api/productsApi';
+import { deleteProduct, fetchProductTags, fetchProducts } from '@/api/productsApi';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
 import type { Product } from '@/types/product';
@@ -85,12 +85,7 @@ function ProductsPageInner() {
 
   const { data: tagOptions = [] } = useQuery({
     queryKey: ['product-tags', tenantId],
-    queryFn: async () => {
-      const { products } = await fetchProducts({ page: 1, limit: 200 });
-      const s = new Set<string>();
-      products.forEach((p) => p.tags.forEach((t) => s.add(t)));
-      return Array.from(s).sort((a, b) => a.localeCompare(b));
-    },
+    queryFn: () => fetchProductTags(),
     staleTime: 60_000,
     enabled: Boolean(tenantId),
   });

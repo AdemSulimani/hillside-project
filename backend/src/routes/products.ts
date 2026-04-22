@@ -18,6 +18,7 @@ router.use(authenticate);
 router.use(ensureOnboarded);
 
 router.get('/', validateQuery(productQuerySchema), productController.index);
+router.get('/tags', productController.getTags);
 router.post('/', validateBody(createProductSchema), productController.store);
 router.post('/upload/document', uploadDocument, productController.uploadDocument);
 router.post('/upload/image', uploadOcrImage, productController.uploadOcrImage);

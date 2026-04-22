@@ -85,7 +85,8 @@ function normalizeOrderCore(raw: Record<string, unknown>): Omit<OrderListItem, '
   const ch = raw.channel as Record<string, unknown> | undefined;
   const fallbackType = (ch?.type as ChannelType) ?? 'whatsapp';
   const full = normalizeOrderListItem({ ...raw, channel_type: fallbackType });
-  const { channel_type: _ct, ...core } = full;
+  const core = { ...full } as Omit<OrderListItem, 'channel_type'> & { channel_type?: ChannelType };
+  delete core.channel_type;
   return core;
 }
 

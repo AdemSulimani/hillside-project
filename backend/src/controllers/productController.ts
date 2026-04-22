@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import pool from '../db/pool';
 import {
   createProduct,
   findProductsByTenant,
@@ -35,6 +36,29 @@ export async function index(req: Request, res: Response): Promise<void> {
     sendPaginated(res, products, query.page, query.limit, total, 'Products retrieved successfully');
   } catch (err) {
     sendError(res, 'Failed to retrieve products', 500, err);
+  }
+}
+
+export async function getTags(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId!;
+    const { rows } = await pool.query<{ tag: string }>(
+      `SELECT DISTINCT jsonb_array_elements_text(tags) AS tag
+       FROM products
+       WHERE tenant_id = $1
+         AND deleted_at IS NULL
+         AND is_active = true
+       ORDER BY tag ASC`,
+      [tenantId],
+    );
+
+    sendSuccess(
+      res,
+      { tags: rows.map((row) => row.tag) },
+      'Product tags retrieved successfully',
+    );
+  } catch (err) {
+    sendError(res, 'Failed to retrieve product tags', 500, err);
   }
 }
 
