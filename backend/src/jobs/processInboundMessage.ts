@@ -1,4 +1,6 @@
 import axios from 'axios';
+import crypto from 'crypto';
+import path from 'path';
 import { findChannelByTypeAndExternalId, type ChannelType } from '../db/models/channel';
 import { upsertContact } from '../db/models/contact';
 import {
@@ -12,9 +14,10 @@ import {
   type InboundMessageDTO,
 } from '../services/webhookNormalizer';
 import { setHumanOverride24h } from '../services/conversationService';
-import { downloadAndStore } from '../services/attachmentStorageService';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
+import { uploadImage } from '../services/cloudinaryService';
+import { uploadFile } from '../services/backblazeService';
 import { aiQueue } from './queues';
 import { logEvent } from '../services/analyticsService';
 import type { InboundWebhookJobData } from './jobTypes';
@@ -23,6 +26,34 @@ export type { InboundWebhookJobData } from './jobTypes';
 
 const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
 const INSTAGRAM_GRAPH_API_BASE = 'https://graph.instagram.com/v25.0';
+
+const CONTENT_TYPE_TO_EXT: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'audio/mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/ogg': '.ogg',
+  'audio/wav': '.wav',
+  'application/pdf': '.pdf',
+  'text/plain': '.txt',
+};
+
+function extensionFromContentType(contentType: string): string {
+  const base = contentType.split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_TO_EXT[base] ?? '';
+}
+
+async function resolveMetaMediaUrl(mediaId: string, accessToken: string): Promise<string> {
+  const { data } = await axios.get(`${GRAPH_API_BASE}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (typeof data.url !== 'string') {
+    throw new Error(`Failed to resolve media URL for id=${mediaId}`);
+  }
+  return data.url;
+}
 
 function normalize(channelType: ChannelType, payload: Record<string, unknown>): InboundMessageDTO {
   if (channelType === 'facebook') return webhookNormalizerService.normalizeFromFacebook(payload);
@@ -305,7 +336,53 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     const stored: string[] = [];
     for (const ref of normalized.attachmentUrls) {
       try {
-        const url = await downloadAndStore(ref, normalized.channelType, accessToken);
+        const isUrl = ref.startsWith('http://') || ref.startsWith('https://');
+        const headers: Record<string, string> = {};
+        let downloadUrl = ref;
+
+        if (!isUrl && accessToken) {
+          downloadUrl = await resolveMetaMediaUrl(ref, accessToken);
+          headers.Authorization = `Bearer ${accessToken}`;
+        } else if (
+          isUrl &&
+          (normalized.channelType === 'whatsapp' ||
+            normalized.channelType === 'facebook' ||
+            normalized.channelType === 'instagram') &&
+          accessToken
+        ) {
+          headers.Authorization = `Bearer ${accessToken}`;
+        }
+
+        const response = await axios.get<ArrayBuffer>(downloadUrl, {
+          responseType: 'arraybuffer',
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+        });
+        const contentType =
+          typeof response.headers['content-type'] === 'string'
+            ? response.headers['content-type']
+            : 'application/octet-stream';
+        const normalizedType = contentType.split(';')[0].trim().toLowerCase();
+        const ext = extensionFromContentType(contentType);
+        const uniqueFilename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${
+          ext || path.extname(downloadUrl) || ''
+        }`;
+        const buffer = Buffer.from(response.data);
+
+        let url: string;
+        if (normalizedType.startsWith('image/')) {
+          url = await uploadImage(buffer, 'attachments', uniqueFilename);
+        } else if (normalizedType.startsWith('audio/')) {
+          url = await uploadFile(buffer, uniqueFilename, normalizedType, 'audio');
+        } else if (
+          normalizedType === 'application/pdf' ||
+          normalizedType.startsWith('application/msword') ||
+          normalizedType.startsWith('application/vnd') ||
+          normalizedType.startsWith('text/')
+        ) {
+          url = await uploadFile(buffer, uniqueFilename, normalizedType, 'documents');
+        } else {
+          url = await uploadFile(buffer, uniqueFilename, normalizedType, 'other');
+        }
         stored.push(url);
       } catch (err) {
         console.error('[inbound] Failed to download attachment', { ref, err });

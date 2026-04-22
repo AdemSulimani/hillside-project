@@ -1,7 +1,10 @@
 import type { Request, Response } from 'express';
+import path from 'path';
+import crypto from 'crypto';
 import { findTenantById, updateTenant } from '../db/models/tenant';
 import { sendSuccess, sendError } from '../utils/response';
 import type { UpdateBusinessInput } from '../validators/business';
+import { uploadImage } from '../services/cloudinaryService';
 
 export async function show(req: Request, res: Response): Promise<void> {
   try {
@@ -45,7 +48,9 @@ export async function uploadLogo(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const logoUrl = `/uploads/${req.file.filename}`;
+    const ext = path.extname(req.file.originalname || '').toLowerCase();
+    const uniqueFilename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+    const logoUrl = await uploadImage(req.file.buffer, 'logos', uniqueFilename);
 
     const updated = await updateTenant(tenantId, { logo_url: logoUrl });
     if (!updated) {

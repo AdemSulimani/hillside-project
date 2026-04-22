@@ -10,6 +10,8 @@ import {
 import { findContactById } from '../db/models/contact';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
+import crypto from 'crypto';
+import path from 'path';
 import {
   listConversationsForTenant,
   findConversationDetailForTenant,
@@ -19,6 +21,8 @@ import {
 } from '../services/conversationService';
 import { sendSuccess, sendError } from '../utils/response';
 import { logEvent } from '../services/analyticsService';
+import { uploadImage } from '../services/cloudinaryService';
+import { uploadFile } from '../services/backblazeService';
 import type {
   ConversationListQuery,
   ConversationMessagesQuery,
@@ -248,8 +252,12 @@ export async function uploadConversationAttachment(req: Request, res: Response):
       return;
     }
 
-    const base = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 8000}`;
-    const permanentUrl = `${base}/storage/attachments/${file.filename}`;
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const uniqueFilename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+    const normalizedType = file.mimetype.toLowerCase();
+    const permanentUrl = normalizedType.startsWith('image/')
+      ? await uploadImage(file.buffer, 'attachments', uniqueFilename)
+      : await uploadFile(file.buffer, uniqueFilename, normalizedType || 'application/octet-stream', 'other');
 
     sendSuccess(res, { url: permanentUrl }, 'Attachment uploaded successfully', 201);
   } catch (err) {

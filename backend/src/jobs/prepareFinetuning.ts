@@ -14,6 +14,7 @@ import {
 } from '../db/models/message';
 import { finetuningQueue } from './queues';
 import { openai } from '../services/openaiClient';
+import { uploadFile } from '../services/backblazeService';
 
 export type PrepareFinetuningJobData = Record<string, never>;
 export interface StartFinetuningJobData {
@@ -187,6 +188,7 @@ export async function processPrepareFinetuning(): Promise<void> {
 
     const filename = `tenant_${tenantId}_${runDate}.jsonl`;
     const jsonlContent = `${lines.join('\n')}\n`;
+    await uploadFile(Buffer.from(jsonlContent, 'utf8'), filename, 'text/plain', 'finetuning');
     const fileBuffer = Buffer.from(jsonlContent, 'utf8');
     const uploadedFile = await openai.files.create({
       file: await toFile(fileBuffer, filename, { type: 'application/jsonl' }),
