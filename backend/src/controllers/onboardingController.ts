@@ -1,4 +1,6 @@
 import type { Request, Response } from 'express';
+import path from 'path';
+import crypto from 'crypto';
 import pool from '../db/pool';
 import { createTenant } from '../db/models/tenant';
 import { createAIConfig } from '../db/models/aiConfig';
@@ -8,6 +10,7 @@ import { sendSuccess, sendError } from '../utils/response';
 import { onboardingSchema } from '../validators/onboarding';
 import type { User } from '../db/models/user';
 import type { Tenant } from '../db/models/tenant';
+import { uploadImage } from '../services/cloudinaryService';
 
 export async function complete(req: Request, res: Response): Promise<void> {
   const client = await pool.connect();
@@ -32,7 +35,11 @@ export async function complete(req: Request, res: Response): Promise<void> {
     }
 
     const logoUrl = req.file
-      ? `/uploads/${req.file.filename}`
+      ? await (async () => {
+          const ext = path.extname(req.file!.originalname || '').toLowerCase();
+          const uniqueFilename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+          return uploadImage(req.file!.buffer, 'logos', uniqueFilename);
+        })()
       : null;
 
     await client.query('BEGIN');

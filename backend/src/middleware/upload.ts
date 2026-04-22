@@ -1,23 +1,6 @@
 import multer from 'multer';
 import path from 'path';
-import crypto from 'crypto';
-import fs from 'fs';
-
-const UPLOADS_DIR = path.join(__dirname, '../../uploads');
-const ATTACHMENTS_DIR = path.join(__dirname, '../../storage/attachments');
-
-fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const uniqueName = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
-    cb(null, uniqueName);
-  },
-});
+const storage = multer.memoryStorage();
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'];
 const MAX_SIZE = 2 * 1024 * 1024; // 2 MB
@@ -100,19 +83,8 @@ export const uploadOcrImage = multer({
   },
 }).single('image');
 
-const attachmentStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, ATTACHMENTS_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const uniqueName = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
-    cb(null, uniqueName);
-  },
-});
-
 export const uploadAttachment = multer({
-  storage: attachmentStorage,
+  storage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (IMAGE_TYPES.includes(file.mimetype)) {

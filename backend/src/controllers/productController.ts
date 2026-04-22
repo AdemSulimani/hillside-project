@@ -15,6 +15,7 @@ import { defaultQueue } from '../jobs/queues';
 import type { CreateProductInput, UpdateProductInput } from '../validators/product';
 import type { ProductQuery } from '../validators/product';
 import { redisConnection } from '../jobs/redisConnection';
+import { deleteImage, getPublicIdFromUrl } from '../services/cloudinaryService';
 
 export async function index(req: Request, res: Response): Promise<void> {
   try {
@@ -117,11 +118,24 @@ export async function update(req: Request, res: Response): Promise<void> {
     const validated = req.validated?.params as { id: string } | undefined;
     const id = validated?.id ?? (req.params.id as string);
     const fields = req.body as UpdateProductInput;
+    const fieldsWithImages = fields as UpdateProductInput & { image_urls?: string[] };
 
+    const existing = await findProductById(id, tenantId);
     const product = await updateProduct(id, tenantId, fields);
     if (!product) {
       sendError(res, 'Product not found', 404);
       return;
+    }
+
+    if (existing && Array.isArray(fieldsWithImages.image_urls)) {
+      const removedUrls = existing.image_urls.filter((url) => !fieldsWithImages.image_urls!.includes(url));
+      for (const url of removedUrls) {
+        try {
+          await deleteImage(getPublicIdFromUrl(url));
+        } catch (err) {
+          console.warn('[products.update] Failed to delete Cloudinary image', { url, err });
+        }
+      }
     }
 
     const embeddingRelevantFields = ['name', 'description', 'tags'] as const;
@@ -148,10 +162,20 @@ export async function destroy(req: Request, res: Response): Promise<void> {
     const validated = req.validated?.params as { id: string } | undefined;
     const id = validated?.id ?? (req.params.id as string);
 
+    const existing = await findProductById(id, tenantId);
     const deleted = await softDeleteProduct(id, tenantId);
     if (!deleted) {
       sendError(res, 'Product not found', 404);
       return;
+    }
+    if (existing) {
+      for (const url of existing.image_urls) {
+        try {
+          await deleteImage(getPublicIdFromUrl(url));
+        } catch (err) {
+          console.warn('[products.destroy] Failed to delete Cloudinary image', { url, err });
+        }
+      }
     }
     await redisConnection.del(`products:${tenantId}`);
 

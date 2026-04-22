@@ -1,6 +1,9 @@
 import type { Request, Response } from 'express';
+import path from 'path';
+import crypto from 'crypto';
 import { findProductById, appendImageUrls } from '../db/models/product';
 import { sendSuccess, sendError } from '../utils/response';
+import { uploadImage } from '../services/cloudinaryService';
 
 export async function upload(req: Request, res: Response): Promise<void> {
   try {
@@ -26,7 +29,13 @@ export async function upload(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const newUrls = files.map((f) => `/uploads/${f.filename}`);
+    const newUrls = await Promise.all(
+      files.map((file) => {
+        const ext = path.extname(file.originalname || '').toLowerCase();
+        const uniqueFilename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+        return uploadImage(file.buffer, 'products', uniqueFilename);
+      }),
+    );
     const updated = await appendImageUrls(id, tenantId, newUrls);
 
     sendSuccess(
