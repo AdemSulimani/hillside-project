@@ -5,6 +5,7 @@ import { searchProducts, searchProductsBySimilarity, type Product } from '../db/
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
+import { redisConnection } from '../jobs/redisConnection';
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
 
@@ -43,8 +44,54 @@ const DEFAULT_AI_CONFIG: Pick<
 };
 
 async function loadAIConfig(tenantId: string) {
+  const cacheKey = `ai_config:${tenantId}`;
+  const cached = await redisConnection.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached) as AIConfig | typeof DEFAULT_AI_CONFIG;
+    } catch {
+      await redisConnection.del(cacheKey);
+    }
+  }
+
   const config = await findAIConfigByTenant(tenantId);
-  return config ?? DEFAULT_AI_CONFIG;
+  const resolved = config ?? DEFAULT_AI_CONFIG;
+  await redisConnection.set(cacheKey, JSON.stringify(resolved), 'EX', 300);
+  return resolved;
+}
+
+async function loadTenant(tenantId: string) {
+  const cacheKey = `tenant:${tenantId}`;
+  const cached = await redisConnection.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached) as Awaited<ReturnType<typeof findTenantById>>;
+    } catch {
+      await redisConnection.del(cacheKey);
+    }
+  }
+
+  const tenant = await findTenantById(tenantId);
+  if (tenant) {
+    await redisConnection.set(cacheKey, JSON.stringify(tenant), 'EX', 300);
+  }
+  return tenant;
+}
+
+async function loadProductCatalog(tenantId: string): Promise<Product[]> {
+  const cacheKey = `products:${tenantId}`;
+  const cached = await redisConnection.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached) as Product[];
+    } catch {
+      await redisConnection.del(cacheKey);
+    }
+  }
+
+  const products = await searchProducts(tenantId, '', 5);
+  await redisConnection.set(cacheKey, JSON.stringify(products), 'EX', 120);
+  return products;
 }
 
 function extractKeywords(text: string): string[] {
@@ -230,11 +277,11 @@ export async function generateReply(
   attachmentUrlsRaw: unknown = [],
 ): Promise<string> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
-
-  const [tenant, config, conversationHistory] = await Promise.all([
-    findTenantById(tenantId),
+  const [tenant, config, conversationHistory, cachedCatalogProducts] = await Promise.all([
+    loadTenant(tenantId),
     loadAIConfig(tenantId),
     findMessagesByConversation(conversationId, 10),
+    loadProductCatalog(tenantId),
   ]);
 
   if (!tenant) {
@@ -263,7 +310,7 @@ export async function generateReply(
   }
 
   if (products.length === 0) {
-    products = await searchProducts(tenantId, '', 5);
+    products = cachedCatalogProducts;
   }
 
   const hasImages = attachmentUrls.length > 0;
