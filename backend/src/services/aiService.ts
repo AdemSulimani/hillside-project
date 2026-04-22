@@ -280,7 +280,7 @@ export async function generateReply(
 
   const model = hasImages
     ? OPENAI_VISION_MODEL
-    : (config.custom_model_id || OPENAI_CHAT_MODEL);
+    : (config.custom_model_id || process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o');
 
   const completion = await openai.chat.completions.create({
     model,

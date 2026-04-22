@@ -1,5 +1,4 @@
-import fs from 'fs/promises';
-import path from 'path';
+import { toFile } from 'openai/uploads';
 import pool from '../db/pool';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
@@ -14,6 +13,7 @@ import {
   type Message,
 } from '../db/models/message';
 import { finetuningQueue } from './queues';
+import { openai } from '../services/openaiClient';
 
 export type PrepareFinetuningJobData = Record<string, never>;
 export interface StartFinetuningJobData {
@@ -146,15 +146,6 @@ export async function buildFinetuningLineForLog(log: FeedbackLog): Promise<Finet
   return { messages };
 }
 
-function finetuningOutputDir(): string {
-  return path.join(__dirname, '../../storage/finetuning');
-}
-
-async function ensureFinetuningDir(): Promise<void> {
-  const dir = finetuningOutputDir();
-  await fs.mkdir(dir, { recursive: true });
-}
-
 function utcDateStamp(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -168,8 +159,6 @@ export async function processPrepareFinetuning(): Promise<void> {
     return;
   }
 
-  await ensureFinetuningDir();
-  const outputDir = finetuningOutputDir();
   const runDate = utcDateStamp(new Date());
 
   for (const tenantId of tenantIds) {
@@ -197,8 +186,16 @@ export async function processPrepareFinetuning(): Promise<void> {
     if (lines.length === 0) continue;
 
     const filename = `tenant_${tenantId}_${runDate}.jsonl`;
-    const filepath = path.join(outputDir, filename);
-    await fs.writeFile(filepath, `${lines.join('\n')}\n`, 'utf8');
+    const jsonlContent = `${lines.join('\n')}\n`;
+    const fileBuffer = Buffer.from(jsonlContent, 'utf8');
+    const uploadedFile = await openai.files.create({
+      file: await toFile(fileBuffer, filename, { type: 'application/jsonl' }),
+      purpose: 'fine-tune',
+    });
+    await openai.fineTuning.jobs.create({
+      training_file: uploadedFile.id,
+      model: 'gpt-4o',
+    });
 
     const client = await pool.connect();
     try {
@@ -216,21 +213,11 @@ export async function processPrepareFinetuning(): Promise<void> {
       client.release();
     }
 
-    console.info('[finetuning.prepare] Wrote training file', {
+    console.info('[finetuning.prepare] Uploaded training file', {
       tenantId,
-      path: filepath,
+      fileId: uploadedFile.id,
       rows: includedIds.length,
     });
-
-    await finetuningQueue.add(
-      'startFinetuning',
-      { tenantId, filePath: filepath },
-      {
-        attempts: 3,
-        removeOnComplete: { count: 100 },
-        removeOnFail: { count: 100 },
-      },
-    );
   }
 }
 

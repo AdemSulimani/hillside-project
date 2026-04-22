@@ -2,7 +2,7 @@ import { findTenantById } from '../db/models/tenant';
 import { openai, OPENAI_EVAL_MODEL } from './openaiClient';
 
 function evalModel(): string {
-  return process.env.OPENAI_EVAL_MODEL?.trim() || OPENAI_EVAL_MODEL;
+  return process.env.OPENAI_EVAL_MODEL?.trim() || 'gpt-4o-mini';
 }
 
 export const FLAG_REASON_VALUES = [

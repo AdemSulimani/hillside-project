@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { Info, Loader2, MessageSquareHeart } from 'lucide-react';
+import { Loader2, MessageSquareHeart } from 'lucide-react';
 import { fetchAIConfig } from '@/api/aiConfigApi';
 import { fetchFeedbackLogs } from '@/api/feedbackApi';
 import { FEEDBACK_FINETUNING_COLLECTION_TARGET } from '@/constants/feedbackFinetuning';
@@ -89,7 +89,7 @@ export default function FeedbackPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4">
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2">
@@ -127,22 +127,6 @@ export default function FeedbackPage() {
                 </div>
               </>
             )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-dashed">
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-2">
-              <Info className="size-5 text-muted-foreground" />
-              <CardTitle>Fine-tuning status</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              Fine-tuning will be activated when switched to GPT-4o. Nightly export jobs will format
-              collected feedback as JSONL on the server; no OpenAI connection is used until you enable
-              it.
-            </p>
           </CardContent>
         </Card>
       </div>
