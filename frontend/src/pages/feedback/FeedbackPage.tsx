@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Info, Loader2, MessageSquareHeart } from 'lucide-react';
@@ -54,10 +54,6 @@ export default function FeedbackPage() {
   const statusFilter = useMemo(() => {
     const tab = STATUS_TABS.find((t) => t.key === statusTab);
     return tab?.filter;
-  }, [statusTab]);
-
-  useEffect(() => {
-    setPage(1);
   }, [statusTab]);
 
   const configQuery = useQuery({
@@ -158,7 +154,10 @@ export default function FeedbackPage() {
             type="button"
             size="sm"
             variant={statusTab === tab.key ? 'default' : 'outline'}
-            onClick={() => setStatusTab(tab.key)}
+            onClick={() => {
+              setStatusTab(tab.key);
+              setPage(1);
+            }}
           >
             {tab.label}
           </Button>

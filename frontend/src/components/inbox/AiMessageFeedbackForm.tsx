@@ -4,6 +4,7 @@ import { AxiosError } from 'axios';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { submitFeedback } from '@/api/feedbackApi';
+import { FEEDBACK_REASON_OPTIONS } from '@/components/inbox/feedbackOptions';
 import type { FeedbackReasonOption } from '@/types/feedback';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -11,14 +12,6 @@ import { Textarea } from '@/components/ui/textarea';
 
 const selectClasses =
   'h-10 w-full appearance-none rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm text-foreground outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50';
-
-export const FEEDBACK_REASON_OPTIONS: { value: FeedbackReasonOption; label: string }[] = [
-  { value: 'Wrong product info', label: 'Wrong product info' },
-  { value: 'Wrong tone', label: 'Wrong tone' },
-  { value: 'Inaccurate', label: 'Inaccurate' },
-  { value: 'Off-topic', label: 'Off-topic' },
-  { value: 'Other', label: 'Other' },
-];
 
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError && err.response?.data?.message) {

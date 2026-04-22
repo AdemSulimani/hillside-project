@@ -55,6 +55,11 @@ function endOfLocalDayIso(ymd: string): string | undefined {
   return new Date(y, m - 1, d, 23, 59, 59, 999).toISOString();
 }
 
+function renderOrderChannelIcon(channelType: Parameters<typeof orderChannelIcon>[0]) {
+  const Icon = orderChannelIcon(channelType);
+  return <Icon className="size-4 text-muted-foreground" />;
+}
+
 function SortHeader({
   label,
   column,
@@ -103,14 +108,14 @@ export default function OrdersPage() {
   const [page, setPage] = useState(1);
   const [sortColumn, setSortColumn] = useState<OrderListSortColumn>('created_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [drawerOrderId, setDrawerOrderId] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-
   const openFromQuery = searchParams.get('open');
+  const initialDrawerOrderId =
+    openFromQuery && /^[0-9a-f-]{36}$/i.test(openFromQuery) ? openFromQuery : null;
+  const [drawerOrderId, setDrawerOrderId] = useState<string | null>(initialDrawerOrderId);
+  const [drawerOpen, setDrawerOpen] = useState(Boolean(initialDrawerOrderId));
+
   useEffect(() => {
     if (!openFromQuery || !/^[0-9a-f-]{36}$/i.test(openFromQuery)) return;
-    setDrawerOrderId(openFromQuery);
-    setDrawerOpen(true);
     const next = new URLSearchParams(searchParams);
     next.delete('open');
     setSearchParams(next, { replace: true });
@@ -350,7 +355,6 @@ export default function OrdersPage() {
               </thead>
               <tbody>
                 {orders.map((row) => {
-                  const Icon = orderChannelIcon(row.channel_type);
                   return (
                     <tr
                       key={row.id}
@@ -366,7 +370,7 @@ export default function OrdersPage() {
                       </td>
                       <td className="px-3 py-2.5 text-center">
                         <span className="inline-flex justify-center" title={row.channel_type}>
-                          <Icon className="size-4 text-muted-foreground" />
+                          {renderOrderChannelIcon(row.channel_type)}
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-muted-foreground">

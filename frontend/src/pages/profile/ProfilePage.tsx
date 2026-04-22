@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Loader2, UserCircle, Lock } from 'lucide-react';
@@ -53,13 +53,6 @@ export default function ProfilePage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordErrors, setPasswordErrors] = useState<PasswordFieldErrors>({});
   const [passwordGeneralError, setPasswordGeneralError] = useState('');
-
-  useEffect(() => {
-    if (user) {
-      setName(user.name);
-      setEmail(user.email);
-    }
-  }, [user]);
 
   const profileMutation = useMutation({
     mutationFn: async (payload: { name: string; email: string }) => {

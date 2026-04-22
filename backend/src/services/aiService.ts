@@ -76,6 +76,7 @@ function formatProductCatalog(products: Product[]): string {
       const parts = [`- ${p.name}: $${Number(p.price).toFixed(2)}`];
       if (p.description) parts.push(`  ${p.description}`);
       if (p.category) parts.push(`  Category: ${p.category}`);
+      if (p.tags.length > 0) parts.push(`  Tags: ${p.tags.join(', ')}`);
       if (p.stock_quantity !== null) parts.push(`  In stock: ${p.stock_quantity}`);
       return parts.join('\n');
     })

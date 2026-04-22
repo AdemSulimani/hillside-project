@@ -9,6 +9,11 @@ function channelIcon(type: ChannelType) {
   return MessageCircleMore;
 }
 
+function renderChannelIcon(type: ChannelType) {
+  const Icon = channelIcon(type);
+  return <Icon className="size-3 text-muted-foreground" />;
+}
+
 function truncate(text: string, max: number): string {
   const t = text.trim();
   if (t.length <= max) return t;
@@ -27,7 +32,6 @@ interface ConversationListItemProps {
 }
 
 export function ConversationListItem({ conversation, selected, onSelect }: ConversationListItemProps) {
-  const ChannelIcon = channelIcon(conversation.channel_type);
   const previewSource =
     conversation.last_message_content?.trim() ||
     (conversation.last_message_created_at ? '(No text)' : 'No messages yet');
@@ -68,7 +72,7 @@ export function ConversationListItem({ conversation, selected, onSelect }: Conve
           className="absolute -right-0.5 -bottom-0.5 flex size-5 items-center justify-center rounded-full border-2 border-background bg-background shadow-sm"
           title={conversation.channel_type}
         >
-          <ChannelIcon className="size-3 text-muted-foreground" />
+          {renderChannelIcon(conversation.channel_type)}
         </div>
       </div>
 
