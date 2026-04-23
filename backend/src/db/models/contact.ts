@@ -63,6 +63,20 @@ export async function findContactByIdForTenant(
   return rows[0] ?? null;
 }
 
+export async function findContactByExternalIdForTenantChannel(
+  tenantId: string,
+  channelId: string,
+  externalId: string,
+): Promise<Contact | null> {
+  const { rows } = await pool.query<Contact>(
+    `SELECT * FROM contacts
+     WHERE tenant_id = $1 AND channel_id = $2 AND external_id = $3
+     LIMIT 1`,
+    [tenantId, channelId, externalId],
+  );
+  return rows[0] ?? null;
+}
+
 export async function listContactsAggregatedForTenant(
   filters: ContactListFilters,
 ): Promise<{ rows: ContactListRow[]; total: number }> {

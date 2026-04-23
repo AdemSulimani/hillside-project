@@ -2,7 +2,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import path from 'path';
 import { findChannelByTypeAndExternalId, type ChannelType } from '../db/models/channel';
-import { upsertContact } from '../db/models/contact';
+import { findContactByExternalIdForTenantChannel, upsertContact } from '../db/models/contact';
 import {
   upsertConversation,
   touchConversationLastMessageAt,
@@ -26,6 +26,8 @@ export type { InboundWebhookJobData } from './jobTypes';
 
 const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
 const INSTAGRAM_GRAPH_API_BASE = 'https://graph.instagram.com/v25.0';
+const PROFILE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const PROFILE_LAST_LOOKUP_METADATA_KEY = 'profile_last_lookup_at';
 
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -69,14 +71,35 @@ function shouldIgnoreNormalizationError(channelType: ChannelType, err: unknown):
   return err.message.includes('required message identifiers are missing');
 }
 
-function isUnknownContactName(name: string | null | undefined): boolean {
-  const value = (name ?? '').trim().toLowerCase();
-  return value.length === 0 || value === 'unknown' || /^ig user \d+$/.test(value);
-}
-
 function isProfileLookupDebugEnabled(): boolean {
   const v = process.env.WEBHOOK_DEBUG?.trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes';
+}
+
+function readProfileLastLookupAt(metadata: Record<string, unknown> | null | undefined): Date | null {
+  const raw = metadata?.[PROFILE_LAST_LOOKUP_METADATA_KEY];
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
+}
+
+function shouldRefreshProfileLookup(
+  channelType: ChannelType,
+  metadata: Record<string, unknown> | null | undefined,
+): boolean {
+  if (channelType !== 'instagram' && channelType !== 'facebook') {
+    return false;
+  }
+  const lastLookupAt = readProfileLastLookupAt(metadata);
+  if (!lastLookupAt) {
+    return true;
+  }
+  return Date.now() - lastLookupAt.getTime() >= PROFILE_REFRESH_INTERVAL_MS;
 }
 
 async function resolveInstagramContactProfile(
@@ -267,8 +290,21 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   let contactName = normalized.contactName;
   let contactAvatarUrl = normalized.contactAvatarUrl;
   let contactMetadata: Record<string, unknown> = {};
+  const existingContact = await findContactByExternalIdForTenantChannel(
+    channel.tenant_id,
+    channel.id,
+    normalized.contactExternalId,
+  );
+  const shouldRefreshProfile = shouldRefreshProfileLookup(
+    normalized.channelType,
+    existingContact?.metadata,
+  );
 
-  if (normalized.channelType === 'instagram' && isUnknownContactName(contactName)) {
+  if (shouldRefreshProfile) {
+    contactMetadata[PROFILE_LAST_LOOKUP_METADATA_KEY] = new Date().toISOString();
+  }
+
+  if (normalized.channelType === 'instagram' && shouldRefreshProfile) {
     try {
       const accessToken = cryptoService.decrypt(channel.access_token_encrypted);
       const profile = await resolveInstagramContactProfile(normalized.contactExternalId, accessToken);
@@ -279,7 +315,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
         contactAvatarUrl = profile.avatarUrl;
       }
       if (profile.username) {
-        contactMetadata = { username: profile.username };
+        contactMetadata.username = profile.username;
       }
     } catch (err) {
       console.warn('[inbound] Could not resolve instagram contact profile', {
@@ -289,7 +325,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     }
   }
 
-  if (normalized.channelType === 'facebook' && isUnknownContactName(contactName)) {
+  if (normalized.channelType === 'facebook' && shouldRefreshProfile) {
     try {
       const accessToken = cryptoService.decrypt(channel.access_token_encrypted);
       const profile = await resolveFacebookContactProfile(normalized.contactExternalId, accessToken);
