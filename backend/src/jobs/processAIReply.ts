@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import pool from '../db/pool';
+import { redisConnection } from './redisConnection';
 import { findChannelById } from '../db/models/channel';
 import {
   findConversationById,
@@ -33,6 +34,73 @@ export interface AIReplyJobData {
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
+
+  const parsedMax = parseInt(process.env.AI_MAX_REPLIES_PER_HOUR ?? '10', 10);
+  const aiMaxRepliesPerHour =
+    Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
+  const rateLimitKey = `ai_rate_limit:${conversationId}`;
+  const rateCount = await redisConnection.incr(rateLimitKey);
+  if (rateCount === 1) {
+    await redisConnection.expire(rateLimitKey, 3600);
+  }
+  if (rateCount > aiMaxRepliesPerHour) {
+    const client = await pool.connect();
+    let alert: AIAlert | undefined;
+    let messageContentForSocket: string | null = null;
+    try {
+      const { rows: msgRows } = await client.query<{ id: string; content: string | null }>(
+        `SELECT id, content FROM messages
+         WHERE conversation_id = $1 AND tenant_id = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [conversationId, tenantId],
+      );
+      const latestMessage = msgRows[0];
+      await client.query('BEGIN');
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      if (latestMessage) {
+        messageContentForSocket = latestMessage.content;
+        alert = await createAIAlert(
+          {
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            message_id: latestMessage.id,
+            reason: 'rate_limit_exceeded',
+          },
+          client,
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        /* no active transaction */
+      }
+      console.error('[ai.reply] Rate limit pause / alert failed', { conversationId, tenantId, err });
+    } finally {
+      client.release();
+    }
+    if (alert) {
+      const channel = await findChannelById(channelId, tenantId);
+      if (channel) {
+        const conversation = await findConversationById(conversationId);
+        const contactForAlert = conversation
+          ? await findContactById(conversation.contact_id)
+          : null;
+        socketService.emitAIAlert(tenantId, {
+          ...alert,
+          message_content: messageContentForSocket,
+          contact_name: contactForAlert?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+        socketService.emitConversationUpdated(tenantId, conversationId);
+      }
+    }
+    console.warn('[ai.reply] AI rate limit exceeded for conversation', { conversationId, tenantId });
+    return;
+  }
 
   // Level 1: Global AI toggle
   const aiConfig = await findAIConfigByTenant(tenantId);
