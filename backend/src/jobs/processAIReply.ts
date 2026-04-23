@@ -35,9 +35,9 @@ export interface AIReplyJobData {
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
 
-  const parsedMax = parseInt(process.env.AI_MAX_REPLIES_PER_HOUR ?? '10', 10);
+  const parsedMax = parseInt(process.env.AI_MAX_REPLIES_PER_HOUR ?? '25', 10);
   const aiMaxRepliesPerHour =
-    Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
+    Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 25;
   const rateLimitKey = `ai_rate_limit:${conversationId}`;
   const rateCount = await redisConnection.incr(rateLimitKey);
   if (rateCount === 1) {
