@@ -5,6 +5,7 @@ import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
 import { processGenerateProductEmbedding, type GenerateProductEmbeddingJobData } from './generateProductEmbedding';
 import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
+import { initRefreshMetaTokensScheduler, processRefreshMetaTokens } from './refreshMetaTokens';
 import { checkFinetuningStatus, startFinetuningJob } from './checkFinetuningStatus';
 import { processNotificationJob } from './processNotificationJob';
 import { attachWorkerFailureHandler } from './failureHandler';
@@ -60,6 +61,10 @@ export const finetuningWorker = new Worker(
 export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
   'default',
   async (job) => {
+    if (job.name === 'refreshMetaTokens') {
+      await processRefreshMetaTokens();
+      return;
+    }
     await processGenerateProductEmbedding(job.data);
   },
   { connection: redisConnection, concurrency: 3 },
@@ -85,4 +90,8 @@ defaultWorker.on('completed', (job) => {
 
 void initPrepareFinetuningScheduler().catch((err) => {
   console.error('[jobs] Failed to register finetuning scheduler', err);
+});
+
+void initRefreshMetaTokensScheduler().catch((err) => {
+  console.error('[jobs] Failed to register Meta token refresh scheduler', err);
 });

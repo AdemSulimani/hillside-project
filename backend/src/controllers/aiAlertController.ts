@@ -59,7 +59,9 @@ export async function markAsRead(req: Request, res: Response): Promise<void> {
     }
 
     const updated = await updateAIAlertStatus(id, tenantId, 'read');
-    socketService.emitConversationUpdated(tenantId, existing.conversation_id);
+    if (existing.conversation_id) {
+      socketService.emitConversationUpdated(tenantId, existing.conversation_id);
+    }
     sendSuccess(res, { alert: updated }, 'Alert marked as read');
   } catch (err) {
     sendError(res, 'Failed to update alert', 500, err);
@@ -89,6 +91,10 @@ export async function resolve(req: Request, res: Response): Promise<void> {
     }
 
     if (body.resume_ai === true) {
+      if (!existing.conversation_id) {
+        sendError(res, 'This alert is not tied to a conversation', 400);
+        return;
+      }
       const convo = await findConversationByIdForTenant(existing.conversation_id, tenantId);
       if (!convo) {
         sendError(res, 'Conversation not found', 404);
@@ -106,11 +112,13 @@ export async function resolve(req: Request, res: Response): Promise<void> {
       alert = updated;
     }
 
-    if (body.resume_ai === true) {
+    if (body.resume_ai === true && existing.conversation_id) {
       await setConversationAiPaused(existing.conversation_id, tenantId, false);
     }
 
-    socketService.emitConversationUpdated(tenantId, existing.conversation_id);
+    if (existing.conversation_id) {
+      socketService.emitConversationUpdated(tenantId, existing.conversation_id);
+    }
 
     sendSuccess(res, { alert, resume_ai: body.resume_ai === true }, 'Alert resolved');
   } catch (err) {

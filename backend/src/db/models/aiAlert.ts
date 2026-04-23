@@ -7,8 +7,8 @@ export type AIAlertStatus = 'unread' | 'read' | 'resolved';
 export interface AIAlert {
   id: string;
   tenant_id: string;
-  conversation_id: string;
-  message_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
   reason: string;
   status: AIAlertStatus;
   created_at: Date;
@@ -16,8 +16,8 @@ export interface AIAlert {
 
 export interface CreateAIAlertInput {
   tenant_id: string;
-  conversation_id: string;
-  message_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
   reason: string;
 }
 
@@ -114,16 +114,16 @@ export async function listAIAlertsForTenant(
        a.reason,
        a.status,
        a.created_at,
-       ct.name AS contact_name,
-       ch.type AS channel_type,
-       ch.name AS channel_name,
+       COALESCE(ct.name, '—') AS contact_name,
+       COALESCE(ch.type, 'facebook') AS channel_type,
+       COALESCE(ch.name, '—') AS channel_name,
        m.content AS message_content,
        m.quality_score
      FROM ai_alerts a
-     INNER JOIN conversations c ON c.id = a.conversation_id AND c.tenant_id = a.tenant_id
-     INNER JOIN contacts ct ON ct.id = c.contact_id AND ct.tenant_id = a.tenant_id
-     INNER JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = a.tenant_id
-     INNER JOIN messages m ON m.id = a.message_id AND m.tenant_id = a.tenant_id
+     LEFT JOIN conversations c ON c.id = a.conversation_id AND c.tenant_id = a.tenant_id
+     LEFT JOIN contacts ct ON ct.id = c.contact_id AND ct.tenant_id = a.tenant_id
+     LEFT JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = a.tenant_id
+     LEFT JOIN messages m ON m.id = a.message_id AND m.tenant_id = a.tenant_id
      WHERE ${whereClause}
      ORDER BY a.created_at DESC
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
