@@ -65,6 +65,8 @@ export interface InboxMessage {
   quality_score: number | null;
   flagged: boolean;
   flag_reason: string | null;
+  send_status: string | null;
+  send_error: string | null;
 }
 
 export interface ConversationThread {

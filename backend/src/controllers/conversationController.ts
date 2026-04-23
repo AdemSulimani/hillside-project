@@ -151,8 +151,8 @@ export async function reply(req: Request, res: Response): Promise<void> {
 
     const sendResult = textForChannel
       ? await sendMessage(channel, contact.external_id, textForChannel)
-      : { ok: true, graphMessageId: null as string | null };
-    const channelDelivered = !textForChannel || sendResult.ok;
+      : { success: true as const, graphMessageId: null as string | null };
+    const channelDelivered = !textForChannel || sendResult.success;
 
     const extId = sendResult.graphMessageId ?? `human_${randomUUID()}`;
 

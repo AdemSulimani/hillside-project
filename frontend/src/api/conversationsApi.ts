@@ -95,6 +95,8 @@ export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessag
     quality_score,
     flagged: toBool(raw.flagged),
     flag_reason: raw.flag_reason != null && raw.flag_reason !== '' ? String(raw.flag_reason) : null,
+    send_status: raw.send_status != null && raw.send_status !== '' ? String(raw.send_status) : null,
+    send_error: raw.send_error != null && raw.send_error !== '' ? String(raw.send_error) : null,
   };
 }
 

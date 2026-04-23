@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { Link2, ShoppingBag, ThumbsDown } from 'lucide-react';
+import { Link2, RefreshCw, ShoppingBag, ThumbsDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import type { InboxMessage } from '@/types/conversation';
@@ -313,6 +313,15 @@ export function MessageBubble({
           </p>
         ) : null}
       </div>
+      {message.send_status === 'failed' ? (
+        <div
+          className="flex max-w-[min(100%,28rem)] items-center justify-end gap-1 text-xs font-medium text-destructive"
+          title={message.send_error ?? undefined}
+        >
+          <RefreshCw className="size-3.5 shrink-0 opacity-90" aria-hidden />
+          <span>Failed to send</span>
+        </div>
+      ) : null}
       <div className="flex w-full max-w-[min(100%,28rem)] flex-col items-end gap-1">
         <div className="flex items-center gap-2 pr-0.5">
           <span

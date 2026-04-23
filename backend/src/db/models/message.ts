@@ -25,11 +25,17 @@ export interface Message {
   quality_score: number | null;
   flagged: boolean;
   flag_reason: MessageFlagReason | string | null;
+  send_status: string | null;
+  send_error: string | null;
   created_at: Date;
 }
 
 function mapMessageRow(row: Message): Message {
-  const r = row as Message & { quality_score?: unknown };
+  const r = row as Message & {
+    quality_score?: unknown;
+    send_status?: unknown;
+    send_error?: unknown;
+  };
   let quality_score: number | null = null;
   const rawQs = r.quality_score;
   if (rawQs != null) {
@@ -41,6 +47,8 @@ function mapMessageRow(row: Message): Message {
     quality_score,
     flagged: Boolean(r.flagged),
     flag_reason: r.flag_reason ?? null,
+    send_status: r.send_status != null && r.send_status !== '' ? String(r.send_status) : null,
+    send_error: r.send_error != null && r.send_error !== '' ? String(r.send_error) : null,
   };
 }
 
@@ -162,6 +170,29 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
   );
 
   return mapMessageRow(rows[0]);
+}
+
+const SEND_ERROR_MAX_LEN = 2000;
+
+export async function updateMessageSendFailure(
+  messageId: string,
+  tenantId: string,
+  sendStatus: string,
+  sendError: string,
+): Promise<Message | null> {
+  const trimmedError =
+    sendError.length > SEND_ERROR_MAX_LEN
+      ? sendError.slice(0, SEND_ERROR_MAX_LEN)
+      : sendError;
+  const { rows } = await pool.query<Message>(
+    `UPDATE messages
+     SET send_status = $1, send_error = $2
+     WHERE id = $3 AND tenant_id = $4
+     RETURNING *`,
+    [sendStatus, trimmedError, messageId, tenantId],
+  );
+  const row = rows[0];
+  return row ? mapMessageRow(row) : null;
 }
 
 export async function updateMessageAttachmentUrls(

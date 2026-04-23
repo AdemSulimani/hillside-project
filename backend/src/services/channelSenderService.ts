@@ -114,15 +114,91 @@ async function sendWhatsAppMessage(
   return null;
 }
 
-export type SendMessageResult = { ok: boolean; graphMessageId: string | null };
+export type ChannelSendMessageResult = {
+  success: boolean;
+  error?: string;
+  /** Meta message id when returned (Facebook / Instagram); often null for WhatsApp. */
+  graphMessageId?: string | null;
+};
 
-const senders: Record<
+function logChannelSendError(channelLabel: string, error: unknown): void {
+  const errMsg = error instanceof Error ? error.message : String(error);
+  const graphBody =
+    axios.isAxiosError(error) && error.response?.data
+      ? JSON.stringify(error.response.data)
+      : '';
+  console.error(
+    `[channelSender] Failed to send ${channelLabel} message:`,
+    errMsg,
+    graphBody ? `Graph: ${graphBody}` : '',
+  );
+}
+
+export async function sendViaFacebook(
+  channel: Channel,
+  recipientExternalId: string,
+  messageText: string,
+): Promise<ChannelSendMessageResult> {
+  try {
+    const graphMessageId = await sendFacebookMessage(channel, recipientExternalId, messageText);
+    return { success: true, graphMessageId: graphMessageId ?? null };
+  } catch (error) {
+    logChannelSendError('facebook', error);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errMsg };
+  }
+}
+
+export async function sendViaInstagram(
+  channel: Channel,
+  recipientExternalId: string,
+  messageText: string,
+): Promise<ChannelSendMessageResult> {
+  try {
+    const graphMessageId = await sendInstagramMessage(channel, recipientExternalId, messageText);
+    return { success: true, graphMessageId: graphMessageId ?? null };
+  } catch (error) {
+    logChannelSendError('instagram', error);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errMsg };
+  }
+}
+
+export async function sendViaWhatsApp(
+  channel: Channel,
+  recipientExternalId: string,
+  messageText: string,
+): Promise<ChannelSendMessageResult> {
+  try {
+    const graphMessageId = await sendWhatsAppMessage(channel, recipientExternalId, messageText);
+    return { success: true, graphMessageId: graphMessageId ?? null };
+  } catch (error) {
+    logChannelSendError('whatsapp', error);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errMsg };
+  }
+}
+
+const graphSenders: Record<
   ChannelType,
   (channel: Channel, recipientExternalId: string, messageText: string) => Promise<string | null>
 > = {
   facebook: sendFacebookMessage,
   instagram: sendInstagramMessage,
   whatsapp: sendWhatsAppMessage,
+};
+
+const sendViaByType: Record<
+  ChannelType,
+  (
+    channel: Channel,
+    recipientExternalId: string,
+    messageText: string,
+  ) => Promise<ChannelSendMessageResult>
+> = {
+  facebook: sendViaFacebook,
+  instagram: sendViaInstagram,
+  whatsapp: sendViaWhatsApp,
 };
 
 function assertSupportedConnectionMethod(channel: Channel): void {
@@ -141,30 +217,21 @@ export async function sendMessage(
   channel: Channel,
   recipientExternalId: string,
   messageText: string,
-): Promise<SendMessageResult> {
-  const sender = senders[channel.type];
-  if (!sender) {
+): Promise<ChannelSendMessageResult> {
+  const sendVia = sendViaByType[channel.type];
+  if (!sendVia) {
     console.error(`[channelSender] Unsupported channel type: ${channel.type}`);
-    return { ok: false, graphMessageId: null };
+    return { success: false, error: `Unsupported channel type: ${channel.type}` };
   }
 
   try {
     await acquireOutboundSendToken(channel.id);
     assertSupportedConnectionMethod(channel);
-    const graphMessageId = await sender(channel, recipientExternalId, messageText);
-    return { ok: true, graphMessageId: graphMessageId ?? null };
+    return await sendVia(channel, recipientExternalId, messageText);
   } catch (error) {
+    logChannelSendError(channel.type, error);
     const errMsg = error instanceof Error ? error.message : String(error);
-    const graphBody =
-      axios.isAxiosError(error) && error.response?.data
-        ? JSON.stringify(error.response.data)
-        : '';
-    console.error(
-      `[channelSender] Failed to send ${channel.type} message:`,
-      errMsg,
-      graphBody ? `Graph: ${graphBody}` : '',
-    );
-    return { ok: false, graphMessageId: null };
+    return { success: false, error: errMsg };
   }
 }
 
@@ -174,7 +241,7 @@ export async function sendMessageStrict(
   recipientExternalId: string,
   messageText: string,
 ): Promise<void> {
-  const sender = senders[channel.type];
+  const sender = graphSenders[channel.type];
   if (!sender) {
     throw new Error(`Unsupported channel type: ${channel.type}`);
   }

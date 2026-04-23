@@ -33,6 +33,23 @@ function parseConversationUpdatedPayload(payload: unknown): string | null {
   return typeof id === 'string' ? id : null;
 }
 
+function parseMessageSendFailedPayload(payload: unknown): {
+  messageId: string;
+  conversationId: string;
+  error: string;
+} | null {
+  if (!isRecord(payload)) return null;
+  const messageId = payload.messageId;
+  const conversationId = payload.conversationId;
+  const error = payload.error;
+  if (typeof messageId !== 'string' || typeof conversationId !== 'string') return null;
+  return {
+    messageId,
+    conversationId,
+    error: typeof error === 'string' ? error : 'Send failed',
+  };
+}
+
 /**
  * Applies list-row updates for a conversation across all cached inbox list queries
  * (every channel/status infinite-query variant). Returns whether the row existed in cache.
@@ -150,14 +167,37 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
       void queryClient.invalidateQueries({ queryKey: ['conversations', conversationId, 'detail'] });
     };
 
+    const onMessageSendFailed = (payload: unknown) => {
+      const parsed = parseMessageSendFailedPayload(payload);
+      if (!parsed) return;
+      const { messageId, conversationId, error } = parsed;
+      const activeId = selectedRef.current;
+      if (conversationId !== activeId) return;
+
+      queryClient.setQueryData<ConversationThread>(
+        ['conversations', conversationId, 'detail'],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            messages: old.messages.map((m) =>
+              m.id === messageId ? { ...m, send_status: 'failed', send_error: error } : m,
+            ),
+          };
+        },
+      );
+    };
+
     socket.on('connect_error', onConnectError);
     socket.on('new_message', onNewMessage);
     socket.on('conversation_updated', onConversationUpdated);
+    socket.on('message_send_failed', onMessageSendFailed);
 
     return () => {
       socket.off('connect_error', onConnectError);
       socket.off('new_message', onNewMessage);
       socket.off('conversation_updated', onConversationUpdated);
+      socket.off('message_send_failed', onMessageSendFailed);
     };
   }, [socket, queryClient]);
 }

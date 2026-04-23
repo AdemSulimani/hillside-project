@@ -8,7 +8,11 @@ import {
   touchConversationLastMessageAt,
 } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
-import { createMessage, findMessagesByConversation } from '../db/models/message';
+import {
+  createMessage,
+  findMessagesByConversation,
+  updateMessageSendFailure,
+} from '../db/models/message';
 import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
 import { createOrder } from '../db/models/order';
 import { findProductByNameCaseInsensitive } from '../db/models/product';
@@ -233,10 +237,41 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   const contact = await findContactById(conversation.contact_id);
   if (contact) {
-    try {
-      await sendMessage(channel, contact.external_id, replyText);
-    } catch (err) {
-      console.error('[ai.reply] Channel send failed', { conversationId, err });
+    const sendResult = await sendMessage(channel, contact.external_id, replyText);
+    if (!sendResult.success) {
+      const errReason = sendResult.error ?? 'Unknown send error';
+      console.error('[ai.reply] Channel send failed', { conversationId, error: errReason });
+      await updateMessageSendFailure(outboundMessage.id, tenantId, 'failed', errReason);
+      socketService.emitMessageSendFailed(tenantId, {
+        messageId: outboundMessage.id,
+        conversationId,
+        error: errReason,
+      });
+      let alert: AIAlert | undefined;
+      try {
+        alert = await createAIAlert({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: 'message_send_failed',
+        });
+      } catch (alertErr) {
+        console.error('[ai.reply] message_send_failed alert insert failed', {
+          conversationId,
+          tenantId,
+          err: alertErr,
+        });
+      }
+      if (alert) {
+        const contactForAlert = await findContactById(conversation.contact_id);
+        socketService.emitAIAlert(tenantId, {
+          ...alert,
+          message_content: outboundMessage.content,
+          contact_name: contactForAlert?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+      }
     }
   } else {
     console.error('[ai.reply] Contact not found for conversation', {

@@ -66,6 +66,8 @@ function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessage {
     quality_score: raw.quality_score != null ? Number(raw.quality_score) : null,
     flagged: Boolean(raw.flagged),
     flag_reason: raw.flag_reason != null ? String(raw.flag_reason) : null,
+    send_status: raw.send_status != null && raw.send_status !== '' ? String(raw.send_status) : null,
+    send_error: raw.send_error != null && raw.send_error !== '' ? String(raw.send_error) : null,
   };
 }
 
