@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { ExternalLink, Loader2 } from 'lucide-react';
+import { ExternalLink, Globe, Image, Loader2, MessageCircleMore, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { z } from 'zod';
 import {
@@ -14,8 +14,8 @@ import {
 import { buildInferredOrderTimeline } from '@/lib/orderTimeline';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
-import { orderChannelIcon } from '@/components/orders/orderChannelIcon';
 import { OrderStatusBadge } from '@/components/orders/orderStatusBadge';
+import type { ChannelType } from '@/types/conversation';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,6 +38,13 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Textarea } from '@/components/ui/textarea';
+
+const ORDER_CHANNEL_ICONS: Record<ChannelType, LucideIcon> = {
+  facebook: Globe,
+  instagram: Image,
+  whatsapp: MessageCircleMore,
+};
+
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError && err.response?.data?.message) {
     return String(err.response.data.message);
@@ -80,13 +87,15 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
 
   const order = detailQuery.data;
 
+  /* eslint-disable react-hooks/set-state-in-effect -- hydrate draft fields when the loaded order changes */
   useEffect(() => {
     if (!open || !order) return;
     setQuantityInput(String(order.quantity));
     setDeliveryAddress(order.delivery_address ?? '');
     setNotes(order.notes ?? '');
     setFieldErrors({});
-  }, [open, order?.id, order?.updated_at]);
+  }, [open, order?.id, order?.updated_at, order]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -149,7 +158,9 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
   });
 
   const isDraft = order?.status === 'draft';
-  const ChannelIcon = order ? orderChannelIcon(order.channel.type) : orderChannelIcon('whatsapp');
+  const ChannelIcon = order
+    ? (ORDER_CHANNEL_ICONS[order.channel.type] ?? MessageCircleMore)
+    : MessageCircleMore;
   const timeline = order
     ? buildInferredOrderTimeline(order.status, order.created_at, order.updated_at)
     : [];

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Loader2, Trash2 } from 'lucide-react';
@@ -54,11 +54,9 @@ export default function AdminCommissionReportsPage() {
   const pagination = data?.pagination;
   const totalPages = pagination?.totalPages ?? 1;
 
-  useEffect(() => {
-    if (!isLoading && rows.length === 0 && page > 1) {
-      setPage((p) => Math.max(1, p - 1));
-    }
-  }, [isLoading, rows.length, page]);
+  if (!isLoading && rows.length === 0 && page > 1) {
+    setPage((p) => Math.max(1, p - 1));
+  }
 
   const patchMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: CommissionReportRow['status'] }) =>

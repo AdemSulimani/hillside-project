@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { Bell, Loader2 } from 'lucide-react';
+import { Bell, Globe, Image, Loader2, MessageCircleMore, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   fetchAIAlerts,
@@ -11,7 +11,13 @@ import {
   markAllAIAlertsRead,
   resolveAIAlert,
 } from '@/api/aiAlertsApi';
-import { orderChannelIcon } from '@/components/orders/orderChannelIcon';
+import type { ChannelType } from '@/types/conversation';
+
+const ALERT_CHANNEL_ICONS: Record<ChannelType, LucideIcon> = {
+  facebook: Globe,
+  instagram: Image,
+  whatsapp: MessageCircleMore,
+};
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -55,10 +61,6 @@ export default function AIAlertsPage() {
   const [page, setPage] = useState(1);
   const [resolveTarget, setResolveTarget] = useState<AIAlertRow | null>(null);
   const [resumeAiOnResolve, setResumeAiOnResolve] = useState(false);
-
-  useEffect(() => {
-    setPage(1);
-  }, [tab]);
 
   const listQuery = useQuery({
     queryKey: ['ai-alerts', 'list', tab, page],
@@ -150,7 +152,10 @@ export default function AIAlertsPage() {
             type="button"
             size="sm"
             variant={tab === key ? 'default' : 'outline'}
-            onClick={() => setTab(key)}
+            onClick={() => {
+              setTab(key);
+              setPage(1);
+            }}
             className="capitalize"
           >
             {key === 'unread' && typeof unreadCountQuery.data === 'number' && unreadCountQuery.data > 0 ? (
@@ -184,7 +189,8 @@ export default function AIAlertsPage() {
         ) : (
           <ul className="space-y-4">
             {alerts.map((alert) => {
-              const ChannelIcon = orderChannelIcon(alert.channel_type);
+              const ChannelIcon =
+                ALERT_CHANNEL_ICONS[alert.channel_type] ?? MessageCircleMore;
               return (
                 <li key={alert.id}>
                   <Card>

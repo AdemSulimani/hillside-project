@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import {
   type InfiniteData,
   type QueryClient,
@@ -89,7 +89,10 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
   const queryClient = useQueryClient();
   const socket = useCrmSocket();
   const selectedRef = useRef(selectedConversationId);
-  selectedRef.current = selectedConversationId;
+
+  useLayoutEffect(() => {
+    selectedRef.current = selectedConversationId;
+  }, [selectedConversationId]);
 
   useEffect(() => {
     if (!socket) return;

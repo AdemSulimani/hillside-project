@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useRef } from 'react';
+import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react';
 
 export type UseIntersectionObserverOptions = {
   /** Scroll root; omit for viewport */
@@ -28,7 +28,10 @@ export function useIntersectionObserver(
   } = options;
 
   const onIntersectRef = useRef(onIntersect);
-  onIntersectRef.current = onIntersect;
+
+  useLayoutEffect(() => {
+    onIntersectRef.current = onIntersect;
+  }, [onIntersect]);
 
   useEffect(() => {
     if (!enabled) return;

@@ -74,6 +74,7 @@ export default function BusinessPage() {
     },
   });
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror fetched tenant into the edit form */
   useEffect(() => {
     if (business) {
       setName(business.name);
@@ -83,6 +84,7 @@ export default function BusinessPage() {
       setLogoPreview(assetUrl(business.logo_url) ?? null);
     }
   }, [business]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const updateMutation = useMutation({
     mutationFn: async (payload: {

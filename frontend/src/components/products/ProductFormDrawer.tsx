@@ -173,7 +173,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
     try {
       if (mode === 'create') {
         const created = await createProduct(body);
-        let id = created.id;
+        const id = created.id;
         for (let i = 0; i < pendingFiles.length; i += UPLOAD_CHUNK) {
           await uploadProductImages(id, pendingFiles.slice(i, i + UPLOAD_CHUNK));
         }
