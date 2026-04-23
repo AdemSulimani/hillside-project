@@ -9,6 +9,18 @@ import { redisConnection } from '../jobs/redisConnection';
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
 
+const CONTEXT_MAX_HISTORY_TOKENS = (() => {
+  const raw = process.env.CONTEXT_MAX_HISTORY_TOKENS;
+  if (raw === undefined || raw.trim() === '') return 6000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 6000;
+})();
+
+/** Rough GPT token estimate: ~4 characters per token. */
+function estimateTokens(text: string): number {
+  return text.length / 4;
+}
+
 /** Matches normalized inbound text from webhookNormalizer (Feature 22). */
 const SHARED_CONTENT_SYSTEM_APPEND =
   '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
@@ -320,10 +332,39 @@ export async function generateReply(
     systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
   }
 
+  const systemPromptTokenEstimate = estimateTokens(systemPrompt);
+  const inboundTokenEstimate = estimateTokens(inboundMessage.trim());
+  const historyMessageTokenEstimates = conversationHistory.map((msg) =>
+    estimateTokens((msg.content ?? '').trim()),
+  );
+
+  const originalHistoryCount = conversationHistory.length;
+  let historyForPrompt = conversationHistory;
+  let historyTokenTotal = historyMessageTokenEstimates.reduce((sum, t) => sum + t, 0);
+
+  while (historyTokenTotal > CONTEXT_MAX_HISTORY_TOKENS && historyForPrompt.length > 3) {
+    const [removed, ...rest] = historyForPrompt;
+    historyForPrompt = rest;
+    historyTokenTotal -= estimateTokens((removed.content ?? '').trim());
+  }
+
+  if (historyForPrompt.length !== originalHistoryCount) {
+    console.warn(
+      '[aiService] Conversation history truncated for context length protection',
+      JSON.stringify({
+        tenantId,
+        conversationId,
+        originalMessageCount: originalHistoryCount,
+        truncatedMessageCount: historyForPrompt.length,
+        estimatedTokenCount: historyTokenTotal,
+      }),
+    );
+  }
+
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
   // other images). `buildMessagesArray` turns any non-empty `attachmentUrls` into vision `image_url`
   // parts next to the user text (Step 16 path).
-  const messages = buildMessagesArray(systemPrompt, conversationHistory, inboundMessage, attachmentUrls);
+  const messages = buildMessagesArray(systemPrompt, historyForPrompt, inboundMessage, attachmentUrls);
 
   const model = hasImages
     ? OPENAI_VISION_MODEL
