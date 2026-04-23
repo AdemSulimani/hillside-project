@@ -201,6 +201,8 @@ export default function InboxPage() {
         quality_score: null,
         flagged: false,
         flag_reason: null,
+        send_status: null,
+        send_error: null,
       };
 
       queryClient.setQueryData<ConversationThread>(['conversations', id, 'detail'], {

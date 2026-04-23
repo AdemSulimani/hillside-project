@@ -45,4 +45,12 @@ export const socketService = {
     if (!io) return;
     io.to(tenantRoom(tenantId)).emit('ai_alert', alert);
   },
+
+  emitMessageSendFailed(
+    tenantId: string,
+    payload: { messageId: string; conversationId: string; error: string },
+  ): void {
+    if (!io) return;
+    io.to(tenantRoom(tenantId)).emit('message_send_failed', payload);
+  },
 };
