@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import type { Request, Response } from 'express';
 import { sendError } from '../utils/response';
 import { webhookQueue } from '../jobs/queues';
+import { redisConnection } from '../jobs/redisConnection';
 import type { ChannelType } from '../db/models/channel';
 
 const allowedTypes: ChannelType[] = ['facebook', 'instagram', 'whatsapp'];
@@ -32,6 +33,113 @@ function getWebhookAppSecret(channelType: ChannelType): string | null {
 function isWebhookDebug(): boolean {
   const v = process.env.WEBHOOK_DEBUG?.trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes';
+}
+
+const WEBHOOK_TS_MAX_SKEW_MS = 300_000;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+/** Meta timestamps are usually ms; some payloads use seconds. */
+function parseMetaEpochMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const n = Number(value.trim());
+    if (Number.isFinite(n) && n > 0) {
+      return n < 1_000_000_000_000 ? n * 1000 : n;
+    }
+  }
+  return null;
+}
+
+/** First messaging / WhatsApp message timestamp found in the body; null if none. */
+function extractWebhookPayloadTimestampMs(payload: Record<string, unknown>): number | null {
+  const entries = Array.isArray(payload.entry) ? payload.entry : [];
+  for (const rawEntry of entries) {
+    const entry = asRecord(rawEntry);
+    if (!entry) continue;
+    if (Array.isArray(entry.messaging)) {
+      for (const rawMsg of entry.messaging) {
+        const item = asRecord(rawMsg);
+        if (!item) continue;
+        const ts = parseMetaEpochMs(item.timestamp);
+        if (ts !== null) return ts;
+      }
+    }
+    if (Array.isArray(entry.changes)) {
+      for (const rawCh of entry.changes) {
+        const change = asRecord(rawCh);
+        const value = change ? asRecord(change.value) : null;
+        if (!value || !Array.isArray(value.messages)) continue;
+        for (const rawInner of value.messages) {
+          const msg = asRecord(rawInner);
+          if (!msg) continue;
+          const ts = parseMetaEpochMs(msg.timestamp);
+          if (ts !== null) return ts;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function pickMessageMidOrId(message: Record<string, unknown> | null): string | null {
+  if (!message) return null;
+  if (typeof message.mid === 'string' && message.mid.trim()) return message.mid.trim();
+  if (typeof message.id === 'string' && message.id.trim()) return message.id.trim();
+  if (typeof message.id === 'number' && Number.isFinite(message.id) && message.id > 0) {
+    return String(Math.trunc(message.id));
+  }
+  return null;
+}
+
+/**
+ * Stable id for Redis dedupe: Meta message mids/ids when present, else a hash of the raw body.
+ * X-Hub-Signature-256 does not embed a timestamp; body-only extraction is required before fallback.
+ */
+function extractWebhookMessageIdForDedupe(payload: Record<string, unknown>, rawBody: Buffer): string {
+  const parts: string[] = [];
+  const entries = Array.isArray(payload.entry) ? payload.entry : [];
+  for (const rawEntry of entries) {
+    const entry = asRecord(rawEntry);
+    if (!entry) continue;
+    if (Array.isArray(entry.messaging)) {
+      for (const rawMsg of entry.messaging) {
+        const item = asRecord(rawMsg);
+        if (!item) continue;
+        const fromMessage = pickMessageMidOrId(asRecord(item.message));
+        if (fromMessage) {
+          parts.push(fromMessage);
+          continue;
+        }
+        const reaction = asRecord(item.reaction);
+        if (reaction) {
+          const rmid = typeof reaction.mid === 'string' && reaction.mid.trim() ? reaction.mid.trim() : '';
+          const ts = item.timestamp != null && item.timestamp !== '' ? String(item.timestamp) : '';
+          parts.push(rmid ? `reaction:${rmid}:${ts}` : `reaction:${ts}`);
+        }
+      }
+    }
+    if (Array.isArray(entry.changes)) {
+      for (const rawCh of entry.changes) {
+        const change = asRecord(rawCh);
+        const value = change ? asRecord(change.value) : null;
+        if (!value || !Array.isArray(value.messages)) continue;
+        for (const rawInner of value.messages) {
+          const id = pickMessageMidOrId(asRecord(rawInner));
+          if (id) parts.push(id);
+        }
+      }
+    }
+  }
+  if (parts.length > 0) return parts.join('|');
+  return crypto.createHash('sha256').update(rawBody).digest('hex');
 }
 
 function summarizeInstagramWebhookPayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -126,6 +234,21 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
       console.warn('[webhook] rejected: signature mismatch', { channelType: channelTypeParam });
     }
     res.sendStatus(403);
+    return;
+  }
+
+  const payloadTsMs = extractWebhookPayloadTimestampMs(parsedPayload);
+  const eventEpochMs = payloadTsMs ?? Date.now();
+  if (Math.abs(Date.now() - eventEpochMs) > WEBHOOK_TS_MAX_SKEW_MS) {
+    res.status(403).json({ error: 'Webhook timestamp out of acceptable range' });
+    return;
+  }
+
+  const messageId = extractWebhookMessageIdForDedupe(parsedPayload, rawBody);
+  const seenKey = `webhook_seen:${messageId}`;
+  const dedupeSet = await redisConnection.set(seenKey, '1', 'EX', 86400, 'NX');
+  if (dedupeSet !== 'OK') {
+    res.sendStatus(200);
     return;
   }
 
