@@ -10,6 +10,7 @@ export function CrmSocketProvider({ children }: { children: ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const [socket, setSocket] = useState<Socket | null>(null);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- socket lifecycle tied to auth session */
   useEffect(() => {
     if (!isAuthenticated || !accessToken) {
       setSocket(null);
@@ -25,6 +26,7 @@ export function CrmSocketProvider({ children }: { children: ReactNode }) {
       setSocket(null);
     };
   }, [accessToken, isAuthenticated]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return <CrmSocketContext.Provider value={socket}>{children}</CrmSocketContext.Provider>;
 }

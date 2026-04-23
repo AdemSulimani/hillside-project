@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link2, RefreshCw, ShoppingBag, ThumbsDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
@@ -216,9 +216,11 @@ export function MessageBubble({
 
   const [feedbackOpen, setFeedbackOpen] = useState(false);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- reset feedback when switching messages */
   useEffect(() => {
     setFeedbackOpen(false);
   }, [message.id]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   if (isInbound) {
     return (

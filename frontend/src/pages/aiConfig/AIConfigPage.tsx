@@ -135,6 +135,7 @@ export default function AIConfigPage() {
     queryFn: fetchAIConfig,
   });
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror server config into controlled form fields */
   useEffect(() => {
     if (!config) return;
     setTone(config.tone || 'professional');
@@ -154,6 +155,7 @@ export default function AIConfigPage() {
     setIsActive(config.is_active);
     setCustomModelId(config.custom_model_id);
   }, [config]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const saveMutation = useMutation({
     mutationFn: (payload: AIConfigUpdatePayload) => updateAIConfig(payload),
