@@ -357,6 +357,27 @@ export async function findOrderById(id: string): Promise<Order | null> {
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
+/**
+ * Most recent non-cancelled order in the conversation.
+ * Used by AI order intent flow to prevent duplicate re-creation spam.
+ */
+export async function findLatestActiveOrderForConversation(
+  tenantId: string,
+  conversationId: string,
+): Promise<Order | null> {
+  const { rows } = await pool.query<OrderRow>(
+    `SELECT *
+     FROM orders
+     WHERE tenant_id = $1
+       AND conversation_id = $2
+       AND status <> 'cancelled'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [tenantId, conversationId],
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
 export async function updateOrderCommissionStatusById(
   orderId: string,
   commissionStatus: CommissionStatus,

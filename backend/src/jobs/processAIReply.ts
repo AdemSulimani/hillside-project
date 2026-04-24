@@ -14,7 +14,7 @@ import {
   updateMessageSendFailure,
 } from '../db/models/message';
 import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
-import { createOrder } from '../db/models/order';
+import { createOrder, findLatestActiveOrderForConversation } from '../db/models/order';
 import { findProductByNameCaseInsensitive } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import { generateReply } from '../services/aiService';
@@ -34,6 +34,31 @@ export interface AIReplyJobData {
   channelId: string;
   conversationId: string;
   messageExternalId: string;
+}
+
+function normalizeLooseText(value: string | null | undefined): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+function messageSuggestsNewOrder(message: string): boolean {
+  const t = normalizeLooseText(message);
+  if (!t) return false;
+  return [
+    'new order',
+    'another order',
+    'one more',
+    'again',
+    'also order',
+    'order again',
+    'porosi tjeter',
+    'porosi tjetër',
+    'edhe nje',
+    'edhe një',
+    'nje tjeter',
+    'një tjetër',
+    'dua edhe',
+    'shto edhe',
+  ].some((needle) => t.includes(needle));
 }
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
@@ -176,10 +201,22 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const flagReason =
     qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
 
+  const contact = await findContactById(conversation.contact_id);
+  let sendResult:
+    | Awaited<ReturnType<typeof sendMessage>>
+    | null = null;
+  if (contact) {
+    sendResult = await sendMessage(channel, contact.external_id, replyText);
+  } else {
+    console.error('[ai.reply] Contact not found for conversation', {
+      contactId: conversation.contact_id,
+    });
+  }
+
   const outboundMessage = await createMessage({
     tenant_id: tenantId,
     conversation_id: conversationId,
-    external_message_id: `ai_${crypto.randomUUID()}`,
+    external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
     direction: 'outbound',
     type: 'text',
     content: replyText,
@@ -235,48 +272,42 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   socketService.emitNewMessage(tenantId, outboundMessage);
   socketService.emitConversationUpdated(tenantId, conversationId);
 
-  const contact = await findContactById(conversation.contact_id);
-  if (contact) {
-    const sendResult = await sendMessage(channel, contact.external_id, replyText);
-    if (!sendResult.success) {
-      const errReason = sendResult.error ?? 'Unknown send error';
+  if (!sendResult?.success) {
+    const errReason = sendResult?.error ?? 'Contact not found for conversation';
+    if (sendResult) {
       console.error('[ai.reply] Channel send failed', { conversationId, error: errReason });
-      await updateMessageSendFailure(outboundMessage.id, tenantId, 'failed', errReason);
-      socketService.emitMessageSendFailed(tenantId, {
-        messageId: outboundMessage.id,
-        conversationId,
-        error: errReason,
-      });
-      let alert: AIAlert | undefined;
-      try {
-        alert = await createAIAlert({
-          tenant_id: tenantId,
-          conversation_id: conversationId,
-          message_id: outboundMessage.id,
-          reason: 'message_send_failed',
-        });
-      } catch (alertErr) {
-        console.error('[ai.reply] message_send_failed alert insert failed', {
-          conversationId,
-          tenantId,
-          err: alertErr,
-        });
-      }
-      if (alert) {
-        const contactForAlert = await findContactById(conversation.contact_id);
-        socketService.emitAIAlert(tenantId, {
-          ...alert,
-          message_content: outboundMessage.content,
-          contact_name: contactForAlert?.name?.trim() || 'Customer',
-          channel_type: channel.type,
-          channel_name: channel.name,
-        });
-      }
     }
-  } else {
-    console.error('[ai.reply] Contact not found for conversation', {
-      contactId: conversation.contact_id,
+    await updateMessageSendFailure(outboundMessage.id, tenantId, 'failed', errReason);
+    socketService.emitMessageSendFailed(tenantId, {
+      messageId: outboundMessage.id,
+      conversationId,
+      error: errReason,
     });
+    let alert: AIAlert | undefined;
+    try {
+      alert = await createAIAlert({
+        tenant_id: tenantId,
+        conversation_id: conversationId,
+        message_id: outboundMessage.id,
+        reason: 'message_send_failed',
+      });
+    } catch (alertErr) {
+      console.error('[ai.reply] message_send_failed alert insert failed', {
+        conversationId,
+        tenantId,
+        err: alertErr,
+      });
+    }
+    if (alert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...alert,
+        message_content: outboundMessage.content,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+    }
   }
 
   try {
@@ -308,6 +339,24 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     const quantity = Math.max(1, intent.quantity ?? 1);
     const unitPrice = matchedProduct ? Number(matchedProduct.price) : 0;
     const totalPrice = unitPrice * quantity;
+
+    const latestActiveOrder = await findLatestActiveOrderForConversation(tenantId, conversationId);
+    if (latestActiveOrder) {
+      const incomingProduct = normalizeLooseText(productName);
+      const existingProduct = normalizeLooseText(latestActiveOrder.product_name);
+      const productChanged = incomingProduct.length > 0 && incomingProduct !== existingProduct;
+      const explicitNewOrder = messageSuggestsNewOrder(inboundText);
+
+      if (!productChanged && !explicitNewOrder) {
+        console.info('[ai.reply] Skipping duplicate order creation', {
+          conversationId,
+          existingOrderId: latestActiveOrder.id,
+          productName,
+          intent_score: intent.intent_score,
+        });
+        return;
+      }
+    }
 
     const { rows: humanRows } = await pool.query<{ human_replied: boolean }>(
       'SELECT human_replied FROM conversations WHERE id = $1 LIMIT 1',

@@ -71,6 +71,13 @@ function shouldIgnoreNormalizationError(channelType: ChannelType, err: unknown):
   return err.message.includes('required message identifiers are missing');
 }
 
+function isFallbackContactLabel(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  if (trimmed.toLowerCase() === 'unknown') return true;
+  return /^ig user \d+$/i.test(trimmed);
+}
+
 function isProfileLookupDebugEnabled(): boolean {
   const v = process.env.WEBHOOK_DEBUG?.trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'yes';
@@ -302,6 +309,16 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
 
   if (shouldRefreshProfile) {
     contactMetadata[PROFILE_LAST_LOOKUP_METADATA_KEY] = new Date().toISOString();
+  }
+
+  // Instagram webhook payloads may omit sender display info on later events; avoid
+  // replacing a known real name with fallback labels like "IG user 123...".
+  if (
+    normalized.channelType === 'instagram' &&
+    existingContact?.name &&
+    isFallbackContactLabel(contactName)
+  ) {
+    contactName = existingContact.name;
   }
 
   if (normalized.channelType === 'instagram' && shouldRefreshProfile) {

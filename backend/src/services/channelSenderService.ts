@@ -13,8 +13,11 @@ function decryptToken(channel: Channel): string {
 
 function readGraphSendMessageId(data: unknown): string | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const mid = (data as { message_id?: unknown }).message_id;
-  if (typeof mid === 'string' && mid.trim()) return mid.trim();
+  const payload = data as { message_id?: unknown; id?: unknown; mid?: unknown };
+  const directCandidates = [payload.message_id, payload.id, payload.mid];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
   return null;
 }
 
