@@ -25,23 +25,38 @@ export type InstagramRichParsed =
       previewUrl: string | null;
     }
   | {
+      kind: 'story_share';
+      extraRichLines: string | null;
+      userCaption: string | null;
+      previewUrl: string | null;
+    }
+  | {
       kind: 'reel_share';
       title: string;
       description: string | null;
       userCaption: string | null;
+      thumbnailUrl: string | null;
     }
   | {
       kind: 'product_tag';
       productName: string;
       subtitle: string | null;
       userCaption: string | null;
+    }
+  | {
+      kind: 'generic_share';
+      title: string | null;
+      userCaption: string | null;
+      previewUrl: string | null;
     };
 
 const POST = 'Customer shared a post:';
 const STORY_MENTION = 'Customer mentioned you in their story';
 const STORY_REPLY = 'Customer replied to your story';
+const STORY_SHARE = 'Customer shared a story';
 const REEL = 'Customer shared a video/reel:';
 const PRODUCT = 'Customer shared a product:';
+const GENERIC_SHARE = 'Customer shared content';
 
 function splitRichAndUserCaption(full: string): { richBlock: string; userCaption: string | null } {
   const trimmed = full.trim();
@@ -64,10 +79,16 @@ function firstImageLikeUrl(urls: string[]): string | null {
       lower.includes('.png') ||
       lower.includes('.webp') ||
       lower.includes('.gif') ||
+      lower.includes('/image/upload/') ||
       lower.includes('image')
     ) {
       return u;
     }
+  }
+  for (const u of urls) {
+    if (!u || !/^https?:\/\//i.test(u)) continue;
+    const lower = u.toLowerCase();
+    if (lower.includes('.mp4') || lower.includes('/video/upload/')) return u;
   }
   return urls.find((u) => u && /^https?:\/\//i.test(u)) ?? null;
 }
@@ -110,13 +131,18 @@ function parsePostShare(richBlock: string, userCaption: string | null, attachmen
   };
 }
 
-function parseReelShare(richBlock: string, userCaption: string | null): InstagramRichParsed | null {
+function parseReelShare(
+  richBlock: string,
+  userCaption: string | null,
+  attachmentUrls: string[],
+): InstagramRichParsed | null {
   if (!richBlock.startsWith(REEL)) return null;
   const lines = richBlock.split('\n');
   const title = lines[0]?.slice(REEL.length).trim() || 'Video';
   const description =
     lines.length > 1 ? lines.slice(1).join('\n').trim() || null : null;
-  return { kind: 'reel_share', title, description, userCaption };
+  const thumbnailUrl = firstImageLikeUrl(attachmentUrls);
+  return { kind: 'reel_share', title, description, userCaption, thumbnailUrl };
 }
 
 function parseProductTag(richBlock: string, userCaption: string | null): InstagramRichParsed | null {
@@ -157,6 +183,28 @@ function parseStoryReply(richBlock: string, userCaption: string | null, attachme
   return { kind: 'story_reply', extraRichLines, userCaption, previewUrl: previewUrl ?? null };
 }
 
+function parseStoryShare(richBlock: string, userCaption: string | null, attachmentUrls: string[]): InstagramRichParsed | null {
+  const lines = richBlock.split('\n');
+  const first = lines[0]?.trim() ?? '';
+  if (first !== STORY_SHARE) return null;
+  const extraRichLines = lines.slice(1).join('\n').trim() || null;
+  const previewUrl = attachmentUrls[0] ?? firstImageLikeUrl(attachmentUrls);
+  return { kind: 'story_share', extraRichLines, userCaption, previewUrl: previewUrl ?? null };
+}
+
+function parseGenericShare(richBlock: string, userCaption: string | null, attachmentUrls: string[]): InstagramRichParsed | null {
+  const first = richBlock.split('\n')[0]?.trim() ?? '';
+  if (!first.startsWith(GENERIC_SHARE)) return null;
+  const afterColon = first.slice(GENERIC_SHARE.length).replace(/^[:\s-]+/, '').trim();
+  const previewUrl = firstImageLikeUrl(attachmentUrls);
+  return {
+    kind: 'generic_share',
+    title: afterColon || null,
+    userCaption,
+    previewUrl: previewUrl ?? null,
+  };
+}
+
 /**
  * Returns structured Instagram rich UI data when `content` matches backend patterns.
  */
@@ -175,14 +223,20 @@ export function parseInstagramRichDisplay(
   const storyMention = parseStoryMention(richBlock, userCaption, attachmentUrls);
   if (storyMention) return storyMention;
 
+  const storyShare = parseStoryShare(richBlock, userCaption, attachmentUrls);
+  if (storyShare) return storyShare;
+
   const product = parseProductTag(richBlock, userCaption);
   if (product) return product;
 
-  const reel = parseReelShare(richBlock, userCaption);
+  const reel = parseReelShare(richBlock, userCaption, attachmentUrls);
   if (reel) return reel;
 
   const post = parsePostShare(richBlock, userCaption, attachmentUrls);
   if (post) return post;
+
+  const generic = parseGenericShare(richBlock, userCaption, attachmentUrls);
+  if (generic) return generic;
 
   return null;
 }
@@ -195,10 +249,16 @@ export function attachmentUrlsAfterRichUse(
   if (parsed.kind === 'post_share' && parsed.thumbnailUrl) {
     return attachmentUrls.filter((u) => u !== parsed.thumbnailUrl);
   }
-  if (parsed.kind === 'story_mention' || parsed.kind === 'story_reply') {
+  if (parsed.kind === 'story_mention' || parsed.kind === 'story_reply' || parsed.kind === 'story_share') {
     if (parsed.previewUrl) {
       return attachmentUrls.filter((u) => u !== parsed.previewUrl);
     }
+  }
+  if (parsed.kind === 'reel_share' && parsed.thumbnailUrl) {
+    return attachmentUrls.filter((u) => u !== parsed.thumbnailUrl);
+  }
+  if (parsed.kind === 'generic_share' && parsed.previewUrl) {
+    return attachmentUrls.filter((u) => u !== parsed.previewUrl);
   }
   return [...attachmentUrls];
 }

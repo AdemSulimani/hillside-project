@@ -57,15 +57,28 @@ function instagramExternalMessageId(message: Record<string, unknown> | null): st
 }
 
 /**
- * Media refs for download (Graph attachment_id or URL). Skips `share` payloads so post/reel links
- * are not treated as image downloads — those are represented in `content` by rich extraction.
+ * Media refs for download (Graph attachment_id or URL). Skips rich template types (`share`,
+ * `ig_reel`, `reel`, `story_mention`) so their URLs — which may be permalinks or MP4s — don't
+ * silently land on the vision model; those cases are fully handled by `extractMessengerRichContent`,
+ * which chooses a safe preview image when one is available.
  */
 function instagramAttachmentRefs(message: Record<string, unknown> | null): string[] {
   if (!message) return [];
   const refs: string[] = [];
   for (const node of instagramAttachmentNodes(message)) {
     const type = strTrim(node.type).toLowerCase();
-    if (type === 'share') continue;
+    // Rich template types are fully resolved inside `extractMessengerRichContent`, which picks a
+    // safe preview image when available. Excluding them here prevents duplicate URLs and keeps
+    // video/permalink URLs off the vision path.
+    if (
+      type === 'share' ||
+      type === 'ig_reel' ||
+      type === 'reel' ||
+      type === 'story_mention' ||
+      type.includes('story')
+    ) {
+      continue;
+    }
     const payload = readPayload(node);
     const url = strTrim(payload.url) || strTrim(node.url);
     if (url) refs.push(url);
@@ -146,6 +159,75 @@ function isLikelyVideoShareUrl(url: string): boolean {
   return false;
 }
 
+/**
+ * True when the share URL looks like a direct image we can download and hand to the vision model.
+ * Conservative on purpose — permalinks like instagram.com/p/<id>/ return HTML, so we exclude them.
+ *
+ * Meta's Instagram share webhooks frequently deliver the post/story preview on
+ * `lookaside.fbsbx.com/ig_messaging_cdn/...` (no file extension, signed query string),
+ * so we whitelist the lookaside/fbsbx/Meta CDN hosts as well as the classic cdninstagram/fbcdn ones.
+ */
+function isLikelyImageShareUrl(url: string): boolean {
+  if (!isHttpUrl(url)) return false;
+  const u = url.toLowerCase();
+  if (isLikelyVideoShareUrl(u)) return false;
+  if (/\.(jpg|jpeg|png|webp|gif|heic|heif)(\?|#|$)/.test(u)) return true;
+  if (u.includes('cdninstagram.com')) return true;
+  if (u.includes('fbcdn.net')) return true;
+  if (u.includes('lookaside.fbsbx.com')) return true;
+  if (u.includes('lookaside.instagram.com')) return true;
+  if (u.includes('/ig_messaging_cdn/')) return true;
+  return false;
+}
+
+/** Extract a shared media preview URL from a webhook attachment payload, if one exists. */
+function extractShareThumbnailUrl(payload: Record<string, unknown>): string {
+  const candidates = [
+    payload.thumbnail_url,
+    payload.preview_url,
+    payload.image_url,
+    payload.cover_url,
+    payload.cover_image_url,
+    payload.media_url,
+    payload.picture,
+    payload.src,
+  ];
+  for (const c of candidates) {
+    const v = strTrim(c);
+    if (v && isHttpUrl(v)) return v;
+  }
+  return '';
+}
+
+/** Depth-first collection of all string values that look like absolute HTTP(S) URLs. */
+function collectNestedHttpsStrings(value: unknown, maxDepth: number, out: Set<string>): void {
+  if (maxDepth < 0 || out.size >= 48) return;
+  if (typeof value === 'string') {
+    const t = value.trim();
+    if (isHttpUrl(t)) out.add(t);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectNestedHttpsStrings(item, maxDepth - 1, out);
+    return;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      collectNestedHttpsStrings(v, maxDepth - 1, out);
+    }
+  }
+}
+
+function nestedHttpsFromPayloadAndNode(
+  payload: Record<string, unknown>,
+  node: Record<string, unknown>,
+): string[] {
+  const out = new Set<string>();
+  collectNestedHttpsStrings(payload, 6, out);
+  collectNestedHttpsStrings(node, 4, out);
+  return [...out];
+}
+
 function readPayload(node: Record<string, unknown>): Record<string, unknown> {
   return asRecord(node.payload) ?? {};
 }
@@ -219,8 +301,10 @@ export function inboundMessageIndicatesInstagramSharedContext(content: string | 
     t.startsWith('Customer shared a post:') ||
     t.includes('Customer mentioned you in their story') ||
     t.includes('Customer replied to your story') ||
+    t.includes('Customer shared a story') ||
     t.startsWith('Customer shared a video/reel:') ||
-    t.startsWith('Customer shared a product:')
+    t.startsWith('Customer shared a product:') ||
+    t.startsWith('Customer shared content')
   );
 }
 
@@ -249,7 +333,11 @@ function extractMessengerRichContent(
 
   const isInstagram = channel === 'instagram';
 
-  const storyReply = message ? asRecord(message.story_reply) : null;
+  // Meta delivers story replies either as a top-level `story_reply` object or nested under
+  // `reply_to.story` (newer Instagram Graph versions). Accept either shape.
+  const storyReply =
+    (message ? asRecord(message.story_reply) : null) ??
+    (message ? asRecord(asRecord(message.reply_to)?.story) : null);
   if (isInstagram && storyReply) {
     contentLines.push('Customer replied to your story');
     const url = strTrim(storyReply.url);
@@ -306,14 +394,36 @@ function extractMessengerRichContent(
         payload.description ?? payload.subtitle ?? (typeof payload.caption === 'string' ? payload.caption : ''),
       );
       const link = url || strTrim(payload.share_url) || strTrim(payload.target_url);
+      const thumbnail = extractShareThumbnailUrl(payload);
 
-      if (isInstagram && link && isLikelyVideoShareUrl(link)) {
+      const isVideoShare = isInstagram && !!link && isLikelyVideoShareUrl(link);
+      if (isVideoShare) {
         contentLines.push(formatVideoReelLine(title, description));
-        continue;
+      } else if (link || title) {
+        contentLines.push(formatPostShareLine(title, link || title, description));
       }
 
-      if (link || title) {
-        contentLines.push(formatPostShareLine(title, link || title, description));
+      // Attach a preview image so the vision model can actually see the shared post/story. For
+      // reel/video shares we only attach a thumbnail when the webhook provides one; we never
+      // attach an MP4 URL since the vision model expects images.
+      const mediaUrl =
+        thumbnail ||
+        (!isVideoShare && link && isLikelyImageShareUrl(link) ? link : '');
+      if (mediaUrl) {
+        attachmentRefs.push(mediaUrl);
+        if (!messageType) messageType = 'image';
+      }
+      continue;
+    }
+
+    if (isInstagram && (type === 'ig_reel' || type === 'reel')) {
+      const title = strTrim(payload.title);
+      const description = strTrim(payload.description ?? payload.subtitle ?? '');
+      contentLines.push(formatVideoReelLine(title, description));
+      const thumbnail = extractShareThumbnailUrl(payload);
+      if (thumbnail) {
+        attachmentRefs.push(thumbnail);
+        if (!messageType) messageType = 'image';
       }
       continue;
     }
@@ -339,6 +449,61 @@ function extractMessengerRichContent(
         else if (type === 'audio') messageType = 'audio';
         else messageType = 'document';
       }
+      continue;
+    }
+
+    // Stories shared through DM arrive under a variety of type names depending on how the customer
+    // sent them (own story vs. someone else's, photo vs. video). We route any `*story*` variant we
+    // don't already handle above into a single "Customer shared a story" line so the message is
+    // never stored empty.
+    //
+    // Meta often omits `payload.url` and only sends `attachment_id`, or nests preview URLs inside
+    // `payload` objects. `lookaside.fbsbx.com` links frequently return `video/mp4` even for
+    // "photo" stories (short MP4). Prefer `attachment_id` (Graph resolves to a usable URL), then
+    // any nested image-like URL, then a single video URL as a last resort (`messageType: video`).
+    if (isInstagram && type.includes('story')) {
+      contentLines.push('Customer shared a story');
+      const thumbnail = extractShareThumbnailUrl(payload);
+      const nested = nestedHttpsFromPayloadAndNode(payload, node);
+      const attId = strTrim(payload.attachment_id);
+      const imageFromNested = nested.find((u) => isLikelyImageShareUrl(u) && !isLikelyVideoShareUrl(u));
+      const imageUrl =
+        thumbnail ||
+        (url && isLikelyImageShareUrl(url) && !isLikelyVideoShareUrl(url) ? url : '') ||
+        imageFromNested ||
+        '';
+      const videoUrl =
+        (url && isLikelyVideoShareUrl(url) ? url : '') || nested.find((u) => isLikelyVideoShareUrl(u)) || '';
+
+      if (attId) {
+        attachmentRefs.push(attId);
+        if (!messageType) messageType = 'image';
+      } else if (imageUrl) {
+        attachmentRefs.push(imageUrl);
+        if (!messageType) messageType = 'image';
+      } else if (videoUrl) {
+        attachmentRefs.push(videoUrl);
+        if (!messageType) messageType = 'video';
+      }
+      continue;
+    }
+
+    // Catch-all for unrecognized Instagram share variants (future Meta API changes, rare
+    // promotional/tag-share types, etc.). Prefer a thumbnail URL when available, and fall back to
+    // a generic label so the inbox and the AI both see that the customer shared something — the
+    // alternative is an empty message bubble, which is what surfaced this bug.
+    if (isInstagram) {
+      const title = strTrim(payload.title);
+      const label = title ? `Customer shared content: ${title}` : 'Customer shared content';
+      contentLines.push(label);
+      const thumbnail = extractShareThumbnailUrl(payload);
+      const mediaUrl =
+        thumbnail || (url && isLikelyImageShareUrl(url) ? url : '');
+      if (mediaUrl) {
+        attachmentRefs.push(mediaUrl);
+        if (!messageType) messageType = 'image';
+      }
+      continue;
     }
   }
 

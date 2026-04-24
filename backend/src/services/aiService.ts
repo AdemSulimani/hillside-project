@@ -29,16 +29,26 @@ function inboundTextIsPostShare(content: string): boolean {
   return content.trimStart().startsWith('Customer shared a post:');
 }
 
-function inboundTextIsStoryMentionOrReply(content: string): boolean {
+function inboundTextIsStoryThread(content: string): boolean {
   const t = content;
   return (
-    t.includes('Customer mentioned you in their story') || t.includes('Customer replied to your story')
+    t.includes('Customer mentioned you in their story') ||
+    t.includes('Customer replied to your story') ||
+    t.includes('Customer shared a story')
   );
+}
+
+function inboundTextIsGenericShare(content: string): boolean {
+  return content.trimStart().startsWith('Customer shared content');
 }
 
 /** Post shares and story threads get the extra catalog-alignment instruction (not reel/product-only lines). */
 function inboundNeedsSharedContentInstruction(content: string): boolean {
-  return inboundTextIsPostShare(content) || inboundTextIsStoryMentionOrReply(content);
+  return (
+    inboundTextIsPostShare(content) ||
+    inboundTextIsStoryThread(content) ||
+    inboundTextIsGenericShare(content)
+  );
 }
 
 const DEFAULT_AI_CONFIG: Pick<
@@ -234,6 +244,26 @@ function resolveImageUrls(attachmentUrls: string[]): string[] {
   return resolved;
 }
 
+/** URLs the chat vision API can consume as `image_url` (not MP4/HTML, etc.). */
+function urlLooksLikeVisionImage(url: string): boolean {
+  const u = url.toLowerCase();
+  if (u.endsWith('.mp4') || u.includes('.mp4?')) return false;
+  if (u.endsWith('.webm') || u.includes('.webm?')) return false;
+  if (u.endsWith('.mov') || u.includes('.mov?')) return false;
+  if (u.includes('/video/upload/')) return false;
+  if (u.includes('mime_video') || u.includes('resource_type=video')) return false;
+  return true;
+}
+
+function partitionVisionAttachments(attachmentUrls: string[]): {
+  visionUrls: string[];
+  hadSkippedVideo: boolean;
+} {
+  const visionUrls = attachmentUrls.filter(urlLooksLikeVisionImage);
+  const hadSkippedVideo = visionUrls.length < attachmentUrls.length;
+  return { visionUrls, hadSkippedVideo };
+}
+
 function buildMessagesArray(
   systemPrompt: string,
   conversationHistory: Message[],
@@ -264,9 +294,18 @@ function buildMessagesArray(
       (inboundTrimmed === '' && lastUserText === ''));
 
   if (attachmentUrls.length > 0) {
-    const imageUrls = resolveImageUrls(attachmentUrls);
+    const { visionUrls, hadSkippedVideo } = partitionVisionAttachments(attachmentUrls);
+    const imageUrls = resolveImageUrls(visionUrls);
+    let textForParts = inboundTrimmed || (imageUrls.length > 0 ? 'The customer sent an image.' : '');
+    if (hadSkippedVideo) {
+      const videoNote =
+        imageUrls.length === 0
+          ? '\n\n(Attached: a short video, e.g. an Instagram story clip. You cannot view video in this interface. Use any written context from the customer; if they ask about what is in the story, politely ask them to describe it or name the product.)'
+          : '\n\n(There is additionally a short video attachment you cannot view here.)';
+      textForParts = (textForParts || 'The customer sent a message.') + videoNote;
+    }
     const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [
-      { type: 'text', text: inboundTrimmed || 'The customer sent an image.' },
+      { type: 'text', text: textForParts },
       ...imageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
     ];
 
@@ -325,7 +364,8 @@ export async function generateReply(
     products = cachedCatalogProducts;
   }
 
-  const hasImages = attachmentUrls.length > 0;
+  const { visionUrls } = partitionVisionAttachments(attachmentUrls);
+  const hasImages = visionUrls.length > 0;
   let systemPrompt = buildSystemPrompt(tenant.name, config, products);
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {

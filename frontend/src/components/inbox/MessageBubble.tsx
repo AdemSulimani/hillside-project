@@ -30,9 +30,11 @@ function displayUrlHost(url: string): string {
 function InstagramRichBody({
   parsed,
   variant,
+  serverMediaType,
 }: {
   parsed: InstagramRichParsed;
   variant: 'inbound' | 'outbound';
+  serverMediaType?: string | null;
 }) {
   const isIn = variant === 'inbound';
   const cardBorder = isIn ? 'border-border/80 bg-background/95' : 'border-primary-foreground/25 bg-primary-foreground/10';
@@ -92,8 +94,17 @@ function InstagramRichBody({
     );
   }
 
-  if (parsed.kind === 'story_mention' || parsed.kind === 'story_reply') {
-    const label = parsed.kind === 'story_mention' ? 'Story mention' : 'Story reply';
+  if (
+    parsed.kind === 'story_mention' ||
+    parsed.kind === 'story_reply' ||
+    parsed.kind === 'story_share'
+  ) {
+    const label =
+      parsed.kind === 'story_mention'
+        ? 'Story mention'
+        : parsed.kind === 'story_reply'
+          ? 'Story reply'
+          : 'Story shared';
     const badgeClass = isIn
       ? 'bg-violet-500/15 text-violet-800 dark:bg-violet-400/20 dark:text-violet-100'
       : 'bg-primary-foreground/20 text-primary-foreground';
@@ -119,11 +130,50 @@ function InstagramRichBody({
               urls={[parsed.previewUrl]}
               align={isIn ? 'start' : 'end'}
               className="-mt-0.5"
+              serverMediaType={serverMediaType}
             />
           ) : null}
         </div>
         {parsed.extraRichLines ? (
           <p className={cn('whitespace-pre-wrap text-xs leading-relaxed', muted)}>{parsed.extraRichLines}</p>
+        ) : null}
+        {userCaptionBlock}
+      </div>
+    );
+  }
+
+  if (parsed.kind === 'generic_share') {
+    const badgeClass = isIn
+      ? 'bg-slate-500/15 text-slate-800 dark:bg-slate-400/20 dark:text-slate-100'
+      : 'bg-primary-foreground/20 text-primary-foreground';
+
+    return (
+      <div className="space-y-2">
+        <div
+          className={cn(
+            'flex flex-wrap items-start gap-2',
+            isIn ? 'justify-start' : 'justify-end',
+          )}
+        >
+          <span
+            className={cn(
+              'inline-flex shrink-0 rounded-full px-2.5 py-0.5 text-[0.7rem] font-semibold tracking-tight',
+              badgeClass,
+            )}
+          >
+            Shared content
+          </span>
+          {parsed.previewUrl ? (
+            <MessageImageAttachments
+              urls={[parsed.previewUrl]}
+              align={isIn ? 'start' : 'end'}
+              className="-mt-0.5"
+              serverMediaType={serverMediaType}
+            />
+          ) : null}
+        </div>
+        {parsed.title ? (
+          <p className={cn('whitespace-pre-wrap text-sm leading-snug', strong)}>{parsed.title}</p>
         ) : null}
         {userCaptionBlock}
       </div>
@@ -146,6 +196,13 @@ function InstagramRichBody({
           >
             Reel shared
           </span>
+          {parsed.thumbnailUrl ? (
+            <MessageImageAttachments
+              urls={[parsed.thumbnailUrl]}
+              align={isIn ? 'start' : 'end'}
+              serverMediaType={serverMediaType}
+            />
+          ) : null}
           <p className={cn('text-sm font-semibold leading-snug', strong)}>{parsed.title}</p>
           {parsed.description ? (
             <p className={cn('whitespace-pre-wrap text-xs leading-relaxed', muted)}>{parsed.description}</p>
@@ -232,7 +289,7 @@ export function MessageBubble({
           )}
         >
           {richParsed ? (
-            <InstagramRichBody parsed={richParsed} variant="inbound" />
+            <InstagramRichBody parsed={richParsed} variant="inbound" serverMediaType={message.type} />
           ) : text ? (
             <p className="whitespace-pre-wrap break-words">{text}</p>
           ) : null}
@@ -241,6 +298,7 @@ export function MessageBubble({
               urls={attachmentUrlsForGallery}
               align="start"
               className={richParsed || text ? 'mt-2' : undefined}
+              serverMediaType={message.type}
             />
           ) : null}
           {!richParsed && !text && !hasGallery ? (
@@ -284,7 +342,7 @@ export function MessageBubble({
           </Button>
         ) : null}
         {richParsed ? (
-          <InstagramRichBody parsed={richParsed} variant="outbound" />
+          <InstagramRichBody parsed={richParsed} variant="outbound" serverMediaType={message.type} />
         ) : text ? (
           <p
             className={cn(
@@ -301,6 +359,7 @@ export function MessageBubble({
             urls={attachmentUrlsForGallery}
             align="end"
             className={richParsed || text ? 'mt-2' : undefined}
+            serverMediaType={message.type}
           />
         ) : null}
         {!richParsed && !text && !hasGallery ? (

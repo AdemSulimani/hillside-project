@@ -377,6 +377,8 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   });
 
   let permanentAttachmentUrls = normalized.attachmentUrls;
+  /** When a story share is declared `image` but Meta's CDN returns MP4, we still persist the clip. */
+  let resolvedInboundMessageType: typeof normalized.messageType = normalized.messageType;
 
   if (normalized.attachmentUrls.length > 0) {
     let accessToken: string | undefined;
@@ -421,6 +423,31 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
         }`;
         const buffer = Buffer.from(response.data);
 
+        // Defensive: when the message is declared as an image (e.g. rich share preview) but the
+        // downloaded asset isn't actually an image (e.g. Instagram permalink returning HTML),
+        // skip storing it — otherwise the vision model would receive an HTML URL as `image_url`
+        // and silently fail.
+        //
+        // Exception: Instagram "story shared" previews often use `lookaside.fbsbx.com` URLs that
+        // return `video/mp4` even when the customer thinks of it as a photo story. We still persist
+        // the clip so the inbox can render a `<video>` preview and the thread isn't empty.
+        const isStoryShareInbound =
+          typeof normalized.content === 'string' &&
+          normalized.content.includes('Customer shared a story');
+        if (normalized.messageType === 'image' && !normalizedType.startsWith('image/')) {
+          if (isStoryShareInbound && normalizedType.startsWith('video/')) {
+            const uploaded = await uploadFile(buffer, uniqueFilename, normalizedType, 'video');
+            stored.push(uploaded);
+            resolvedInboundMessageType = 'video';
+            continue;
+          }
+          console.warn('[inbound] Skipping non-image attachment for image-typed message', {
+            ref,
+            contentType,
+          });
+          continue;
+        }
+
         let url: string;
         if (normalizedType.startsWith('image/')) {
           url = await uploadImage(buffer, 'attachments', uniqueFilename);
@@ -444,6 +471,10 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
 
     if (stored.length > 0) {
       permanentAttachmentUrls = stored;
+    } else {
+      // Every download failed or was filtered out — fall back to an empty list so we don't
+      // keep the raw Meta lookaside URLs (which expire quickly and aren't usable by the vision model).
+      permanentAttachmentUrls = [];
     }
   }
 
@@ -459,7 +490,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
       conversation_id: conversation.id,
       external_message_id: normalized.externalMessageId,
       direction: 'outbound',
-      type: normalized.messageType,
+      type: resolvedInboundMessageType,
       content: normalized.content,
       attachment_urls: permanentAttachmentUrls,
       sent_by: 'human',
@@ -486,7 +517,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     conversation_id: conversation.id,
     external_message_id: normalized.externalMessageId,
     direction: 'inbound',
-    type: normalized.messageType,
+    type: resolvedInboundMessageType,
     content: normalized.content,
     attachment_urls: permanentAttachmentUrls,
     sent_by: 'customer',
