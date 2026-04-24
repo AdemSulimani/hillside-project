@@ -7,17 +7,26 @@ export interface MessageImageAttachmentsProps {
   urls: string[];
   align: 'start' | 'end';
   className?: string;
+  /** When the URL has no file extension, use the server-stored message type (e.g. Instagram story MP4 on Backblaze). */
+  serverMediaType?: string | null;
 }
 
-function attachmentKindFromUrl(url: string): 'image' | 'audio' | 'link' {
+function attachmentKindFromUrl(url: string, serverMediaType?: string | null): 'image' | 'audio' | 'video' | 'link' {
+  const lower = url.toLowerCase();
   let pathname = '';
   try {
     pathname = new URL(url).pathname.toLowerCase();
   } catch {
-    pathname = url.toLowerCase();
+    pathname = lower;
   }
   if (/\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(pathname)) return 'image';
   if (/\.(mp3|wav|ogg|m4a|aac|flac|opus|oga)$/i.test(pathname)) return 'audio';
+  if (/\.(mp4|webm|mov|m4v|ogv)$/i.test(pathname)) return 'video';
+  if (lower.includes('/video/upload/')) return 'video';
+  if (lower.includes('/image/upload/')) return 'image';
+  const st = (serverMediaType ?? '').toLowerCase();
+  if (st === 'video') return 'video';
+  if (st === 'image') return 'image';
   return 'link';
 }
 
@@ -31,15 +40,18 @@ function linkLabelFromUrl(url: string): string {
   return 'Open attachment';
 }
 
-export function MessageImageAttachments({ urls, align, className }: MessageImageAttachmentsProps) {
+export function MessageImageAttachments({ urls, align, className, serverMediaType }: MessageImageAttachmentsProps) {
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(0);
 
   const ordered = useMemo(() => urls.filter(Boolean), [urls]);
 
   const imageSlides = useMemo(
-    () => ordered.filter((src) => attachmentKindFromUrl(src) === 'image').map((src) => ({ src })),
-    [ordered],
+    () =>
+      ordered
+        .filter((src) => attachmentKindFromUrl(src, serverMediaType) === 'image')
+        .map((src) => ({ src })),
+    [ordered, serverMediaType],
   );
 
   const openAt = useCallback((i: number) => {
@@ -64,7 +76,7 @@ export function MessageImageAttachments({ urls, align, className }: MessageImage
         )}
       >
         {ordered.map((url, i) => {
-          const kind = attachmentKindFromUrl(url);
+          const kind = attachmentKindFromUrl(url, serverMediaType);
           if (kind === 'audio') {
             return (
               <audio
@@ -78,6 +90,23 @@ export function MessageImageAttachments({ urls, align, className }: MessageImage
                   {linkLabelFromUrl(url)}
                 </a>
               </audio>
+            );
+          }
+          if (kind === 'video') {
+            return (
+              <video
+                key={`video:${i}:${url}`}
+                controls
+                playsInline
+                muted
+                src={url}
+                className="max-h-40 min-w-[min(100%,10rem)] max-w-[min(100%,14rem)] shrink-0 rounded-lg border border-border/80 bg-black/80 object-contain"
+                preload="metadata"
+              >
+                <a href={url} target="_blank" rel="noopener noreferrer" className={linkClass}>
+                  {linkLabelFromUrl(url)}
+                </a>
+              </video>
             );
           }
           if (kind === 'link') {
