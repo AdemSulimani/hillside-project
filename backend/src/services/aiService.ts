@@ -25,6 +25,9 @@ function estimateTokens(text: string): number {
 const SHARED_CONTENT_SYSTEM_APPEND =
   '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
 
+const SHARED_POST_VISION_APPEND =
+  ' For Instagram post shares, rely primarily on the attached preview image(s); any caption excerpt in the message may be shortened.';
+
 function inboundTextIsPostShare(content: string): boolean {
   return content.trimStart().startsWith('Customer shared a post:');
 }
@@ -679,6 +682,9 @@ export async function generateReply(
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
     systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
+    if (inboundTextIsPostShare(inboundMessage)) {
+      systemPrompt += SHARED_POST_VISION_APPEND;
+    }
   }
 
   const systemPromptTokenEstimate = estimateTokens(systemPrompt);
