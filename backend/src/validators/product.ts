@@ -5,6 +5,11 @@ export const createProductSchema = z.object({
     .string()
     .min(1, 'Product name is required')
     .max(255, 'Product name must be at most 255 characters'),
+  brand: z
+    .string()
+    .max(255, 'Brand must be at most 255 characters')
+    .nullable()
+    .optional(),
   price: z
     .number()
     .min(0, 'Price must be a positive number'),
@@ -51,6 +56,11 @@ export const updateProductSchema = z.object({
     .string()
     .min(1, 'Product name is required')
     .max(255, 'Product name must be at most 255 characters')
+    .optional(),
+  brand: z
+    .string()
+    .max(255, 'Brand must be at most 255 characters')
+    .nullable()
     .optional(),
   price: z
     .number()

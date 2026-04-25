@@ -18,6 +18,7 @@ export function normalizeProduct(raw: Record<string, unknown>): Product {
     id: String(raw.id),
     tenant_id: String(raw.tenant_id),
     name: String(raw.name ?? ''),
+    brand: raw.brand != null ? String(raw.brand) : null,
     price: toNum(raw.price),
     description: raw.description != null ? String(raw.description) : null,
     usage_description: raw.usage_description != null ? String(raw.usage_description) : null,
