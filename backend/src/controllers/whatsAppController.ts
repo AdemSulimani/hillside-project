@@ -35,6 +35,7 @@ export async function connect(req: Request, res: Response): Promise<void> {
         name: channelName,
         access_token_encrypted: encryptedToken,
         connection_method: 'manual',
+        webhook_verified: true,
         metadata: {
           phone_number_id: externalId,
           display_phone_number: verifyResp.data.display_phone_number ?? null,
@@ -57,6 +58,7 @@ export async function connect(req: Request, res: Response): Promise<void> {
       external_id: externalId,
       access_token_encrypted: encryptedToken,
       connection_method: 'manual',
+      webhook_verified: true,
       metadata: {
         phone_number_id: externalId,
         display_phone_number: verifyResp.data.display_phone_number ?? null,

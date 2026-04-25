@@ -36,7 +36,7 @@ export async function summary(req: Request, res: Response): Promise<void> {
         [tenantId],
       ),
       safeCount(
-        `SELECT COUNT(*) FROM channels WHERE tenant_id = $1 AND active = true`,
+        `SELECT COUNT(*) FROM channels WHERE tenant_id = $1 AND webhook_verified = true`,
         [tenantId],
       ),
     ]);

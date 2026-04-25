@@ -196,6 +196,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
         name: channelName,
         access_token_encrypted: encrypted,
         connection_method: 'oauth_instagram',
+        webhook_verified: Boolean(successfulAttempt),
         metadata,
       });
     } else {
@@ -206,6 +207,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
         external_id: externalId,
         access_token_encrypted: encrypted,
         connection_method: 'oauth_instagram',
+        webhook_verified: Boolean(successfulAttempt),
         metadata,
       });
     }

@@ -164,6 +164,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
           name: page.name,
           access_token_encrypted: encrypted,
           connection_method: 'oauth_meta',
+          webhook_verified: subscription.ok,
           metadata: fbMetadata,
         });
       } else {
@@ -174,6 +175,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
           external_id: page.id,
           access_token_encrypted: encrypted,
           connection_method: 'oauth_meta',
+          webhook_verified: subscription.ok,
           metadata: fbMetadata,
         });
       }

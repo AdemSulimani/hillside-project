@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { sendError } from '../utils/response';
 import { webhookQueue } from '../jobs/queues';
 import { redisConnection } from '../jobs/redisConnection';
-import type { ChannelType } from '../db/models/channel';
+import { findChannelByTypeAndExternalId, updateChannel, type ChannelType } from '../db/models/channel';
 
 const allowedTypes: ChannelType[] = ['facebook', 'instagram', 'whatsapp'];
 
@@ -95,6 +95,45 @@ function pickMessageMidOrId(message: Record<string, unknown> | null): string | n
   if (typeof message.id === 'string' && message.id.trim()) return message.id.trim();
   if (typeof message.id === 'number' && Number.isFinite(message.id) && message.id > 0) {
     return String(Math.trunc(message.id));
+  }
+  return null;
+}
+
+function extractChannelExternalIdForVerification(
+  channelType: ChannelType,
+  payload: Record<string, unknown>,
+): string | null {
+  const entry = Array.isArray(payload.entry)
+    ? (payload.entry[0] as Record<string, unknown> | undefined)
+    : undefined;
+  if (!entry) return null;
+
+  // Facebook and Instagram webhook entries use entry.id as the channel identifier.
+  if (channelType === 'facebook' || channelType === 'instagram') {
+    if (typeof entry.id === 'string' && entry.id.trim()) return entry.id.trim();
+    if (typeof entry.id === 'number' && Number.isFinite(entry.id) && entry.id > 0) {
+      return String(Math.trunc(entry.id));
+    }
+    return null;
+  }
+
+  // WhatsApp channel external_id is phone_number_id, not entry.id (which is usually WABA id).
+  const changes = Array.isArray(entry.changes)
+    ? (entry.changes[0] as Record<string, unknown> | undefined)
+    : undefined;
+  const value =
+    changes && typeof changes.value === 'object' && !Array.isArray(changes.value)
+      ? (changes.value as Record<string, unknown>)
+      : undefined;
+  const metadata =
+    value && typeof value.metadata === 'object' && !Array.isArray(value.metadata)
+      ? (value.metadata as Record<string, unknown>)
+      : undefined;
+  const phoneNumberId = metadata?.phone_number_id;
+
+  if (typeof phoneNumberId === 'string' && phoneNumberId.trim()) return phoneNumberId.trim();
+  if (typeof phoneNumberId === 'number' && Number.isFinite(phoneNumberId) && phoneNumberId > 0) {
+    return String(Math.trunc(phoneNumberId));
   }
   return null;
 }
@@ -235,6 +274,24 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
     }
     res.sendStatus(403);
     return;
+  }
+
+  // A valid signature proves Meta can reach this webhook using the app secret.
+  // Mark the matched channel as verified on first successful signed event.
+  const externalId = extractChannelExternalIdForVerification(channelTypeParam, parsedPayload);
+  if (externalId) {
+    try {
+      const matched = await findChannelByTypeAndExternalId(channelTypeParam, externalId);
+      if (matched && !matched.webhook_verified) {
+        await updateChannel(matched.id, matched.tenant_id, { webhook_verified: true });
+      }
+    } catch (err) {
+      console.warn('[webhook] failed to update webhook verification status', {
+        channelType: channelTypeParam,
+        externalId,
+        err,
+      });
+    }
   }
 
   const payloadTsMs = extractWebhookPayloadTimestampMs(parsedPayload);
