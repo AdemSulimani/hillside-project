@@ -7,6 +7,7 @@ import type {
   ConversationThread,
   ConversationsListResult,
   InboxMessage,
+  MessageReplyTo,
   OpenAIAlertSummary,
 } from '@/types/conversation';
 
@@ -72,6 +73,24 @@ export function normalizeConversationDetail(raw: Record<string, unknown>): Conve
   };
 }
 
+function normalizeMessageReplyTo(raw: unknown): MessageReplyTo | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.id !== 'string') return undefined;
+  const direction = o.direction === 'inbound' || o.direction === 'outbound' ? o.direction : null;
+  const sent_by =
+    o.sent_by === 'customer' || o.sent_by === 'ai' || o.sent_by === 'human' ? o.sent_by : null;
+  if (!direction || !sent_by) return undefined;
+  const att = o.attachment_url;
+  return {
+    id: o.id,
+    content: o.content != null ? String(o.content) : null,
+    sent_by,
+    attachment_url: att != null && att !== '' ? String(att) : null,
+    direction,
+  };
+}
+
 export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessage {
   const urls = raw.attachment_urls;
   const qs = raw.quality_score;
@@ -80,6 +99,7 @@ export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessag
     const n = Number(qs);
     quality_score = Number.isFinite(n) ? n : null;
   }
+  const replyTo = normalizeMessageReplyTo(raw.replyTo);
   return {
     id: String(raw.id),
     tenant_id: String(raw.tenant_id),
@@ -97,6 +117,7 @@ export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessag
     flag_reason: raw.flag_reason != null && raw.flag_reason !== '' ? String(raw.flag_reason) : null,
     send_status: raw.send_status != null && raw.send_status !== '' ? String(raw.send_status) : null,
     send_error: raw.send_error != null && raw.send_error !== '' ? String(raw.send_error) : null,
+    ...(replyTo ? { replyTo } : {}),
   };
 }
 

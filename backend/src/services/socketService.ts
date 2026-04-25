@@ -1,5 +1,6 @@
 import type { Server } from 'socket.io';
 import type { Message } from '../db/models/message';
+import type { MessageReplyToPayload } from './conversationService';
 import type { Order } from '../db/models/order';
 import type { AIAlert } from '../db/models/aiAlert';
 import type { ChannelType } from '../db/models/channel';
@@ -23,10 +24,16 @@ export const socketService = {
     io = serverIo;
   },
 
-  emitNewMessage(tenantId: string, message: Message): void {
+  /**
+   * Emits the new message to the tenant room. Pass `replyTo` when the message references
+   * another row (thread reply) so clients can render the quote without refetching.
+   */
+  emitNewMessage(tenantId: string, message: Message, replyTo?: MessageReplyToPayload): void {
     if (!io) return;
+    const messagePayload =
+      replyTo !== undefined ? { ...message, replyTo } : message;
     io.to(tenantRoom(tenantId)).emit('new_message', {
-      message,
+      message: messagePayload,
       conversationId: message.conversation_id,
     });
   },

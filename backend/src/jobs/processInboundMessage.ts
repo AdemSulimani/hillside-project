@@ -8,12 +8,24 @@ import {
   touchConversationLastMessageAt,
   markConversationHumanReplied,
 } from '../db/models/conversation';
-import { createMessage, findMessageIdByExternalMessageId } from '../db/models/message';
+import {
+  createMessage,
+  findMessageByExternalMessageIdForTenant,
+  findMessageByIdForTenant,
+  findMessageIdByExternalMessageId,
+  buildReplySnapshotFromMessage,
+  updateMessageReplyExternalOnly,
+  updateMessageReplyResolved,
+} from '../db/models/message';
 import {
   webhookNormalizerService,
   type InboundMessageDTO,
 } from '../services/webhookNormalizer';
-import { setHumanOverride24h } from '../services/conversationService';
+import {
+  messageToReplyToPayload,
+  setHumanOverride24h,
+  type MessageReplyToPayload,
+} from '../services/conversationService';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { uploadImage } from '../services/cloudinaryService';
@@ -523,6 +535,34 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     sent_by: 'customer',
   });
 
+  let inboundForSocket = inboundMessage;
+  let replyToPayload: MessageReplyToPayload | undefined;
+  if (normalized.replyToExternalId) {
+    const original = await findMessageByExternalMessageIdForTenant(
+      channel.tenant_id,
+      normalized.replyToExternalId,
+    );
+    if (original) {
+      const snap = buildReplySnapshotFromMessage(original);
+      await updateMessageReplyResolved(inboundMessage.id, channel.tenant_id, {
+        reply_to_message_id: original.id,
+        reply_to_content: snap.reply_to_content,
+        reply_to_attachment_url: snap.reply_to_attachment_url,
+      });
+      replyToPayload = messageToReplyToPayload(original);
+    } else {
+      await updateMessageReplyExternalOnly(
+        inboundMessage.id,
+        channel.tenant_id,
+        normalized.replyToExternalId,
+      );
+    }
+    const refreshed = await findMessageByIdForTenant(inboundMessage.id, channel.tenant_id);
+    if (refreshed) {
+      inboundForSocket = refreshed;
+    }
+  }
+
   await touchConversationLastMessageAt(conversation.id);
 
   void logEvent(channel.tenant_id, 'message_received', {
@@ -532,7 +572,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     message_id: inboundMessage.id,
   });
 
-  socketService.emitNewMessage(channel.tenant_id, inboundMessage);
+  socketService.emitNewMessage(channel.tenant_id, inboundForSocket, replyToPayload);
   socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
 
   if (normalized.skipAiReply !== true) {

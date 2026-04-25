@@ -1,7 +1,12 @@
 import pool from '../db/pool';
 import type { ChannelType } from '../db/models/channel';
 import type { Conversation } from '../db/models/conversation';
-import type { Message } from '../db/models/message';
+import {
+  mapMessageRow,
+  type Message,
+  type MessageDirection,
+  type MessageSender,
+} from '../db/models/message';
 import type { DecodedMessageCursor } from '../utils/messageCursor';
 import { encodeMessageCursor } from '../utils/messageCursor';
 
@@ -214,10 +219,42 @@ export async function findConversationDetailForTenant(
   };
 }
 
+/** Referenced message snippet for thread replies (ConversationController.show). */
+export interface MessageReplyToPayload {
+  id: string;
+  content: string | null;
+  sent_by: MessageSender;
+  attachment_url: string | null;
+  direction: MessageDirection;
+}
+
+export type ConversationMessageWithReply = Message & { replyTo?: MessageReplyToPayload };
+
 export interface MessagesPageResult {
-  messages: Message[];
+  messages: ConversationMessageWithReply[];
   hasMore: boolean;
   nextCursor: string | null;
+}
+
+function firstStringFromAttachmentUrls(raw: unknown): string | null {
+  if (!Array.isArray(raw)) return null;
+  const first = raw.find((u): u is string => typeof u === 'string' && u.length > 0);
+  return first ?? null;
+}
+
+/** Build the nested `replyTo` payload for API and socket (from the referenced parent row). */
+export function messageToReplyToPayload(
+  msg: Pick<Message, 'id' | 'content' | 'sent_by' | 'direction'> & {
+    attachment_urls: Message['attachment_urls'] | unknown;
+  },
+): MessageReplyToPayload {
+  return {
+    id: msg.id,
+    content: msg.content,
+    sent_by: msg.sent_by,
+    attachment_url: firstStringFromAttachmentUrls(msg.attachment_urls),
+    direction: msg.direction,
+  };
 }
 
 export async function listMessagesPageOldestFirst(params: {
@@ -258,7 +295,43 @@ export async function listMessagesPageOldestFirst(params: {
 
   const hasMore = rows.length > limit;
   const slice = hasMore ? rows.slice(0, limit) : rows;
-  const messages = [...slice].reverse();
+  const messagesRaw = [...slice].reverse().map((r) => mapMessageRow(r));
+
+  const replyIds = [
+    ...new Set(
+      messagesRaw
+        .map((m) => m.reply_to_message_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    ),
+  ];
+
+  let replyParentById = new Map<string, MessageReplyToPayload>();
+  if (replyIds.length > 0) {
+    const parents = await pool.query<{
+      id: string;
+      content: string | null;
+      sent_by: MessageSender;
+      attachment_urls: unknown;
+      direction: MessageDirection;
+    }>(
+      `SELECT id, content, sent_by, attachment_urls, direction
+       FROM messages
+       WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+      [tenantId, replyIds],
+    );
+    replyParentById = new Map(parents.rows.map((r) => [r.id, messageToReplyToPayload(r)]));
+  }
+
+  const messages: ConversationMessageWithReply[] = messagesRaw.map((m) => {
+    if (!m.reply_to_message_id) {
+      return m as ConversationMessageWithReply;
+    }
+    const replyTo = replyParentById.get(m.reply_to_message_id);
+    if (!replyTo) {
+      return m as ConversationMessageWithReply;
+    }
+    return { ...m, replyTo };
+  });
 
   const oldest = messages[0];
   const nextCursor =

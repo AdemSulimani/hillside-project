@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link2, RefreshCw, ShoppingBag, ThumbsDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
-import type { InboxMessage } from '@/types/conversation';
+import type { InboxMessage, MessageReplyTo } from '@/types/conversation';
 import {
   attachmentUrlsAfterRichUse,
   parseInstagramRichDisplay,
@@ -15,8 +15,108 @@ import { Button, buttonVariants } from '@/components/ui/button';
 interface MessageBubbleProps {
   message: InboxMessage;
   agentDisplayName: string;
+  /** Contact display name (for reply-quote label when the quoted message is inbound). */
+  contactDisplayName: string;
   /** Emphasize AI messages that failed automated quality checks. */
   qualityFlagged?: boolean;
+}
+
+const REPLY_PREVIEW_MAX = 60;
+
+function isSharedPostReplyContent(content: string | null | undefined): boolean {
+  return (content ?? '').trimStart().startsWith('Customer shared a post:');
+}
+
+function isLikelyHttpImageUrl(url: string): boolean {
+  const u = url.toLowerCase();
+  if (!u.startsWith('http://') && !u.startsWith('https://')) return false;
+  if (u.endsWith('.mp4') || u.includes('.mp4?')) return false;
+  if (u.endsWith('.webm') || u.includes('.webm?')) return false;
+  if (u.includes('/video/upload/') || u.includes('mime_video') || u.includes('resource_type=video')) {
+    return false;
+  }
+  return (
+    /\.(jpe?g|png|gif|webp|avif|heic|heif)(\?|$|#)/i.test(u) ||
+    u.includes('image/upload') ||
+    u.includes('/image/') ||
+    (u.includes('cloudinary.com') && u.includes('/image/'))
+  );
+}
+
+function shouldShowReplyThumbnail(replyTo: MessageReplyTo): boolean {
+  if (!replyTo.attachment_url || !isLikelyHttpImageUrl(replyTo.attachment_url)) return false;
+  if (isSharedPostReplyContent(replyTo.content)) return false;
+  const t = (replyTo.content ?? '').trim();
+  if (!t) return true;
+  if (/^\[(image|video|document|audio) attachment\]$/i.test(t)) return true;
+  if (t === '[Message]') return true;
+  return false;
+}
+
+function replyQuoteLabel(replyTo: MessageReplyTo, contactDisplayName: string): string {
+  if (replyTo.direction === 'outbound') return 'You';
+  return contactDisplayName.trim() || 'Customer';
+}
+
+function truncateReplyPreview(text: string, max = REPLY_PREVIEW_MAX): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max)}...`;
+}
+
+function ReplyQuotePreview({
+  replyTo,
+  contactDisplayName,
+  bubbleVariant,
+}: {
+  replyTo: MessageReplyTo;
+  contactDisplayName: string;
+  bubbleVariant: 'inbound' | 'outbound';
+}) {
+  const isIn = bubbleVariant === 'inbound';
+  const borderClass = isIn ? 'border-l-[3px] border-l-muted-foreground/50' : 'border-l-[3px] border-l-primary';
+  const label = replyQuoteLabel(replyTo, contactDisplayName);
+  const sharedPost = isSharedPostReplyContent(replyTo.content);
+  const showThumb = shouldShowReplyThumbnail(replyTo);
+  const previewText = sharedPost ? 'Shared post' : truncateReplyPreview(replyTo.content ?? '') || '…';
+
+  return (
+    <div
+      className={cn(
+        'ml-1 w-full shrink-0 rounded-t-xl border-b px-2.5 py-2',
+        borderClass,
+        isIn
+          ? 'bg-muted/60 text-foreground'
+          : 'bg-primary-foreground/[0.12] text-primary-foreground',
+      )}
+    >
+      <p
+        className={cn(
+          'text-[0.65rem] font-semibold tracking-tight',
+          isIn ? 'text-muted-foreground' : 'text-primary-foreground/80',
+        )}
+      >
+        {label}
+      </p>
+      {showThumb ? (
+        <img
+          src={replyTo.attachment_url!}
+          alt=""
+          className="mt-1.5 size-10 rounded-md border border-border/40 object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <p
+          className={cn(
+            'mt-1 line-clamp-2 text-[0.8rem] leading-snug',
+            isIn ? 'text-foreground/90' : 'text-primary-foreground/95',
+          )}
+        >
+          {previewText}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function displayUrlHost(url: string): string {
@@ -250,6 +350,7 @@ function InstagramRichBody({
 export function MessageBubble({
   message,
   agentDisplayName,
+  contactDisplayName,
   qualityFlagged = false,
 }: MessageBubbleProps) {
   const isInbound = message.direction === 'inbound';
@@ -284,26 +385,42 @@ export function MessageBubble({
       <div className="flex w-full flex-col items-start gap-1">
         <div
           className={cn(
-            'max-w-[min(100%,28rem)] rounded-2xl rounded-bl-md px-3.5 py-2.5 text-sm',
-            'bg-muted text-foreground',
+            'flex max-w-[min(100%,28rem)] flex-col overflow-hidden',
+            message.replyTo ? 'rounded-2xl rounded-bl-md border border-border/50' : '',
           )}
         >
-          {richParsed ? (
-            <InstagramRichBody parsed={richParsed} variant="inbound" serverMediaType={message.type} />
-          ) : text ? (
-            <p className="whitespace-pre-wrap break-words">{text}</p>
-          ) : null}
-          {hasGallery ? (
-            <MessageImageAttachments
-              urls={attachmentUrlsForGallery}
-              align="start"
-              className={richParsed || text ? 'mt-2' : undefined}
-              serverMediaType={message.type}
+          {message.replyTo ? (
+            <ReplyQuotePreview
+              replyTo={message.replyTo}
+              contactDisplayName={contactDisplayName}
+              bubbleVariant="inbound"
             />
           ) : null}
-          {!richParsed && !text && !hasGallery ? (
-            <p className="whitespace-pre-wrap break-words text-muted-foreground">[Empty message]</p>
-          ) : null}
+          <div
+            className={cn(
+              'px-3.5 py-2.5 text-sm',
+              'bg-muted text-foreground',
+              message.replyTo ? '' : 'max-w-[min(100%,28rem)] rounded-2xl rounded-bl-md',
+              message.replyTo ? 'rounded-b-xl rounded-bl-md' : '',
+            )}
+          >
+            {richParsed ? (
+              <InstagramRichBody parsed={richParsed} variant="inbound" serverMediaType={message.type} />
+            ) : text ? (
+              <p className="whitespace-pre-wrap break-words">{text}</p>
+            ) : null}
+            {hasGallery ? (
+              <MessageImageAttachments
+                urls={attachmentUrlsForGallery}
+                align="start"
+                className={richParsed || text ? 'mt-2' : undefined}
+                serverMediaType={message.type}
+              />
+            ) : null}
+            {!richParsed && !text && !hasGallery ? (
+              <p className="whitespace-pre-wrap break-words text-muted-foreground">[Empty message]</p>
+            ) : null}
+          </div>
         </div>
         {time ? <span className="px-1 text-[0.65rem] text-muted-foreground">{time}</span> : null}
       </div>
@@ -315,14 +432,23 @@ export function MessageBubble({
 
   return (
     <div className="flex w-full flex-col items-end gap-1">
-      <div
-        className={cn(
-          'group/bubble relative max-w-[min(100%,28rem)] rounded-2xl rounded-br-md border px-3.5 py-2.5 text-sm',
-          qualityFlagged
-            ? 'border-orange-400/80 bg-orange-500/15 text-foreground ring-2 ring-orange-400/35 dark:border-orange-500/50 dark:bg-orange-950/40 dark:text-foreground'
-            : 'border-primary/15 bg-primary text-primary-foreground',
-        )}
-      >
+      <div className="relative flex max-w-[min(100%,28rem)] flex-col overflow-hidden rounded-2xl rounded-br-md">
+        {message.replyTo ? (
+          <ReplyQuotePreview
+            replyTo={message.replyTo}
+            contactDisplayName={contactDisplayName}
+            bubbleVariant="outbound"
+          />
+        ) : null}
+        <div
+          className={cn(
+            'group/bubble relative border px-3.5 py-2.5 text-sm',
+            message.replyTo ? 'rounded-b-2xl rounded-br-md border-t-0' : 'rounded-2xl rounded-br-md',
+            qualityFlagged
+              ? 'border-orange-400/80 bg-orange-500/15 text-foreground ring-2 ring-orange-400/35 dark:border-orange-500/50 dark:bg-orange-950/40 dark:text-foreground'
+              : 'border-primary/15 bg-primary text-primary-foreground',
+          )}
+        >
         {isAi ? (
           <Button
             type="button"
@@ -373,6 +499,7 @@ export function MessageBubble({
             [Empty message]
           </p>
         ) : null}
+        </div>
       </div>
       {message.send_status === 'failed' ? (
         <div

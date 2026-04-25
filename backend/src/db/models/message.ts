@@ -27,14 +27,22 @@ export interface Message {
   flag_reason: MessageFlagReason | string | null;
   send_status: string | null;
   send_error: string | null;
+  reply_to_message_id: string | null;
+  reply_to_external_id: string | null;
+  reply_to_content: string | null;
+  reply_to_attachment_url: string | null;
   created_at: Date;
 }
 
-function mapMessageRow(row: Message): Message {
+export function mapMessageRow(row: Message): Message {
   const r = row as Message & {
     quality_score?: unknown;
     send_status?: unknown;
     send_error?: unknown;
+    reply_to_message_id?: unknown;
+    reply_to_external_id?: unknown;
+    reply_to_content?: unknown;
+    reply_to_attachment_url?: unknown;
   };
   let quality_score: number | null = null;
   const rawQs = r.quality_score;
@@ -49,7 +57,38 @@ function mapMessageRow(row: Message): Message {
     flag_reason: r.flag_reason ?? null,
     send_status: r.send_status != null && r.send_status !== '' ? String(r.send_status) : null,
     send_error: r.send_error != null && r.send_error !== '' ? String(r.send_error) : null,
+    reply_to_message_id: r.reply_to_message_id != null ? String(r.reply_to_message_id) : null,
+    reply_to_external_id:
+      r.reply_to_external_id != null && r.reply_to_external_id !== ''
+        ? String(r.reply_to_external_id)
+        : null,
+    reply_to_content: r.reply_to_content != null ? String(r.reply_to_content) : null,
+    reply_to_attachment_url:
+      r.reply_to_attachment_url != null && r.reply_to_attachment_url !== ''
+        ? String(r.reply_to_attachment_url)
+        : null,
   };
+}
+
+/** Snapshot text + first media URL from a stored message for reply_to_* columns. */
+export function buildReplySnapshotFromMessage(msg: Message): {
+  reply_to_content: string | null;
+  reply_to_attachment_url: string | null;
+} {
+  const urls = Array.isArray(msg.attachment_urls) ? msg.attachment_urls : [];
+  const firstUrl = urls.find((u) => typeof u === 'string' && u.length > 0) ?? null;
+  const text = (msg.content ?? '').trim();
+  let reply_to_content: string | null = text || null;
+  if (!reply_to_content && firstUrl) {
+    reply_to_content = `[${msg.type} attachment]`;
+  }
+  if (!reply_to_content) {
+    reply_to_content = '[Message]';
+  }
+  const mediaTypes: MessageType[] = ['image', 'video', 'document', 'audio'];
+  const reply_to_attachment_url =
+    firstUrl && mediaTypes.includes(msg.type) ? firstUrl : null;
+  return { reply_to_content, reply_to_attachment_url };
 }
 
 export interface CreateMessageInput {
@@ -113,6 +152,18 @@ export async function findMessageByExternalMessageId(
   return row ? mapMessageRow(row) : null;
 }
 
+export async function findMessageByExternalMessageIdForTenant(
+  tenantId: string,
+  externalMessageId: string,
+): Promise<Message | null> {
+  const { rows } = await pool.query<Message>(
+    'SELECT * FROM messages WHERE tenant_id = $1 AND external_message_id = $2 LIMIT 1',
+    [tenantId, externalMessageId],
+  );
+  const row = rows[0];
+  return row ? mapMessageRow(row) : null;
+}
+
 /** Lightweight id-only lookup for inbound deduplication. */
 export async function findMessageIdByExternalMessageId(
   externalMessageId: string,
@@ -170,6 +221,50 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
   );
 
   return mapMessageRow(rows[0]);
+}
+
+export async function updateMessageReplyResolved(
+  messageId: string,
+  tenantId: string,
+  params: {
+    reply_to_message_id: string;
+    reply_to_content: string | null;
+    reply_to_attachment_url: string | null;
+  },
+): Promise<Message | null> {
+  const { rows } = await pool.query<Message>(
+    `UPDATE messages
+     SET reply_to_message_id = $1,
+         reply_to_content = $2,
+         reply_to_attachment_url = $3
+     WHERE id = $4 AND tenant_id = $5
+     RETURNING *`,
+    [
+      params.reply_to_message_id,
+      params.reply_to_content,
+      params.reply_to_attachment_url,
+      messageId,
+      tenantId,
+    ],
+  );
+  const row = rows[0];
+  return row ? mapMessageRow(row) : null;
+}
+
+export async function updateMessageReplyExternalOnly(
+  messageId: string,
+  tenantId: string,
+  reply_to_external_id: string,
+): Promise<Message | null> {
+  const { rows } = await pool.query<Message>(
+    `UPDATE messages
+     SET reply_to_external_id = $1
+     WHERE id = $2 AND tenant_id = $3
+     RETURNING *`,
+    [reply_to_external_id, messageId, tenantId],
+  );
+  const row = rows[0];
+  return row ? mapMessageRow(row) : null;
 }
 
 const SEND_ERROR_MAX_LEN = 2000;

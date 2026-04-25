@@ -461,6 +461,15 @@ async function extractProductInfoFromImages(
   }
 }
 
+function formatCustomerMessageContentForPrompt(msg: Message): string {
+  const body = (msg.content ?? '').trim();
+  const snap = msg.reply_to_content?.trim();
+  if (msg.sent_by === 'customer' && snap) {
+    return `Customer replied to: '${snap}' — saying: '${body}'`;
+  }
+  return body;
+}
+
 function buildMessagesArray(
   systemPrompt: string,
   conversationHistory: Message[],
@@ -474,21 +483,31 @@ function buildMessagesArray(
 
   for (const msg of conversationHistory) {
     const histUrls = normalizeAttachmentUrls(msg.attachment_urls);
-    if (!msg.content?.trim() && histUrls.length === 0) continue;
-
     const role: 'user' | 'assistant' =
       msg.sent_by === 'customer' ? 'user' : 'assistant';
+    const textContent =
+      role === 'user' ? formatCustomerMessageContentForPrompt(msg) : (msg.content ?? '').trim();
+    if (!textContent && histUrls.length === 0) continue;
 
-    messages.push({ role, content: (msg.content ?? '').trim() });
+    messages.push({ role, content: textContent });
   }
 
   const lastMsg = messages[messages.length - 1];
   const lastUserText =
     typeof lastMsg?.content === 'string' ? lastMsg.content.trim() : '';
   const inboundTrimmed = inboundMessage.trim();
+  const lastCustomerInHistory = [...conversationHistory]
+    .reverse()
+    .find((m) => m.sent_by === 'customer');
+  const expectedLastUserFromHistory =
+    lastCustomerInHistory &&
+    (lastCustomerInHistory.content ?? '').trim() === inboundTrimmed
+      ? formatCustomerMessageContentForPrompt(lastCustomerInHistory).trim()
+      : inboundTrimmed;
   const alreadyAppended =
     lastMsg?.role === 'user' &&
     (lastUserText === inboundTrimmed ||
+      lastUserText === expectedLastUserFromHistory ||
       (inboundTrimmed === '' && lastUserText === ''));
 
   if (attachmentUrls.length > 0) {
@@ -665,7 +684,11 @@ export async function generateReply(
   const systemPromptTokenEstimate = estimateTokens(systemPrompt);
   const inboundTokenEstimate = estimateTokens(inboundMessage.trim());
   const historyMessageTokenEstimates = conversationHistory.map((msg) =>
-    estimateTokens((msg.content ?? '').trim()),
+    estimateTokens(
+      msg.sent_by === 'customer'
+        ? formatCustomerMessageContentForPrompt(msg)
+        : (msg.content ?? '').trim(),
+    ),
   );
 
   const originalHistoryCount = conversationHistory.length;
