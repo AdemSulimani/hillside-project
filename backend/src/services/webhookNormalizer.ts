@@ -260,20 +260,74 @@ function readPayload(node: Record<string, unknown>): Record<string, unknown> {
   return asRecord(node.payload) ?? {};
 }
 
+/**
+ * Bounds caption/description size for Instagram shares (stored content + AI context).
+ * Set `INSTAGRAM_SHARE_CAPTION_MAX_CHARS` in env: default 400, `0` = omit caption body from share lines.
+ */
+const INSTAGRAM_SHARE_CAPTION_MAX_CHARS = (() => {
+  const raw = process.env.INSTAGRAM_SHARE_CAPTION_MAX_CHARS;
+  if (raw === undefined || raw.trim() === '') return 400;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 400;
+})();
+
+function truncateShareCaption(text: string): string {
+  const t = text.trim();
+  if (!t) return t;
+  const cap = INSTAGRAM_SHARE_CAPTION_MAX_CHARS;
+  if (cap === 0) return '';
+  if (t.length <= cap) return t;
+  const slice = t.slice(0, cap);
+  const lastSpace = slice.lastIndexOf(' ');
+  const head = lastSpace > cap * 0.55 ? slice.slice(0, lastSpace) : slice;
+  return `${head.trimEnd()}…`;
+}
+
+/**
+ * Keeps short permalinks in the inbox line; drops huge signed CDN URLs (vision uses image
+ * attachments instead — avoids multi-kB tokens per message).
+ */
+function displayShareLinkForText(link: string): string {
+  const l = link.trim();
+  if (!l) return 'https://www.instagram.com/';
+  const low = l.toLowerCase();
+  const tokenHeavy =
+    low.includes('lookaside.fbsbx.com') ||
+    low.includes('lookaside.instagram.com') ||
+    low.includes('/ig_messaging_cdn/') ||
+    l.length > 240;
+  if (tokenHeavy) return 'https://www.instagram.com/';
+  return l;
+}
+
 function formatPostShareLine(title: string, link: string, description: string): string {
   const titlePart = title || 'Post';
-  const linkPart = link || titlePart;
+  const rawLink = (link || '').trim() || titlePart;
+  const linkPart = displayShareLinkForText(rawLink);
   let line = `Customer shared a post: ${titlePart} — ${linkPart}`;
-  if (description && description !== titlePart && description !== linkPart) {
-    line += `\n${description}`;
+  const desc = truncateShareCaption(description);
+  if (desc && desc !== titlePart && desc !== linkPart) {
+    line += `\n${desc}`;
   }
   return line;
 }
 
 function formatVideoReelLine(title: string, description: string): string {
   const parts = [`Customer shared a video/reel: ${title || 'Video'}`];
-  if (description) parts.push(description);
+  const desc = truncateShareCaption(description);
+  if (desc) parts.push(desc);
   return parts.join('\n');
+}
+
+function richLineAlreadyDeclaresShareTitle(title: string, lines: string[]): boolean {
+  if (!title) return false;
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const patterns = [
+    new RegExp(`^Customer shared a post:\\s*${escaped}\\s*—`),
+    new RegExp(`^Customer shared a video/reel:\\s*${escaped}(?:\\s|$)`),
+    new RegExp(`^Customer shared a product:\\s*${escaped}(?:\\s|$)`),
+  ];
+  return lines.some((line) => patterns.some((re) => re.test(line)));
 }
 
 function extractProductCustomerLine(node: Record<string, unknown>): string | null {
@@ -421,7 +475,8 @@ function extractMessengerRichContent(
       const description = strTrim(
         payload.description ?? payload.subtitle ?? (typeof payload.caption === 'string' ? payload.caption : ''),
       );
-      const link = url || strTrim(payload.share_url) || strTrim(payload.target_url);
+      const permalink = strTrim(payload.share_url) || strTrim(payload.target_url);
+      const link = permalink || url || '';
       const thumbnail = extractShareThumbnailUrl(payload);
 
       const isVideoShare = isInstagram && !!link && isLikelyVideoShareUrl(link);
@@ -522,8 +577,10 @@ function extractMessengerRichContent(
     // alternative is an empty message bubble, which is what surfaced this bug.
     if (isInstagram) {
       const title = strTrim(payload.title);
-      const label = title ? `Customer shared content: ${title}` : 'Customer shared content';
-      contentLines.push(label);
+      if (!richLineAlreadyDeclaresShareTitle(title, contentLines)) {
+        const label = title ? `Customer shared content: ${title}` : 'Customer shared content';
+        contentLines.push(label);
+      }
       const thumbnail = extractShareThumbnailUrl(payload);
       const mediaUrl =
         thumbnail || (url && isLikelyImageShareUrl(url) ? url : '');
@@ -541,6 +598,33 @@ function extractMessengerRichContent(
     messageType,
     skipAiReply: skipAiReply || undefined,
   };
+}
+
+/** When Meta also puts the full share caption in `message.text`, drop or trim it to save tokens. */
+function userTextAfterRichLines(contentLines: string[], baseText: string | null): string {
+  let user = baseText?.trim() ?? '';
+  const richJoined = contentLines.length > 0 ? contentLines.join('\n') : '';
+  const shareRichForUserCap =
+    Boolean(richJoined) &&
+    contentLines.some(
+      (l) =>
+        l.startsWith('Customer shared a post:') ||
+        l.startsWith('Customer shared a video/reel:') ||
+        l.startsWith('Customer shared content') ||
+        l.includes('Customer shared a story'),
+    );
+  if (user && shareRichForUserCap) {
+    if (richJoined.includes(user)) {
+      return '';
+    }
+    if (
+      INSTAGRAM_SHARE_CAPTION_MAX_CHARS > 0 &&
+      user.length > INSTAGRAM_SHARE_CAPTION_MAX_CHARS
+    ) {
+      return truncateShareCaption(user);
+    }
+  }
+  return user;
 }
 
 function buildReactionInboundDto(
@@ -747,7 +831,7 @@ function extractFacebookMessengerMessage(payload: Record<string, unknown>): Inbo
   if (rich.contentLines.length > 0) {
     contentParts.push(rich.contentLines.join('\n'));
   }
-  const user = baseText?.trim() ?? '';
+  const user = userTextAfterRichLines(rich.contentLines, baseText);
   if (user) contentParts.push(user);
   const content = contentParts.length > 0 ? contentParts.join('\n\n') : baseText;
 
@@ -834,7 +918,7 @@ export class WebhookNormalizerService {
     if (rich.contentLines.length > 0) {
       contentParts.push(rich.contentLines.join('\n'));
     }
-    const user = baseText?.trim() ?? '';
+    const user = userTextAfterRichLines(rich.contentLines, baseText);
     if (user) contentParts.push(user);
     const content = contentParts.length > 0 ? contentParts.join('\n\n') : baseText;
 
