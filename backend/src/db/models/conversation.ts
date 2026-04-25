@@ -119,6 +119,20 @@ export async function markConversationHumanReplied(
   );
 }
 
+export async function setConversationHumanReplied(
+  conversationId: string,
+  tenantId: string,
+  humanReplied: boolean,
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET human_replied = $3, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [conversationId, tenantId, humanReplied],
+  );
+}
+
 export async function setConversationFullyAiHandled(
   conversationId: string,
   tenantId: string,

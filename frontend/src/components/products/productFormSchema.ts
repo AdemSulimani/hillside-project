@@ -10,6 +10,7 @@ export const productFormValuesSchema = z.object({
       return !Number.isNaN(n) && n >= 0;
     }, 'Enter a valid price'),
   description: z.string().max(5000).optional().default(''),
+  usage_description: z.string().max(10000).optional().default(''),
   sku: z.string().max(100).optional().default(''),
   category: z.string().max(255).optional().default(''),
   tagsInput: z.string().optional().default(''),
@@ -42,6 +43,7 @@ export function valuesToApiBody(values: ProductFormValues) {
     name: values.name,
     price,
     description: values.description.trim() || null,
+    usage_description: values.usage_description.trim() || null,
     sku: values.sku.trim() || null,
     category: values.category.trim() || null,
     tags: parseTags(values.tagsInput),

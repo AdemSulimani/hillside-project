@@ -144,6 +144,10 @@ function formatProductCatalog(products: Product[]): string {
     .map((p) => {
       const parts = [`- ${p.name}: $${Number(p.price).toFixed(2)}`];
       if (p.description) parts.push(`  ${p.description}`);
+      if (p.usage_description) {
+        parts.push('  Usage description:');
+        parts.push(`  ${p.usage_description}`);
+      }
       if (p.category) parts.push(`  Category: ${p.category}`);
       if (p.tags.length > 0) parts.push(`  Tags: ${p.tags.join(', ')}`);
       if (p.stock_quantity !== null) parts.push(`  In stock: ${p.stock_quantity}`);
@@ -205,9 +209,43 @@ function buildSystemPrompt(
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
     '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
     '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
+    '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
   );
 
   return lines.join('\n');
+}
+
+export async function isUsageQuestionUnanswered(
+  inboundMessage: string,
+  productUsageDescription: string,
+): Promise<boolean> {
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a strict classifier. Determine whether the customer usage question is unanswered by the provided product usage description. Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}. Mark true only when the usage description does not provide the requested usage information.',
+      },
+      {
+        role: 'user',
+        content: `Customer message:\n${inboundMessage}\n\nProduct usage description:\n${productUsageDescription}`,
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 64,
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) return false;
+
+  try {
+    const parsed = JSON.parse(raw) as { is_unanswered?: boolean };
+    return parsed.is_unanswered === true;
+  } catch {
+    return false;
+  }
 }
 
 type ChatMessageContent = string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;

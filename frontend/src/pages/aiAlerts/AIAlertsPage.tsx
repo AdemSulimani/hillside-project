@@ -6,6 +6,7 @@ import { Bell, Globe, Image, Loader2, MessageCircleMore, type LucideIcon } from 
 import { toast } from 'sonner';
 import {
   fetchAIAlerts,
+  fetchUsageEscalations,
   fetchAIAlertsUnreadCount,
   markAIAlertRead,
   markAllAIAlertsRead,
@@ -57,14 +58,17 @@ function statusBadgeVariant(
 export default function AIAlertsPage() {
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<AIAlertStatus>('unread');
+  const [tab, setTab] = useState<AIAlertStatus | 'usage_escalations'>('unread');
   const [page, setPage] = useState(1);
   const [resolveTarget, setResolveTarget] = useState<AIAlertRow | null>(null);
   const [resumeAiOnResolve, setResumeAiOnResolve] = useState(false);
 
   const listQuery = useQuery({
     queryKey: ['ai-alerts', 'list', tab, page],
-    queryFn: () => fetchAIAlerts({ page, limit: PAGE_SIZE, status: tab }),
+    queryFn: () =>
+      tab === 'usage_escalations'
+        ? fetchUsageEscalations({ page, limit: PAGE_SIZE })
+        : fetchAIAlerts({ page, limit: PAGE_SIZE, status: tab }),
     enabled: Boolean(tenantId),
   });
 
@@ -146,7 +150,7 @@ export default function AIAlertsPage() {
       </div>
 
       <div className="flex flex-wrap gap-1">
-        {(['unread', 'read', 'resolved'] as const).map((key) => (
+        {(['unread', 'read', 'resolved', 'usage_escalations'] as const).map((key) => (
           <Button
             key={key}
             type="button"
@@ -163,7 +167,7 @@ export default function AIAlertsPage() {
                 {unreadCountQuery.data > 99 ? '99+' : unreadCountQuery.data}
               </span>
             ) : null}
-            {key}
+            {key === 'usage_escalations' ? 'Usage Escalations' : key}
           </Button>
         ))}
       </div>
@@ -229,6 +233,32 @@ export default function AIAlertsPage() {
                           <span className="text-muted-foreground">(No message text)</span>
                         )}
                       </blockquote>
+                      {tab === 'usage_escalations' ? (
+                        <div className="space-y-2">
+                          <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                              Customer Question
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm">
+                              {alert.customer_question?.trim() || alert.message_content?.trim() || '—'}
+                            </p>
+                          </div>
+                          <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                              Product
+                            </p>
+                            <p className="mt-1 text-sm">{alert.product_name?.trim() || 'Unknown product'}</p>
+                          </div>
+                          <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                              Current Usage Description
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm">
+                              {alert.usage_description?.trim() || 'No usage instructions currently set.'}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
                       <div className="flex flex-wrap gap-2">
                         <Link
                           to={`/inbox?c=${alert.conversation_id}`}
@@ -236,6 +266,27 @@ export default function AIAlertsPage() {
                         >
                           View Conversation
                         </Link>
+                        {tab === 'usage_escalations' ? (
+                          alert.product_id ? (
+                            <Link
+                              to={`/products?edit=${encodeURIComponent(alert.product_id)}`}
+                              className={cn(buttonVariants({ variant: 'default', size: 'sm' }))}
+                            >
+                              Update Usage Instructions
+                            </Link>
+                          ) : alert.product_name?.trim() ? (
+                            <Link
+                              to={`/products?editName=${encodeURIComponent(alert.product_name.trim())}`}
+                              className={cn(buttonVariants({ variant: 'default', size: 'sm' }))}
+                            >
+                              Update Usage Instructions
+                            </Link>
+                          ) : (
+                            <Button type="button" size="sm" variant="outline" disabled>
+                              Update Usage Instructions
+                            </Button>
+                          )
+                        ) : null}
                         {alert.status === 'unread' ? (
                           <Button
                             type="button"

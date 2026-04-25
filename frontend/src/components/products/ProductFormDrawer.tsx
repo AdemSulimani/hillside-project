@@ -33,6 +33,7 @@ const emptyValues = (): ProductFormValues => ({
   name: '',
   priceInput: '',
   description: '',
+  usage_description: '',
   sku: '',
   category: '',
   tagsInput: '',
@@ -45,6 +46,7 @@ function productToValues(p: Product): ProductFormValues {
     name: p.name,
     priceInput: Number.isFinite(p.price) ? String(p.price) : '0',
     description: p.description ?? '',
+    usage_description: p.usage_description ?? '',
     sku: p.sku ?? '',
     category: p.category ?? '',
     tagsInput: p.tags.join(', '),
@@ -308,6 +310,25 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
             />
             {fieldErrors.description && (
               <p className="text-xs text-destructive">{fieldErrors.description}</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pf-usage-description">Usage Instructions</Label>
+            <Textarea
+              id="pf-usage-description"
+              rows={5}
+              placeholder="Explain exactly how to use this product — dosage, application method, timing, warnings, etc. The AI will return this text exactly as written when customers ask about usage."
+              value={values.usage_description}
+              onChange={(e) => setField('usage_description', e.target.value)}
+              aria-invalid={!!fieldErrors.usage_description}
+              className="min-h-[120px] resize-none"
+            />
+            <p className="text-xs text-muted-foreground">
+              Write this carefully — the AI will copy this word for word when customers ask how to use the product.
+            </p>
+            {fieldErrors.usage_description && (
+              <p className="text-xs text-destructive">{fieldErrors.usage_description}</p>
             )}
           </div>
 

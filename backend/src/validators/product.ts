@@ -13,6 +13,11 @@ export const createProductSchema = z.object({
     .max(5000, 'Description must be at most 5000 characters')
     .nullable()
     .optional(),
+  usage_description: z
+    .string()
+    .max(10000, 'Usage description must be at most 10000 characters')
+    .nullable()
+    .optional(),
   sku: z
     .string()
     .max(100, 'SKU must be at most 100 characters')
@@ -54,6 +59,11 @@ export const updateProductSchema = z.object({
   description: z
     .string()
     .max(5000, 'Description must be at most 5000 characters')
+    .nullable()
+    .optional(),
+  usage_description: z
+    .string()
+    .max(10000, 'Usage description must be at most 10000 characters')
     .nullable()
     .optional(),
   sku: z

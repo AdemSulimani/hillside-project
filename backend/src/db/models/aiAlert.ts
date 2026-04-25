@@ -53,6 +53,7 @@ interface AIAlertListQueryRow extends AIAlert {
 export interface ListAIAlertsParams {
   tenantId: string;
   status?: AIAlertStatus;
+  reason?: string;
   page: number;
   limit: number;
 }
@@ -83,7 +84,7 @@ function mapAlertListRow(row: AIAlertListQueryRow): AIAlertWithContext {
 export async function listAIAlertsForTenant(
   params: ListAIAlertsParams,
 ): Promise<{ rows: AIAlertWithContext[]; total: number }> {
-  const { tenantId, status, page, limit } = params;
+  const { tenantId, status, reason, page, limit } = params;
   const offset = (page - 1) * limit;
   const cap = Math.min(Math.max(1, limit), 100);
 
@@ -94,6 +95,12 @@ export async function listAIAlertsForTenant(
   if (status) {
     conditions.push(`a.status = $${paramIdx}`);
     values.push(status);
+    paramIdx += 1;
+  }
+
+  if (reason) {
+    conditions.push(`a.reason = $${paramIdx}`);
+    values.push(reason);
     paramIdx += 1;
   }
 

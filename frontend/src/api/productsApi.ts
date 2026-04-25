@@ -20,6 +20,7 @@ export function normalizeProduct(raw: Record<string, unknown>): Product {
     name: String(raw.name ?? ''),
     price: toNum(raw.price),
     description: raw.description != null ? String(raw.description) : null,
+    usage_description: raw.usage_description != null ? String(raw.usage_description) : null,
     sku: raw.sku != null ? String(raw.sku) : null,
     category: raw.category != null ? String(raw.category) : null,
     tags: Array.isArray(tags) ? tags.map(String) : [],

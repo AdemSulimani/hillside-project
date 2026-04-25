@@ -22,6 +22,10 @@ export interface AIAlertRow {
   channel_name: string;
   message_content: string | null;
   quality_score: number | null;
+  customer_question?: string | null;
+  product_id?: string | null;
+  product_name?: string | null;
+  usage_description?: string | null;
 }
 
 /** Socket.io `ai_alert` payload (matches backend). */

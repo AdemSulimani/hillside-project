@@ -6,6 +6,7 @@ export interface Product {
   name: string;
   price: number;
   description: string | null;
+  usage_description: string | null;
   sku: string | null;
   category: string | null;
   tags: string[];
@@ -32,6 +33,7 @@ export interface CreateProductBody {
   name: string;
   price: number;
   description?: string | null;
+  usage_description?: string | null;
   sku?: string | null;
   category?: string | null;
   tags?: string[];

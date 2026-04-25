@@ -7,6 +7,7 @@ export interface Product {
   name: string;
   price: number;
   description: string | null;
+  usage_description: string | null;
   sku: string | null;
   category: string | null;
   tags: string[];
@@ -26,6 +27,7 @@ export interface CreateProductInput {
   name: string;
   price: number;
   description?: string | null;
+  usage_description?: string | null;
   sku?: string | null;
   category?: string | null;
   tags?: string[];
@@ -41,6 +43,7 @@ export interface UpdateProductInput {
   name?: string;
   price?: number;
   description?: string | null;
+  usage_description?: string | null;
   sku?: string | null;
   category?: string | null;
   tags?: string[];
@@ -62,14 +65,15 @@ export interface ProductSearchParams {
 
 export async function createProduct(input: CreateProductInput): Promise<Product> {
   const { rows } = await pool.query<Product>(
-    `INSERT INTO products (tenant_id, name, price, description, sku, category, tags, image_urls, is_active, stock_quantity, source_type, extracted_text, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13::jsonb)
+    `INSERT INTO products (tenant_id, name, price, description, usage_description, sku, category, tags, image_urls, is_active, stock_quantity, source_type, extracted_text, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14::jsonb)
      RETURNING *`,
     [
       input.tenant_id,
       input.name,
       input.price,
       input.description ?? null,
+      input.usage_description ?? null,
       input.sku?.trim() || null,
       input.category?.trim() || null,
       JSON.stringify(input.tags ?? []),
