@@ -1,6 +1,5 @@
 import Tesseract from 'tesseract.js';
 import sharp from 'sharp';
-import path from 'path';
 import { createProduct, type Product } from '../db/models/product';
 import type { ExtractedProductData } from './documents/AttachDocumentService';
 
@@ -11,23 +10,18 @@ export class ImageProcessingService {
     this.tenantId = tenantId;
   }
 
-  async preprocessImage(filePath: string): Promise<string> {
-    const ext = path.extname(filePath);
-    const preprocessedPath = filePath.replace(ext, `_preprocessed${ext}`);
-
-    await sharp(filePath)
+  async preprocessImage(source: Buffer | string): Promise<Buffer> {
+    return sharp(source)
       .greyscale()
       .normalize()
       .sharpen()
-      .toFile(preprocessedPath);
-
-    return preprocessedPath;
+      .toBuffer();
   }
 
-  async extractText(filePath: string): Promise<string> {
-    const preprocessedPath = await this.preprocessImage(filePath);
+  async extractText(source: Buffer | string): Promise<string> {
+    const preprocessedBuffer = await this.preprocessImage(source);
 
-    const { data } = await Tesseract.recognize(preprocessedPath, 'eng', {
+    const { data } = await Tesseract.recognize(preprocessedBuffer, 'eng', {
       logger: () => {},
     });
 
@@ -60,8 +54,8 @@ export class ImageProcessingService {
     return product;
   }
 
-  async process(filePath: string): Promise<Product> {
-    const rawText = await this.extractText(filePath);
+  async process(source: Buffer | string): Promise<Product> {
+    const rawText = await this.extractText(source);
     const data = this.parseExtractedText(rawText);
 
     return createProduct({
@@ -77,10 +71,10 @@ export class ImageProcessingService {
   }
 
   async processWithAI(
-    filePath: string,
+    source: Buffer | string,
     aiEnrich: (text: string) => Promise<ExtractedProductData[]>,
   ): Promise<Product> {
-    const rawText = await this.extractText(filePath);
+    const rawText = await this.extractText(source);
     const enriched = await aiEnrich(rawText);
     const data = enriched[0] ?? this.parseExtractedText(rawText);
 

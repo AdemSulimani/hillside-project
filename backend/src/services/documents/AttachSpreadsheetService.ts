@@ -14,8 +14,10 @@ export class AttachSpreadsheetService extends AttachDocumentService {
     super(tenantId, 'spreadsheet');
   }
 
-  async parse(filePath: string): Promise<DocumentParseResult> {
-    const workbook = XLSX.readFile(filePath);
+  async parse(source: Buffer | string): Promise<DocumentParseResult> {
+    const workbook = Buffer.isBuffer(source)
+      ? XLSX.read(source, { type: 'buffer' })
+      : XLSX.readFile(source);
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json<SpreadsheetRow>(sheet);

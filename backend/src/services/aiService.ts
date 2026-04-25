@@ -321,6 +321,45 @@ function buildMessagesArray(
   return messages;
 }
 
+const CONVERSATION_ENDING_ANALYST_SYSTEM =
+  "You are a conversation analyst. Your only job is to determine if a message signals that a conversation is ending. This includes any form of goodbye, thank you and goodbye combined, polite dismissal, or closing pleasantry in ANY language including formal and informal versions, slang, abbreviations, and regional variations. For example in Albanian 'klm' means 'kalofshi mirë' which is have a nice day. 'fln' means 'faleminderit' which is thank you. Consider all such abbreviations and slang as ending signals. Return only a JSON object with a single boolean field: { is_ending: true } or { is_ending: false }";
+
+async function isConversationEnding(
+  messageContent: string,
+  conversationHistory: Message[],
+): Promise<boolean> {
+  const lastThree = conversationHistory.slice(-3);
+  const formattedLastFew = lastThree
+    .map((msg) => {
+      const roleLabel = msg.sent_by === 'customer' ? 'Customer' : 'AI';
+      return `${roleLabel}: ${(msg.content ?? '').trim()}`;
+    })
+    .join('\n');
+
+  const userText = `Last few messages of conversation:\n${formattedLastFew || '(none)'}\n\nLatest customer message: ${messageContent}`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: CONVERSATION_ENDING_ANALYST_SYSTEM },
+      { role: 'user', content: userText },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 64,
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) return false;
+
+  try {
+    const parsed = JSON.parse(raw) as { is_ending?: boolean };
+    return parsed.is_ending === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function generateReply(
   conversationId: string,
   tenantId: string,
@@ -399,6 +438,19 @@ export async function generateReply(
         estimatedTokenCount: historyTokenTotal,
       }),
     );
+  }
+
+  let conversationEnding = false;
+  try {
+    conversationEnding = await isConversationEnding(
+      inboundMessage.trim(),
+      historyForPrompt,
+    );
+  } catch {
+    conversationEnding = false;
+  }
+  if (conversationEnding && !inboundMessage.includes('?')) {
+    return '[NO_REPLY]';
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
