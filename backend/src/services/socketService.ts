@@ -41,6 +41,14 @@ export const socketService = {
     io.to(tenantRoom(tenantId)).emit('order_created', { order });
   },
 
+  emitOrderActionRequired(
+    tenantId: string,
+    payload: { order: Order; reason: string | null },
+  ): void {
+    if (!io) return;
+    io.to(tenantRoom(tenantId)).emit('order_action_required', payload);
+  },
+
   emitAIAlert(tenantId: string, alert: AIAlertSocketPayload): void {
     if (!io) return;
     io.to(tenantRoom(tenantId)).emit('ai_alert', alert);

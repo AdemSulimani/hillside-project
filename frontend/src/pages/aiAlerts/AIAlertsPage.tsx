@@ -55,6 +55,10 @@ function statusBadgeVariant(
   return 'outline';
 }
 
+function isCancellationOrRefundReason(reason: string): boolean {
+  return reason === 'cancellation_request' || reason === 'refund_request';
+}
+
 export default function AIAlertsPage() {
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
   const queryClient = useQueryClient();
@@ -197,7 +201,7 @@ export default function AIAlertsPage() {
                 ALERT_CHANNEL_ICONS[alert.channel_type] ?? MessageCircleMore;
               return (
                 <li key={alert.id}>
-                  <Card>
+                  <Card className={isCancellationOrRefundReason(alert.reason) ? 'border-red-500/40' : undefined}>
                     <CardHeader className="pb-2">
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="flex min-w-0 items-center gap-2">
@@ -260,12 +264,27 @@ export default function AIAlertsPage() {
                         </div>
                       ) : null}
                       <div className="flex flex-wrap gap-2">
-                        <Link
-                          to={`/inbox?c=${alert.conversation_id}`}
-                          className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }))}
-                        >
-                          View Conversation
-                        </Link>
+                        {isCancellationOrRefundReason(alert.reason) ? (
+                          <Link
+                            to="/orders?tab=action_required"
+                            className={cn(buttonVariants({ variant: 'destructive', size: 'sm' }))}
+                          >
+                            Go to Orders
+                          </Link>
+                        ) : (
+                          alert.conversation_id ? (
+                            <Link
+                              to={`/inbox?c=${alert.conversation_id}`}
+                              className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }))}
+                            >
+                              View Conversation
+                            </Link>
+                          ) : (
+                            <Button type="button" size="sm" variant="outline" disabled>
+                              View Conversation
+                            </Button>
+                          )
+                        )}
                         {tab === 'usage_escalations' ? (
                           alert.product_id ? (
                             <Link

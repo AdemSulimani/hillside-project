@@ -22,8 +22,8 @@ function parseAiAlertPayload(raw: unknown): AIAlertSocketPayload | null {
   if (
     typeof id !== 'string' ||
     typeof tenant_id !== 'string' ||
-    typeof conversation_id !== 'string' ||
-    typeof message_id !== 'string' ||
+    (conversation_id !== null && conversation_id !== undefined && typeof conversation_id !== 'string') ||
+    (message_id !== null && message_id !== undefined && typeof message_id !== 'string') ||
     typeof reason !== 'string' ||
     typeof status !== 'string' ||
     typeof created_at !== 'string'
@@ -46,8 +46,8 @@ function parseAiAlertPayload(raw: unknown): AIAlertSocketPayload | null {
   return {
     id,
     tenant_id,
-    conversation_id,
-    message_id,
+    conversation_id: conversation_id != null ? String(conversation_id) : null,
+    message_id: message_id != null ? String(message_id) : null,
     reason,
     status: status as AIAlertSocketPayload['status'],
     created_at,
@@ -94,7 +94,11 @@ export function useAiAlertToast(): void {
         action: {
           label: 'View Conversation',
           onClick: () => {
-            navigate(`/inbox?c=${payload.conversation_id}`);
+            if (payload.reason === 'cancellation_request' || payload.reason === 'refund_request') {
+              navigate('/orders?tab=action_required');
+            } else if (payload.conversation_id) {
+              navigate(`/inbox?c=${payload.conversation_id}`);
+            }
             toast.dismiss(tid);
           },
         },

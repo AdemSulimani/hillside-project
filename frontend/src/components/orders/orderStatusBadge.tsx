@@ -9,6 +9,7 @@ const styles: Record<OrderStatus, string> = {
   shipped: 'bg-violet-500/15 text-violet-900 dark:text-violet-100 border-violet-500/30',
   delivered: 'bg-muted text-foreground border-border',
   cancelled: 'bg-destructive/10 text-destructive border-destructive/30',
+  refunded: 'bg-rose-500/10 text-rose-700 dark:text-rose-200 border-rose-500/30',
 };
 
 const labels: Record<OrderStatus, string> = {
@@ -18,6 +19,7 @@ const labels: Record<OrderStatus, string> = {
   shipped: 'Shipped',
   delivered: 'Delivered',
   cancelled: 'Cancelled',
+  refunded: 'Refunded',
 };
 
 export function OrderStatusBadge({ status }: { status: OrderStatus }) {

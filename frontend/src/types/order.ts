@@ -13,7 +13,14 @@ export type OrderStatus =
   | 'processing'
   | 'shipped'
   | 'delivered'
-  | 'cancelled';
+  | 'cancelled'
+  | 'refunded';
+
+export type OrderResolutionStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'store_credit_offered';
 
 export interface OrderListItem {
   id: string;
@@ -31,9 +38,20 @@ export interface OrderListItem {
   delivery_address: string | null;
   notes: string | null;
   detected_by: string;
+  cancellation_reason: string | null;
+  refund_reason: string | null;
+  cancellation_requested_at: string | null;
+  refund_requested_at: string | null;
+  resolution_status: OrderResolutionStatus | null;
+  resolution_notes: string | null;
   created_at: string;
   updated_at: string;
   channel_type: ChannelType;
+}
+
+export interface ActionRequiredOrder extends OrderListItem {
+  contact_name: string;
+  request_reason: string | null;
 }
 
 export interface OrderConversationSummary {

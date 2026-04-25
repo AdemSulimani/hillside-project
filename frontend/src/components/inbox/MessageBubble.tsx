@@ -10,7 +10,7 @@ import {
 } from '@/lib/instagramRichMessageDisplay';
 import { AiMessageFeedbackForm } from '@/components/inbox/AiMessageFeedbackForm';
 import { MessageImageAttachments } from '@/components/inbox/MessageImageAttachments';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 
 interface MessageBubbleProps {
   message: InboxMessage;
@@ -404,6 +404,28 @@ export function MessageBubble({
             onSubmitted={() => setFeedbackOpen(false)}
           />
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function CancellationRefundConversationBanner({
+  requestType,
+}: {
+  requestType: 'cancellation' | 'refund';
+}) {
+  return (
+    <div className="border-b border-red-500/35 bg-red-500/10 px-4 py-3 dark:bg-red-950/35">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm font-medium text-foreground">
+          Customer requested a {requestType}. AI has been paused. Handle this from the Orders module.
+        </p>
+        <a
+          href="/orders?tab=action_required"
+          className={cn(buttonVariants({ variant: 'destructive', size: 'sm' }), 'w-fit')}
+        >
+          Open Action Required
+        </a>
       </div>
     </div>
   );

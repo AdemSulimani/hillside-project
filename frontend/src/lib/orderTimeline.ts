@@ -23,6 +23,10 @@ export function buildInferredOrderTimeline(
     items.push({ key: 'cancelled', label: 'Order cancelled', at: updatedAt });
     return items;
   }
+  if (status === 'refunded') {
+    items.push({ key: 'refunded', label: 'Order refunded', at: updatedAt });
+    return items;
+  }
 
   const rank: Record<OrderStatus, number> = {
     draft: 0,
@@ -31,6 +35,7 @@ export function buildInferredOrderTimeline(
     shipped: 3,
     delivered: 4,
     cancelled: 0,
+    refunded: 0,
   };
 
   const r = rank[status] ?? 0;

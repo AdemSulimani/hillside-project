@@ -1,7 +1,13 @@
 import api from '@/lib/api';
 import type { PaginatedResponse } from '@/types';
 import type { ChannelType } from '@/types/conversation';
-import type { OrderListItem, OrderStatus, OrderWithRelations } from '@/types/order';
+import type {
+  ActionRequiredOrder,
+  OrderListItem,
+  OrderResolutionStatus,
+  OrderStatus,
+  OrderWithRelations,
+} from '@/types/order';
 
 function toNum(v: unknown): number {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -34,6 +40,14 @@ export function normalizeOrderListItem(raw: Record<string, unknown>): OrderListI
     delivery_address: raw.delivery_address != null ? String(raw.delivery_address) : null,
     notes: raw.notes != null ? String(raw.notes) : null,
     detected_by: String(raw.detected_by ?? 'ai'),
+    cancellation_reason: raw.cancellation_reason != null ? String(raw.cancellation_reason) : null,
+    refund_reason: raw.refund_reason != null ? String(raw.refund_reason) : null,
+    cancellation_requested_at:
+      raw.cancellation_requested_at != null ? String(raw.cancellation_requested_at) : null,
+    refund_requested_at: raw.refund_requested_at != null ? String(raw.refund_requested_at) : null,
+    resolution_status:
+      raw.resolution_status != null ? String(raw.resolution_status) as OrderListItem['resolution_status'] : null,
+    resolution_notes: raw.resolution_notes != null ? String(raw.resolution_notes) : null,
     created_at: String(raw.created_at ?? ''),
     updated_at: String(raw.updated_at ?? ''),
     channel_type: (raw.channel_type as ChannelType) ?? 'whatsapp',
@@ -185,4 +199,45 @@ export async function cancelOrder(id: string): Promise<Omit<OrderListItem, 'chan
   const row = data.data?.order;
   if (!row) throw new Error('Cancel failed');
   return normalizeOrderCore(row);
+}
+
+export function normalizeActionRequiredOrder(raw: Record<string, unknown>): ActionRequiredOrder {
+  const base = normalizeOrderListItem(raw);
+  return {
+    ...base,
+    contact_name: String(raw.contact_name ?? base.customer_name ?? ''),
+    request_reason: raw.request_reason != null ? String(raw.request_reason) : null,
+  };
+}
+
+export async function fetchActionRequiredOrders(): Promise<ActionRequiredOrder[]> {
+  const { data } = await api.get<{ success: boolean; data: { orders: Record<string, unknown>[] } }>(
+    '/orders/action-required',
+  );
+  const rows = data.data?.orders ?? [];
+  return rows.map((row) => normalizeActionRequiredOrder(row));
+}
+
+export async function resolveOrderAction(
+  orderId: string,
+  payload: {
+    resolution_status: Exclude<OrderResolutionStatus, 'pending'>;
+    resolution_notes: string;
+    resume_ai?: boolean;
+  },
+): Promise<Omit<OrderListItem, 'channel_type'>> {
+  const { data } = await api.patch<{ success: boolean; data: { order: Record<string, unknown> } }>(
+    `/orders/${orderId}/resolve`,
+    payload,
+  );
+  const row = data.data?.order;
+  if (!row) throw new Error('Resolve failed');
+  return normalizeOrderCore(row);
+}
+
+export async function sendOrderResolutionMessage(
+  orderId: string,
+  payload: { message: string },
+): Promise<void> {
+  await api.post(`/orders/${orderId}/send-resolution-message`, payload);
 }

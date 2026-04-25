@@ -15,10 +15,20 @@ import {
   updateMessageSendFailure,
 } from '../db/models/message';
 import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
-import { createOrder, findLatestActiveOrderForConversation } from '../db/models/order';
+import {
+  createOrder,
+  findLatestActiveOrderForConversation,
+  findLatestConfirmedOrProcessingOrderForContact,
+  markOrderCancellationRequested,
+  markOrderRefundRequested,
+} from '../db/models/order';
 import { findProductByNameCaseInsensitive, searchProducts } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
-import { generateReply, isUsageQuestionUnanswered } from '../services/aiService';
+import {
+  detectCancellationOrRefundIntent,
+  generateReply,
+  isUsageQuestionUnanswered,
+} from '../services/aiService';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -29,6 +39,7 @@ import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
 import { logEvent } from '../services/analyticsService';
+import { openai } from '../services/openaiClient';
 
 export interface AIReplyJobData {
   tenantId: string;
@@ -215,6 +226,145 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   if (!inboundText && attachmentUrls.length === 0) {
     console.info('[ai.reply] No text content or attachments in inbound message, skipping');
     return;
+  }
+
+  if (inboundText) {
+    try {
+      const cancellationRefundIntent = await detectCancellationOrRefundIntent(
+        inboundText,
+        recentMessages,
+      );
+      if (
+        cancellationRefundIntent.is_cancellation ||
+        cancellationRefundIntent.is_refund
+      ) {
+        const candidateOrder = await findLatestConfirmedOrProcessingOrderForContact(
+          tenantId,
+          conversation.contact_id,
+        );
+
+        if (candidateOrder) {
+          const ackSystemPrompt = [
+            'You are a customer support assistant handling a sensitive order issue.',
+            'Write one short empathetic acknowledgment message in plain text.',
+            'Requirements:',
+            '- Acknowledge the customer request warmly and empathetically.',
+            '- Thank the customer for letting the business know.',
+            '- Ask for the reason only if not already provided.',
+            '- Assure them a team member will follow up shortly.',
+            '- Do NOT promise approvals, outcomes, or exact timelines.',
+            '- Keep it concise and suitable for chat.',
+          ].join('\n');
+          const askForReason = cancellationRefundIntent.reason ? 'no' : 'yes';
+          const ackCompletion = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: ackSystemPrompt },
+              {
+                role: 'user',
+                content: [
+                  `Customer message: ${inboundText}`,
+                  `Intent cancellation: ${cancellationRefundIntent.is_cancellation ? 'yes' : 'no'}`,
+                  `Intent refund: ${cancellationRefundIntent.is_refund ? 'yes' : 'no'}`,
+                  `Customer already provided reason: ${askForReason === 'yes' ? 'no' : 'yes'}`,
+                ].join('\n'),
+              },
+            ],
+            temperature: 0.4,
+            max_tokens: 220,
+          });
+          const ackText =
+            ackCompletion.choices[0]?.message?.content?.trim() ||
+            'Thank you for letting us know. We are sorry to hear this and our team will review your request shortly.';
+
+          const contactForSend = await findContactById(conversation.contact_id);
+          let sendResult:
+            | Awaited<ReturnType<typeof sendMessage>>
+            | null = null;
+          if (contactForSend) {
+            sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
+          }
+
+          const outboundAck = await createMessage({
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+            direction: 'outbound',
+            type: 'text',
+            content: ackText,
+            sent_by: 'ai',
+          });
+
+          const alerts: AIAlert[] = [];
+          let escalatedOrder = candidateOrder;
+          if (cancellationRefundIntent.is_cancellation) {
+            const updatedOrder = await markOrderCancellationRequested(
+              candidateOrder.id,
+              tenantId,
+              cancellationRefundIntent.reason,
+            );
+            if (updatedOrder) escalatedOrder = updatedOrder;
+            const alert = await createAIAlert({
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'cancellation_request',
+            });
+            alerts.push(alert);
+          }
+          if (cancellationRefundIntent.is_refund) {
+            const updatedOrder = await markOrderRefundRequested(
+              candidateOrder.id,
+              tenantId,
+              cancellationRefundIntent.reason,
+            );
+            if (updatedOrder) escalatedOrder = updatedOrder;
+            const alert = await createAIAlert({
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'refund_request',
+            });
+            alerts.push(alert);
+          }
+
+          await setConversationAiPaused(conversationId, tenantId, true);
+
+          for (const alert of alerts) {
+            socketService.emitAIAlert(tenantId, {
+              ...alert,
+              message_content: inboundText || null,
+              contact_name: contactForSend?.name?.trim() || 'Customer',
+              channel_type: channel.type,
+              channel_name: channel.name,
+            });
+          }
+          socketService.emitOrderActionRequired(tenantId, {
+            order: escalatedOrder,
+            reason: cancellationRefundIntent.reason,
+          });
+          socketService.emitNewMessage(tenantId, outboundAck);
+          socketService.emitConversationUpdated(tenantId, conversationId);
+
+          if (!sendResult?.success && sendResult) {
+            const errReason = sendResult.error ?? 'Failed to send acknowledgment';
+            await updateMessageSendFailure(outboundAck.id, tenantId, 'failed', errReason);
+            socketService.emitMessageSendFailed(tenantId, {
+              messageId: outboundAck.id,
+              conversationId,
+              error: errReason,
+            });
+          }
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('[ai.reply] cancellation/refund escalation path failed, continuing normal flow', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    }
   }
 
   const replyText = await generateReply(conversationId, tenantId, inboundText, attachmentUrls);

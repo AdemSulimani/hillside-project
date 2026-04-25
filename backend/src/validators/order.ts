@@ -13,6 +13,7 @@ export const orderStatusFilterSchema = z.enum([
   'shipped',
   'delivered',
   'cancelled',
+  'refunded',
 ]);
 
 export const orderListQuerySchema = z.object({
@@ -46,3 +47,26 @@ export const updateDraftOrderBodySchema = z
   );
 
 export type UpdateDraftOrderBody = z.infer<typeof updateDraftOrderBodySchema>;
+
+export const orderActionRequiredResolutionStatusSchema = z.enum([
+  'approved',
+  'rejected',
+  'store_credit_offered',
+]);
+
+export const orderIdWithOrderIdParamsSchema = z.object({
+  orderId: uuid,
+});
+
+export const resolveOrderActionBodySchema = z.object({
+  resolution_status: orderActionRequiredResolutionStatusSchema,
+  resolution_notes: z.string().max(10000),
+  resume_ai: z.boolean().optional(),
+});
+
+export const sendResolutionMessageBodySchema = z.object({
+  message: z.string().trim().min(1).max(4000),
+});
+
+export type ResolveOrderActionBody = z.infer<typeof resolveOrderActionBodySchema>;
+export type SendResolutionMessageBody = z.infer<typeof sendResolutionMessageBodySchema>;
