@@ -567,7 +567,16 @@ export default function InboxPage() {
                 </div>
               </div>
 
-              {openQualityAlert ? (
+              {openQualityAlert?.reason === 'usage_question_unanswered' ? (
+                <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
+                  <p className="text-sm font-medium text-foreground">
+                    Customer asked a usage question we could not answer. AI has been paused. Please
+                    reply manually or update the product&apos;s usage instructions.
+                  </p>
+                </div>
+              ) : null}
+
+              {openQualityAlert && openQualityAlert.reason !== 'usage_question_unanswered' ? (
                 <AiQualityConversationBanner
                   openAlert={openQualityAlert}
                   resolvePending={resolveQualityAlertMutation.isPending}

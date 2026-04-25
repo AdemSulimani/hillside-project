@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react';
+import { useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import {
@@ -8,7 +10,7 @@ import {
   Search,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { deleteProduct, fetchProductTags, fetchProducts } from '@/api/productsApi';
+import { deleteProduct, fetchProduct, fetchProductTags, fetchProducts } from '@/api/productsApi';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
 import type { Product } from '@/types/product';
@@ -54,12 +56,58 @@ function ProductsPageInner() {
     uploadOpen,
     uploadKind,
   } = useProductsUI();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebouncedValue(searchInput, 300);
   const [tagFilter, setTagFilter] = useState('');
   const [page, setPage] = useState(1);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
+
+  useEffect(() => {
+    const editId = searchParams.get('edit');
+    const editName = searchParams.get('editName');
+    if (!editId && !editName) return;
+    if (!tenantId) return;
+    const isUuid = editId ? /^[0-9a-f-]{36}$/i.test(editId) : false;
+    if (!isUuid && !editName) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        let product: Product | null = null;
+        if (editId && isUuid) {
+          product = await fetchProduct(editId);
+        } else if (editName?.trim()) {
+          const query = editName.trim();
+          const result = await fetchProducts({ search: query, page: 1, limit: 50 });
+          const normalize = (s: string) => s.trim().toLowerCase();
+          const exact = result.products.find((p) => normalize(p.name) === normalize(query));
+          product = exact ?? result.products[0] ?? null;
+        }
+        if (!product) {
+          throw new Error('No matching product found');
+        }
+        if (cancelled) return;
+        openEdit(product);
+      } catch {
+        if (!cancelled) {
+          toast.error('Could not open that product for editing');
+        }
+      } finally {
+        if (!cancelled) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('edit');
+          next.delete('editName');
+          setSearchParams(next, { replace: true });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [searchParams, setSearchParams, tenantId, openEdit]);
 
   const listQueryKey = useMemo(
     () =>

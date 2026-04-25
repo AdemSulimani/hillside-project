@@ -83,6 +83,17 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
         {product.stock_quantity != null && (
           <p className="text-xs text-muted-foreground">Stock: {product.stock_quantity}</p>
         )}
+        <div>
+          {product.usage_description?.trim() ? (
+            <Badge className="bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300">
+              Usage ✓
+            </Badge>
+          ) : (
+            <Badge variant="secondary" className="text-muted-foreground">
+              No usage info
+            </Badge>
+          )}
+        </div>
       </CardContent>
       <CardFooter className="mt-auto flex gap-2 border-t bg-muted/30 p-3">
         <Button

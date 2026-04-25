@@ -28,6 +28,32 @@ function normalizeAIAlertRow(raw: Record<string, unknown>): AIAlertRow {
     channel_name: String(raw.channel_name ?? ''),
     message_content: raw.message_content != null ? String(raw.message_content) : null,
     quality_score,
+    customer_question:
+      raw.customer_question != null
+        ? String(raw.customer_question)
+        : raw.inbound_message != null
+          ? String(raw.inbound_message)
+          : raw.message_content != null
+            ? String(raw.message_content)
+            : null,
+    product_id:
+      raw.product_id != null
+        ? String(raw.product_id)
+        : raw.related_product_id != null
+          ? String(raw.related_product_id)
+          : null,
+    product_name:
+      raw.product_name != null
+        ? String(raw.product_name)
+        : raw.related_product_name != null
+          ? String(raw.related_product_name)
+          : null,
+    usage_description:
+      raw.usage_description != null
+        ? String(raw.usage_description)
+        : raw.product_usage_description != null
+          ? String(raw.product_usage_description)
+          : null,
   };
 }
 
@@ -55,6 +81,34 @@ export async function fetchAIAlerts(params: AIAlertsListParams = {}): Promise<{
       page: params.page ?? 1,
       limit: params.limit ?? 20,
       status: params.status,
+    },
+  });
+
+  const rows = (data.data ?? []) as Record<string, unknown>[];
+  const pagination = data.pagination ?? {
+    page: params.page ?? 1,
+    limit: params.limit ?? 20,
+    total: 0,
+    totalPages: 0,
+  };
+  return {
+    alerts: rows.map((r) => normalizeAIAlertRow(r)),
+    pagination,
+  };
+}
+
+export async function fetchUsageEscalations(params: Omit<AIAlertsListParams, 'status'> = {}): Promise<{
+  alerts: AIAlertRow[];
+  pagination: PaginatedResponse<AIAlertRow>['pagination'];
+}> {
+  const { data } = await api.get<
+    ApiResponse<Record<string, unknown>[]> & {
+      pagination?: PaginatedResponse<unknown>['pagination'];
+    }
+  >('/escalations', {
+    params: {
+      page: params.page ?? 1,
+      limit: params.limit ?? 20,
     },
   });
 

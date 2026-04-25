@@ -5,6 +5,7 @@ import { findChannelById } from '../db/models/channel';
 import {
   findConversationById,
   setConversationAiPaused,
+  setConversationHumanReplied,
   touchConversationLastMessageAt,
 } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
@@ -15,9 +16,9 @@ import {
 } from '../db/models/message';
 import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
 import { createOrder, findLatestActiveOrderForConversation } from '../db/models/order';
-import { findProductByNameCaseInsensitive } from '../db/models/product';
+import { findProductByNameCaseInsensitive, searchProducts } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
-import { generateReply } from '../services/aiService';
+import { generateReply, isUsageQuestionUnanswered } from '../services/aiService';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -38,6 +39,35 @@ export interface AIReplyJobData {
 
 function normalizeLooseText(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
+}
+
+function normalizeVerbatimComparison(value: string | null | undefined): string {
+  return (value ?? '')
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+function looksLikeUsageQuestion(message: string): boolean {
+  const t = normalizeLooseText(message);
+  if (!t) return false;
+  return [
+    'how to use',
+    'how do i use',
+    'how should i use',
+    'how to take',
+    'how do i take',
+    'dosage',
+    'dose',
+    'application',
+    'apply',
+    'instructions',
+    'warning',
+    'warnings',
+    'side effects',
+    'usage',
+    'use it',
+    'take it',
+  ].some((needle) => t.includes(needle));
 }
 
 function messageSuggestsNewOrder(message: string): boolean {
@@ -193,8 +223,73 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
+  const usageCandidates = inboundText
+    ? await searchProducts(tenantId, inboundText, 5)
+    : [];
+  const productWithUsage = usageCandidates.find((p) => typeof p.usage_description === 'string' && p.usage_description.trim() !== '');
+  const usageDescription = productWithUsage?.usage_description?.trim() ?? null;
+
+  const usedVerbatimUsageDescription = usageDescription
+    ? normalizeVerbatimComparison(replyText) === normalizeVerbatimComparison(usageDescription)
+    : false;
+  const usageRelated = Boolean(usageDescription) && (looksLikeUsageQuestion(inboundText) || usedVerbatimUsageDescription);
+
+  const USAGE_HOLDING_MESSAGE = "That's a great question — let me connect you with our team who can give you the most accurate answer on that.";
+  let finalReplyText = replyText;
+  let usageEscalated = false;
+
+  if (usageRelated && usageDescription && !usedVerbatimUsageDescription) {
+    try {
+      const unanswered = await isUsageQuestionUnanswered(inboundText, usageDescription);
+      if (unanswered) {
+        const client = await pool.connect();
+        let alert: AIAlert | undefined;
+        try {
+          await client.query('BEGIN');
+          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+          alert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'usage_question_unanswered',
+            },
+            client,
+          );
+          await client.query('COMMIT');
+          usageEscalated = true;
+          finalReplyText = USAGE_HOLDING_MESSAGE;
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('[ai.reply] Usage escalation transaction failed', { conversationId, tenantId, err });
+        } finally {
+          client.release();
+        }
+
+        if (alert) {
+          const contactForAlert = await findContactById(conversation.contact_id);
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForAlert?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+          socketService.emitConversationUpdated(tenantId, conversationId);
+        }
+      }
+    } catch (err) {
+      console.warn('[ai.reply] usage unanswered classifier failed, sending original reply', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    }
+  }
+
   const qualityThreshold = getQualityThreshold();
-  const qualityEval = await evaluateReply(inboundText, replyText, tenantId);
+  const qualityEval = usageEscalated ? null : await evaluateReply(inboundText, finalReplyText, tenantId);
   const qualityFailing =
     qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
   const qualityScore = qualityEval?.quality_score ?? null;
@@ -206,7 +301,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
   if (contact) {
-    sendResult = await sendMessage(channel, contact.external_id, replyText);
+    sendResult = await sendMessage(channel, contact.external_id, finalReplyText);
   } else {
     console.error('[ai.reply] Contact not found for conversation', {
       contactId: conversation.contact_id,
@@ -219,7 +314,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
     direction: 'outbound',
     type: 'text',
-    content: replyText,
+    content: finalReplyText,
     sent_by: 'ai',
     quality_score: qualityScore,
     flagged: qualityFailing,
