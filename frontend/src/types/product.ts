@@ -4,6 +4,7 @@ export interface Product {
   id: string;
   tenant_id: string;
   name: string;
+  brand: string | null;
   price: number;
   description: string | null;
   usage_description: string | null;
@@ -31,6 +32,7 @@ export interface ProductListParams {
 
 export interface CreateProductBody {
   name: string;
+  brand?: string | null;
   price: number;
   description?: string | null;
   usage_description?: string | null;

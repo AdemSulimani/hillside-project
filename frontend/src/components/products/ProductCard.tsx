@@ -49,11 +49,19 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
           <h3 className="line-clamp-2 font-heading text-sm font-medium leading-snug">
             {product.name}
           </h3>
+          {product.brand?.trim() && (
+            <p className="text-xs text-muted-foreground">{product.brand}</p>
+          )}
           <p className="text-lg font-semibold tabular-nums">
             ${product.price.toFixed(2)}
           </p>
         </div>
         <div className="flex flex-wrap gap-1">
+          {product.brand?.trim() && (
+            <Badge variant="outline" className="text-xs font-normal">
+              Brand: {product.brand}
+            </Badge>
+          )}
           {product.sku && (
             <Badge variant="outline" className="text-xs font-normal">
               SKU: {product.sku}

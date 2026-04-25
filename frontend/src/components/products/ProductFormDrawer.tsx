@@ -31,6 +31,7 @@ import {
 
 const emptyValues = (): ProductFormValues => ({
   name: '',
+  brand: '',
   priceInput: '',
   description: '',
   usage_description: '',
@@ -44,6 +45,7 @@ const emptyValues = (): ProductFormValues => ({
 function productToValues(p: Product): ProductFormValues {
   return {
     name: p.name,
+    brand: p.brand ?? '',
     priceInput: Number.isFinite(p.price) ? String(p.price) : '0',
     description: p.description ?? '',
     usage_description: p.usage_description ?? '',
@@ -234,6 +236,24 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
             />
             {fieldErrors.name && (
               <p className="text-xs text-destructive">{fieldErrors.name}</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pf-brand">Brand</Label>
+            <Input
+              id="pf-brand"
+              placeholder="Optional"
+              value={values.brand}
+              onChange={(e) => setField('brand', e.target.value)}
+              aria-invalid={!!fieldErrors.brand}
+              className="h-10"
+            />
+            <p className="text-xs text-muted-foreground">
+              Adding a brand name helps the AI correctly identify and match products when customers send product images.
+            </p>
+            {fieldErrors.brand && (
+              <p className="text-xs text-destructive">{fieldErrors.brand}</p>
             )}
           </div>
 

@@ -72,6 +72,7 @@ export async function store(req: Request, res: Response): Promise<void> {
     const product = await createProduct({
       tenant_id: tenantId,
       name: input.name,
+      brand: input.brand ?? null,
       price: input.price,
       description: input.description ?? null,
       usage_description: input.usage_description ?? null,
@@ -139,7 +140,7 @@ export async function update(req: Request, res: Response): Promise<void> {
       }
     }
 
-    const embeddingRelevantFields = ['name', 'description', 'tags'] as const;
+    const embeddingRelevantFields = ['name', 'brand', 'description', 'tags'] as const;
     const touchesEmbedding = embeddingRelevantFields.some(
       (f) => f in fields,
     );

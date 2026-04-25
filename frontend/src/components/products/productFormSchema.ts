@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const productFormValuesSchema = z.object({
   name: z.string().trim().min(1, 'Name is required').max(255),
+  brand: z.string().max(255).optional().default(''),
   priceInput: z
     .string()
     .min(1, 'Price is required')
@@ -41,6 +42,7 @@ export function valuesToApiBody(values: ProductFormValues) {
 
   return {
     name: values.name,
+    brand: values.brand.trim() || null,
     price,
     description: values.description.trim() || null,
     usage_description: values.usage_description.trim() || null,

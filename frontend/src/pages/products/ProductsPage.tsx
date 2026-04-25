@@ -239,7 +239,7 @@ function ProductsPageInner() {
               setSearchInput(e.target.value);
               setPage(1);
             }}
-            placeholder="Search name, description, SKU, category…"
+            placeholder="Search name, brand, description, SKU, category…"
             className="h-10 pl-9"
             aria-label="Search products"
           />

@@ -142,7 +142,11 @@ function formatProductCatalog(products: Product[]): string {
 
   return products
     .map((p) => {
-      const parts = [`- ${p.name}: $${Number(p.price).toFixed(2)}`];
+      const typeText = p.tags.length > 0 ? p.tags.join(', ') : 'N/A';
+      const parts = [
+        `- Brand: ${getProductBrand(p) ?? 'Unknown'}, Product: ${p.name}, Type: ${typeText}`,
+        `  Price: $${Number(p.price).toFixed(2)}`,
+      ];
       if (p.description) parts.push(`  ${p.description}`);
       if (p.usage_description) {
         parts.push('  Usage description:');
@@ -170,6 +174,7 @@ function buildSystemPrompt(
   businessName: string,
   config: typeof DEFAULT_AI_CONFIG,
   products: Product[],
+  hasImages: boolean,
 ): string {
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
@@ -211,6 +216,20 @@ function buildSystemPrompt(
     '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
   );
+
+  if (hasImages) {
+    lines.push(
+      '',
+      'When a customer sends an image of a product, you must follow this exact process in order:',
+      'Step 1 - Identify the product in the image as specifically as possible. Extract: the brand name, product name, flavor or variant, size or weight, and any other distinguishing details visible on the packaging.',
+      'Step 2 - Search the provided product catalog for an exact or near-exact match. A match is only valid if the brand name AND product type match. A different brand of the same product type is NOT a match.',
+      'Step 3 - Apply one of these three responses only:',
+      'Response A - Exact match found: You have that exact product or a version of it from the same brand. Confirm availability with the price and details from your catalog.',
+      'Response B - Similar product, different brand: You have a similar product but a different brand. Be honest - say you do not carry that exact brand but offer your alternative. Example: "We do not carry [Brand X] specifically, but we do have [Your Brand] which is a similar mass gainer - would you like details on that?"',
+      'Response C - No match at all: You do not have anything similar. Tell the customer honestly and ask if they are looking for something specific you might be able to help with.',
+      'Never confirm you have a product just because the product category matches. Brand accuracy matters.',
+    );
+  }
 
   return lines.join('\n');
 }
@@ -302,6 +321,14 @@ export async function detectCancellationOrRefundIntent(
 
 type ChatMessageContent = string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: ChatMessageContent };
+type VisionProductExtraction = {
+  brand_name: string | null;
+  product_name: string | null;
+  product_type: string;
+  flavor: string | null;
+  size: string | null;
+  confidence: number;
+};
 
 function normalizeAttachmentUrls(raw: unknown): string[] {
   if (Array.isArray(raw)) {
@@ -354,11 +381,92 @@ function partitionVisionAttachments(attachmentUrls: string[]): {
   return { visionUrls, hadSkippedVideo };
 }
 
+function normalizeForMatch(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function getProductBrand(product: Product): string | null {
+  const maybeBrand = (product as Product & { brand?: string | null }).brand;
+  return typeof maybeBrand === 'string' && maybeBrand.trim().length > 0 ? maybeBrand.trim() : null;
+}
+
+function isBrandLikelyInCatalog(brandName: string, products: Product[]): boolean {
+  const normalizedBrand = normalizeForMatch(brandName);
+  if (!normalizedBrand) return false;
+
+  return products.some((product) => {
+    const candidates = [
+      getProductBrand(product) ?? '',
+      product.name ?? '',
+      product.description ?? '',
+      ...(product.tags ?? []),
+    ];
+    return candidates.some((candidate) =>
+      normalizeForMatch(candidate).includes(normalizedBrand),
+    );
+  });
+}
+
+async function extractProductInfoFromImages(
+  inboundMessage: string,
+  attachmentUrls: string[],
+): Promise<VisionProductExtraction | null> {
+  if (attachmentUrls.length === 0) return null;
+
+  const { visionUrls } = partitionVisionAttachments(attachmentUrls);
+  if (visionUrls.length === 0) return null;
+
+  const resolvedImageUrls = resolveImageUrls(visionUrls);
+  if (resolvedImageUrls.length === 0) return null;
+
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_VISION_MODEL || 'gpt-4o',
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 220,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a strict product-image extractor. Extract only visible/credible product information from the image(s). Return ONLY valid JSON with keys: brand_name (string|null), product_name (string|null), product_type (string), flavor (string|null), size (string|null), confidence (number from 0 to 1). Set missing values to null. Use concise values.',
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `Step 1 only: extract structured product information from these image(s). Customer message context: "${inboundMessage.trim() || 'No text provided.'}"`,
+          },
+          ...resolvedImageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+        ],
+      },
+    ],
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<VisionProductExtraction>;
+    return {
+      brand_name: typeof parsed.brand_name === 'string' && parsed.brand_name.trim() ? parsed.brand_name.trim() : null,
+      product_name: typeof parsed.product_name === 'string' && parsed.product_name.trim() ? parsed.product_name.trim() : null,
+      product_type: typeof parsed.product_type === 'string' && parsed.product_type.trim() ? parsed.product_type.trim() : 'unknown',
+      flavor: typeof parsed.flavor === 'string' && parsed.flavor.trim() ? parsed.flavor.trim() : null,
+      size: typeof parsed.size === 'string' && parsed.size.trim() ? parsed.size.trim() : null,
+      confidence: typeof parsed.confidence === 'number' && Number.isFinite(parsed.confidence) ? parsed.confidence : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function buildMessagesArray(
   systemPrompt: string,
   conversationHistory: Message[],
   inboundMessage: string,
   attachmentUrls: string[] = [],
+  visionContext: string | null = null,
 ): ChatMessage[] {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -387,6 +495,10 @@ function buildMessagesArray(
     const { visionUrls, hadSkippedVideo } = partitionVisionAttachments(attachmentUrls);
     const imageUrls = resolveImageUrls(visionUrls);
     let textForParts = inboundTrimmed || (imageUrls.length > 0 ? 'The customer sent an image.' : '');
+    if (visionContext) {
+      textForParts =
+        `Vision two-step context:\n${visionContext}\n\nStep requirement for image handling: extract the brand name first, then attempt catalog matching.\n\nCustomer message:\n${textForParts || '(no text)'}`;
+    }
     if (hadSkippedVideo) {
       const videoNote =
         imageUrls.length === 0
@@ -457,6 +569,8 @@ export async function generateReply(
   attachmentUrlsRaw: unknown = [],
 ): Promise<string> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
+  const { visionUrls } = partitionVisionAttachments(attachmentUrls);
+  const hasImages = visionUrls.length > 0;
   const [tenant, config, conversationHistory, cachedCatalogProducts] = await Promise.all([
     loadTenant(tenantId),
     loadAIConfig(tenantId),
@@ -493,9 +607,56 @@ export async function generateReply(
     products = cachedCatalogProducts;
   }
 
-  const { visionUrls } = partitionVisionAttachments(attachmentUrls);
-  const hasImages = visionUrls.length > 0;
-  let systemPrompt = buildSystemPrompt(tenant.name, config, products);
+  let visionContext: string | null = null;
+  if (hasImages) {
+    const extracted = await extractProductInfoFromImages(inboundMessage, attachmentUrls);
+    if (extracted) {
+      const structuredQuery = [
+        extracted.brand_name,
+        extracted.product_name,
+        extracted.product_type,
+        extracted.flavor,
+        extracted.size,
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      let extractedMatches: Product[] = [];
+      if (structuredQuery) {
+        extractedMatches = await searchProducts(tenantId, structuredQuery, 8);
+      }
+
+      const normalizedBrand = extracted.brand_name?.trim().toLowerCase() ?? null;
+      const exactBrandMatches = normalizedBrand
+        ? extractedMatches.filter((product) =>
+            (getProductBrand(product) ?? '').toLowerCase() === normalizedBrand,
+          )
+        : [];
+      const likelyNonMatchByBrand = extracted.brand_name
+        ? !isBrandLikelyInCatalog(extracted.brand_name, cachedCatalogProducts)
+        : false;
+
+      if (exactBrandMatches.length > 0) {
+        products = exactBrandMatches;
+      } else if (extractedMatches.length > 0) {
+        products = extractedMatches;
+      }
+
+      visionContext = [
+        'Step 1 extraction JSON:',
+        JSON.stringify(extracted),
+        '',
+        'Step 2 catalog checks:',
+        `- Exact brand matches found: ${exactBrandMatches.length}`,
+        `- Similar matches found: ${extractedMatches.length}`,
+        `- Brand likely absent from catalog: ${likelyNonMatchByBrand ? 'yes' : 'no'}`,
+        '',
+        'Interpretation rule: if brand likely absent or only different-brand results exist, do not claim exact availability.',
+      ].join('\n');
+    }
+  }
+
+  let systemPrompt = buildSystemPrompt(tenant.name, config, products, hasImages);
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
     systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
@@ -546,7 +707,13 @@ export async function generateReply(
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
   // other images). `buildMessagesArray` turns any non-empty `attachmentUrls` into vision `image_url`
   // parts next to the user text (Step 16 path).
-  const messages = buildMessagesArray(systemPrompt, historyForPrompt, inboundMessage, attachmentUrls);
+  const messages = buildMessagesArray(
+    systemPrompt,
+    historyForPrompt,
+    inboundMessage,
+    attachmentUrls,
+    visionContext,
+  );
 
   const model = hasImages
     ? OPENAI_VISION_MODEL

@@ -5,6 +5,7 @@ export interface Product {
   id: string;
   tenant_id: string;
   name: string;
+  brand: string | null;
   price: number;
   description: string | null;
   usage_description: string | null;
@@ -25,6 +26,7 @@ export interface Product {
 export interface CreateProductInput {
   tenant_id: string;
   name: string;
+  brand?: string | null;
   price: number;
   description?: string | null;
   usage_description?: string | null;
@@ -41,6 +43,7 @@ export interface CreateProductInput {
 
 export interface UpdateProductInput {
   name?: string;
+  brand?: string | null;
   price?: number;
   description?: string | null;
   usage_description?: string | null;
@@ -65,12 +68,13 @@ export interface ProductSearchParams {
 
 export async function createProduct(input: CreateProductInput): Promise<Product> {
   const { rows } = await pool.query<Product>(
-    `INSERT INTO products (tenant_id, name, price, description, usage_description, sku, category, tags, image_urls, is_active, stock_quantity, source_type, extracted_text, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14::jsonb)
+    `INSERT INTO products (tenant_id, name, brand, price, description, usage_description, sku, category, tags, image_urls, is_active, stock_quantity, source_type, extracted_text, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15::jsonb)
      RETURNING *`,
     [
       input.tenant_id,
       input.name,
+      input.brand?.trim() || null,
       input.price,
       input.description ?? null,
       input.usage_description ?? null,
@@ -101,7 +105,7 @@ export async function findProductsByTenant(
 
   if (params.search) {
     conditions.push(
-      `(name ILIKE $${paramIdx} OR description ILIKE $${paramIdx} OR (sku IS NOT NULL AND sku ILIKE $${paramIdx}) OR (category IS NOT NULL AND category ILIKE $${paramIdx}))`,
+      `(name ILIKE $${paramIdx} OR (brand IS NOT NULL AND brand ILIKE $${paramIdx}) OR description ILIKE $${paramIdx} OR (sku IS NOT NULL AND sku ILIKE $${paramIdx}) OR (category IS NOT NULL AND category ILIKE $${paramIdx}))`,
     );
     values.push(`%${params.search}%`);
     paramIdx++;
@@ -226,7 +230,7 @@ export async function searchProducts(
     `SELECT * FROM products
      WHERE tenant_id = $1 AND deleted_at IS NULL
        AND is_active = true
-       AND (name ILIKE $2 OR description ILIKE $2 OR tags::text ILIKE $2)
+       AND (name ILIKE $2 OR (brand IS NOT NULL AND brand ILIKE $2) OR description ILIKE $2 OR tags::text ILIKE $2)
      ORDER BY name ASC
      LIMIT $3`,
     [tenantId, `%${query}%`, limit],
