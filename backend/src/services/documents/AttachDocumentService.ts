@@ -22,10 +22,10 @@ export abstract class AttachDocumentService {
     this.sourceType = sourceType;
   }
 
-  abstract parse(filePath: string): Promise<DocumentParseResult>;
+  abstract parse(source: Buffer | string): Promise<DocumentParseResult>;
 
-  async process(filePath: string): Promise<Product[]> {
-    const result = await this.parse(filePath);
+  async process(source: Buffer | string): Promise<Product[]> {
+    const result = await this.parse(source);
     const products: Product[] = [];
 
     if (result.products.length === 0) {
@@ -60,10 +60,10 @@ export abstract class AttachDocumentService {
   }
 
   async processAndEnrich(
-    filePath: string,
+    source: Buffer | string,
     aiEnrich?: (text: string) => Promise<ExtractedProductData[]>,
   ): Promise<Product[]> {
-    const result = await this.parse(filePath);
+    const result = await this.parse(source);
 
     if (aiEnrich && result.rawText) {
       const enriched = await aiEnrich(result.rawText);

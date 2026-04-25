@@ -11,8 +11,8 @@ export class AttachPdfService extends AttachDocumentService {
     super(tenantId, 'pdf');
   }
 
-  async parse(filePath: string): Promise<DocumentParseResult> {
-    const buffer = await fs.readFile(filePath);
+  async parse(source: Buffer | string): Promise<DocumentParseResult> {
+    const buffer = Buffer.isBuffer(source) ? source : await fs.readFile(source);
     const parser = new PDFParse({ data: buffer });
     const result = await parser.getText();
     const rawText = result.text.trim();

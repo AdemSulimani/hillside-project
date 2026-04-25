@@ -195,21 +195,26 @@ export async function uploadDocument(req: Request, res: Response): Promise<void>
     }
 
     const useAI = req.body.use_ai === 'true' || req.body.use_ai === true;
-    const service = getDocumentService(tenantId, req.file.mimetype);
+    const service = getDocumentService(tenantId, req.file.mimetype, req.file.originalname);
+    const inputSource = req.file.buffer ?? req.file.path;
+    if (!inputSource) {
+      sendError(res, 'Uploaded document has no readable content', 400);
+      return;
+    }
 
     let products;
     if (useAI) {
       try {
         const aiService = new AIProductProcessingService();
         products = await service.processAndEnrich(
-          req.file.path,
+          inputSource,
           aiService.createEnricher(),
         );
       } catch {
-        products = await service.process(req.file.path);
+        products = await service.process(inputSource);
       }
     } else {
-      products = await service.process(req.file.path);
+      products = await service.process(inputSource);
     }
 
     sendSuccess(
@@ -234,20 +239,25 @@ export async function uploadOcrImage(req: Request, res: Response): Promise<void>
 
     const useAI = req.body.use_ai === 'true' || req.body.use_ai === true;
     const imageService = new ImageProcessingService(tenantId);
+    const inputSource = req.file.buffer ?? req.file.path;
+    if (!inputSource) {
+      sendError(res, 'Uploaded image has no readable content', 400);
+      return;
+    }
 
     let product;
     if (useAI) {
       try {
         const aiService = new AIProductProcessingService();
         product = await imageService.processWithAI(
-          req.file.path,
+          inputSource,
           aiService.createEnricher(),
         );
       } catch {
-        product = await imageService.process(req.file.path);
+        product = await imageService.process(inputSource);
       }
     } else {
-      product = await imageService.process(req.file.path);
+      product = await imageService.process(inputSource);
     }
 
     sendSuccess(res, { product }, 'Product imported from image', 201);
