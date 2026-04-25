@@ -30,7 +30,10 @@ import { resolveAIAlert } from '@/api/aiAlertsApi';
 import { AiQualityConversationBanner } from '@/components/inbox/AiQualityConversationBanner';
 import { ConversationAiStatusBar } from '@/components/inbox/ConversationAiStatusBar';
 import { ConversationListItem } from '@/components/inbox/ConversationListItem';
-import { MessageBubble } from '@/components/inbox/MessageBubble';
+import {
+  CancellationRefundConversationBanner,
+  MessageBubble,
+} from '@/components/inbox/MessageBubble';
 import { ReplyBox } from '@/components/inbox/ReplyBox';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -342,6 +345,15 @@ export default function InboxPage() {
   const thread = threadQuery.data;
   const messages = thread?.messages ?? [];
   const openQualityAlert = thread?.conversation.open_ai_alert ?? null;
+  const hasCancellationOrRefundAlert =
+    openQualityAlert?.reason === 'cancellation_request' ||
+    openQualityAlert?.reason === 'refund_request';
+  const cancellationRefundType: 'cancellation' | 'refund' | null =
+    openQualityAlert?.reason === 'refund_request'
+      ? 'refund'
+      : openQualityAlert?.reason === 'cancellation_request'
+        ? 'cancellation'
+        : null;
 
   useLayoutEffect(() => {
     if (!selectedId || !thread) return;
@@ -576,7 +588,14 @@ export default function InboxPage() {
                 </div>
               ) : null}
 
-              {openQualityAlert && openQualityAlert.reason !== 'usage_question_unanswered' ? (
+              {hasCancellationOrRefundAlert && cancellationRefundType ? (
+                <CancellationRefundConversationBanner requestType={cancellationRefundType} />
+              ) : null}
+
+              {openQualityAlert &&
+              openQualityAlert.reason !== 'usage_question_unanswered' &&
+              openQualityAlert.reason !== 'cancellation_request' &&
+              openQualityAlert.reason !== 'refund_request' ? (
                 <AiQualityConversationBanner
                   openAlert={openQualityAlert}
                   resolvePending={resolveQualityAlertMutation.isPending}

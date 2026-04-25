@@ -13,7 +13,10 @@ export type OrderStatus =
   | 'processing'
   | 'shipped'
   | 'delivered'
-  | 'cancelled';
+  | 'cancelled'
+  | 'refunded';
+
+export type ResolutionStatus = 'pending' | 'approved' | 'rejected' | 'store_credit_offered';
 
 export type CommissionStatus = 'unpaid' | 'billed' | 'paid';
 
@@ -36,6 +39,12 @@ export interface Order {
   commission_amount: number | null;
   is_commissionable: boolean;
   commission_status: CommissionStatus;
+  cancellation_reason: string | null;
+  refund_reason: string | null;
+  cancellation_requested_at: Date | null;
+  refund_requested_at: Date | null;
+  resolution_status: ResolutionStatus | null;
+  resolution_notes: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -112,6 +121,18 @@ export interface OrderWithRelations extends Order {
     created_at: Date;
     updated_at: Date;
   };
+}
+
+export interface ActionRequiredOrder extends Order {
+  contact_name: string;
+  channel_type: ChannelType;
+  conversation_id: string;
+  request_reason: string | null;
+}
+
+export interface ResolveOrderActionInput {
+  resolution_status: Exclude<ResolutionStatus, 'pending'>;
+  resolution_notes: string | null;
 }
 
 export interface UpdateDraftOrderInput {
@@ -312,6 +333,131 @@ export async function updateOrderStatusForTenant(
      WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
     [id, tenantId, status],
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+export async function findLatestConfirmedOrProcessingOrderForContact(
+  tenantId: string,
+  contactId: string,
+): Promise<Order | null> {
+  const { rows } = await pool.query<OrderRow>(
+    `SELECT *
+     FROM orders
+     WHERE tenant_id = $1
+       AND contact_id = $2
+       AND status IN ('confirmed', 'processing')
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [tenantId, contactId],
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+export async function markOrderCancellationRequested(
+  orderId: string,
+  tenantId: string,
+  reason: string | null,
+): Promise<Order | null> {
+  const { rows } = await pool.query<OrderRow>(
+    `UPDATE orders
+     SET cancellation_requested_at = now(),
+         cancellation_reason = COALESCE($3, cancellation_reason),
+         resolution_status = 'pending',
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING *`,
+    [orderId, tenantId, reason],
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+export async function markOrderRefundRequested(
+  orderId: string,
+  tenantId: string,
+  reason: string | null,
+): Promise<Order | null> {
+  const { rows } = await pool.query<OrderRow>(
+    `UPDATE orders
+     SET refund_requested_at = now(),
+         refund_reason = COALESCE($3, refund_reason),
+         resolution_status = 'pending',
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING *`,
+    [orderId, tenantId, reason],
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
+}
+
+type ActionRequiredOrderRow = OrderRow & {
+  contact_name: string;
+  channel_type: ChannelType;
+  request_reason: string | null;
+};
+
+export async function listActionRequiredOrdersForTenant(
+  tenantId: string,
+): Promise<ActionRequiredOrder[]> {
+  const { rows } = await pool.query<ActionRequiredOrderRow>(
+    `SELECT
+       o.*,
+       ct.name AS contact_name,
+       ch.type AS channel_type,
+       COALESCE(o.cancellation_reason, o.refund_reason) AS request_reason
+     FROM orders o
+     INNER JOIN contacts ct ON ct.id = o.contact_id AND ct.tenant_id = o.tenant_id
+     INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
+     INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
+     WHERE o.tenant_id = $1
+       AND o.resolution_status = 'pending'
+     ORDER BY GREATEST(
+       COALESCE(o.cancellation_requested_at, '-infinity'::timestamptz),
+       COALESCE(o.refund_requested_at, '-infinity'::timestamptz)
+     ) DESC`,
+    [tenantId],
+  );
+
+  return rows.map((row) => {
+    const { contact_name, channel_type, request_reason, ...rest } = row;
+    return {
+      ...rowToOrder(rest),
+      contact_name,
+      channel_type,
+      conversation_id: rest.conversation_id,
+      request_reason,
+    };
+  });
+}
+
+export async function resolveOrderActionForTenant(
+  orderId: string,
+  tenantId: string,
+  input: ResolveOrderActionInput,
+): Promise<Order | null> {
+  const current = await findOrderByIdForTenant(orderId, tenantId);
+  if (!current) return null;
+
+  let nextOrderStatus: OrderStatus | null = null;
+  if (input.resolution_status === 'approved') {
+    const cancellationAt = current.cancellation_requested_at?.getTime() ?? null;
+    const refundAt = current.refund_requested_at?.getTime() ?? null;
+    if (refundAt !== null && (cancellationAt === null || refundAt >= cancellationAt)) {
+      nextOrderStatus = 'refunded';
+    } else if (cancellationAt !== null) {
+      nextOrderStatus = 'cancelled';
+    }
+  }
+
+  const { rows } = await pool.query<OrderRow>(
+    `UPDATE orders
+     SET resolution_status = $3,
+         resolution_notes = $4,
+         status = COALESCE($5, status),
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING *`,
+    [orderId, tenantId, input.resolution_status, input.resolution_notes, nextOrderStatus],
   );
   return rows[0] ? rowToOrder(rows[0]) : null;
 }

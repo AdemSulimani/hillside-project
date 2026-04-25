@@ -1,16 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  CheckCircle2,
   Loader2,
   MoreHorizontal,
+  ShieldAlert,
   Search,
   ShoppingCart,
 } from 'lucide-react';
-import { fetchOrders } from '@/api/ordersApi';
+import {
+  fetchActionRequiredOrders,
+  fetchOrders,
+  resolveOrderAction,
+  sendOrderResolutionMessage,
+} from '@/api/ordersApi';
 import { OrderDetailDrawer } from '@/components/orders/OrderDetailDrawer';
 import { orderChannelIcon } from '@/components/orders/orderChannelIcon';
 import { OrderStatusBadge } from '@/components/orders/orderStatusBadge';
@@ -18,8 +25,9 @@ import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
-import type { OrderListSortColumn, OrderStatus } from '@/types/order';
+import type { OrderListSortColumn, OrderResolutionStatus, OrderStatus } from '@/types/order';
 import { Button, buttonVariants } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,10 +36,15 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
+import { Textarea } from '@/components/ui/textarea';
+import { toast } from 'sonner';
 
 const PAGE_SIZE = 20;
 
-const STATUS_TABS: { key: 'all' | OrderStatus; label: string; filter?: OrderStatus }[] = [
+type OrdersTabKey = 'all' | OrderStatus | 'action_required';
+
+const STATUS_TABS: { key: OrdersTabKey; label: string; filter?: OrderStatus }[] = [
   { key: 'all', label: 'All' },
   { key: 'draft', label: 'Draft', filter: 'draft' },
   { key: 'confirmed', label: 'Confirmed', filter: 'confirmed' },
@@ -39,7 +52,24 @@ const STATUS_TABS: { key: 'all' | OrderStatus; label: string; filter?: OrderStat
   { key: 'shipped', label: 'Shipped', filter: 'shipped' },
   { key: 'delivered', label: 'Delivered', filter: 'delivered' },
   { key: 'cancelled', label: 'Cancelled', filter: 'cancelled' },
+  { key: 'refunded', label: 'Refunded', filter: 'refunded' },
+  { key: 'action_required', label: 'Action Required' },
 ];
+
+type ResolutionChoice = Exclude<OrderResolutionStatus, 'pending'>;
+
+const RESOLUTION_OPTIONS: { value: ResolutionChoice; label: string }[] = [
+  { value: 'approved', label: 'Approve' },
+  { value: 'rejected', label: 'Reject' },
+  { value: 'store_credit_offered', label: 'Offer Store Credit' },
+];
+
+interface ActionFormState {
+  resolution_status: ResolutionChoice;
+  resolution_notes: string;
+  customer_message: string;
+  resume_ai: boolean;
+}
 
 function startOfLocalDayIso(ymd: string): string | undefined {
   if (!ymd) return undefined;
@@ -98,9 +128,11 @@ function SortHeader({
 export default function OrdersPage() {
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = searchParams.get('tab') === 'action_required' ? 'action_required' : 'all';
 
-  const [statusTab, setStatusTab] = useState<(typeof STATUS_TABS)[number]['key']>('all');
+  const [statusTab, setStatusTab] = useState<OrdersTabKey>(initialTab);
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebouncedValue(searchInput, 300);
   const [dateFrom, setDateFrom] = useState('');
@@ -113,6 +145,7 @@ export default function OrdersPage() {
     openFromQuery && /^[0-9a-f-]{36}$/i.test(openFromQuery) ? openFromQuery : null;
   const [drawerOrderId, setDrawerOrderId] = useState<string | null>(initialDrawerOrderId);
   const [drawerOpen, setDrawerOpen] = useState(Boolean(initialDrawerOrderId));
+  const [actionForms, setActionForms] = useState<Record<string, ActionFormState>>({});
 
   useEffect(() => {
     if (!openFromQuery || !/^[0-9a-f-]{36}$/i.test(openFromQuery)) return;
@@ -120,6 +153,15 @@ export default function OrdersPage() {
     next.delete('open');
     setSearchParams(next, { replace: true });
   }, [openFromQuery, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    const tabFromUrl = searchParams.get('tab') === 'action_required' ? 'action_required' : null;
+    setStatusTab((prev) => {
+      if (tabFromUrl === 'action_required') return 'action_required';
+      if (prev === 'action_required') return 'all';
+      return prev;
+    });
+  }, [searchParams]);
 
   const statusFilter = useMemo(() => {
     const tab = STATUS_TABS.find((t) => t.key === statusTab);
@@ -156,10 +198,47 @@ export default function OrdersPage() {
         sort: sortColumn,
         sort_dir: sortDir,
       }),
+    enabled: Boolean(tenantId) && statusTab !== 'action_required',
+  });
+
+  const actionRequiredQuery = useQuery({
+    queryKey: ['orders', 'action-required', tenantId],
+    queryFn: fetchActionRequiredOrders,
     enabled: Boolean(tenantId),
+    refetchInterval: 30_000,
+  });
+
+  const sendResolutionMutation = useMutation({
+    mutationFn: async (payload: {
+      orderId: string;
+      resolution_status: ResolutionChoice;
+      resolution_notes: string;
+      message: string;
+      resume_ai: boolean;
+    }) => {
+      await resolveOrderAction(payload.orderId, {
+        resolution_status: payload.resolution_status,
+        resolution_notes: payload.resolution_notes,
+        resume_ai: payload.resume_ai,
+      });
+      await sendOrderResolutionMessage(payload.orderId, {
+        message: payload.message,
+      });
+    },
+    onSuccess: () => {
+      toast.success('Resolution sent to customer');
+      void queryClient.invalidateQueries({ queryKey: ['orders'] });
+      void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
+    },
+    onError: () => {
+      toast.error('Failed to send resolution. Please try again.');
+    },
   });
 
   const orders = data?.orders ?? [];
+  const actionRequiredOrders = actionRequiredQuery.data ?? [];
+  const actionRequiredCount = actionRequiredOrders.length;
   const pagination = data?.pagination;
 
   const handleSort = (col: OrderListSortColumn) => {
@@ -175,6 +254,44 @@ export default function OrdersPage() {
   const openDrawer = (id: string) => {
     setDrawerOrderId(id);
     setDrawerOpen(true);
+  };
+
+  const actionRequestTimestamp = (order: (typeof actionRequiredOrders)[number]): string | null => {
+    const cancellationAt = order.cancellation_requested_at
+      ? new Date(order.cancellation_requested_at).getTime()
+      : null;
+    const refundAt = order.refund_requested_at ? new Date(order.refund_requested_at).getTime() : null;
+    if (refundAt !== null && (cancellationAt === null || refundAt >= cancellationAt)) {
+      return order.refund_requested_at;
+    }
+    return order.cancellation_requested_at;
+  };
+
+  const actionRequestType = (order: (typeof actionRequiredOrders)[number]): 'cancellation' | 'refund' => {
+    const cancellationAt = order.cancellation_requested_at
+      ? new Date(order.cancellation_requested_at).getTime()
+      : null;
+    const refundAt = order.refund_requested_at ? new Date(order.refund_requested_at).getTime() : null;
+    if (refundAt !== null && (cancellationAt === null || refundAt >= cancellationAt)) return 'refund';
+    return 'cancellation';
+  };
+
+  const formForOrder = (orderId: string): ActionFormState =>
+    actionForms[orderId] ?? {
+      resolution_status: 'approved',
+      resolution_notes: '',
+      customer_message: '',
+      resume_ai: false,
+    };
+
+  const patchForm = (orderId: string, patch: Partial<ActionFormState>) => {
+    setActionForms((prev) => ({
+      ...prev,
+      [orderId]: {
+        ...formForOrder(orderId),
+        ...patch,
+      },
+    }));
   };
 
   if (!tenantId) {
@@ -212,14 +329,27 @@ export default function OrdersPage() {
             variant={statusTab === t.key ? 'default' : 'outline'}
             onClick={() => {
               setStatusTab(t.key);
+              const next = new URLSearchParams(searchParams);
+              if (t.key === 'action_required') {
+                next.set('tab', 'action_required');
+              } else {
+                next.delete('tab');
+              }
+              setSearchParams(next, { replace: true });
               setPage(1);
             }}
           >
             {t.label}
+            {t.key === 'action_required' && actionRequiredCount > 0 ? (
+              <span className="ml-1.5 inline-flex min-w-5 justify-center rounded-full bg-red-600 px-1 text-[0.65rem] font-semibold text-white tabular-nums">
+                {actionRequiredCount > 99 ? '99+' : actionRequiredCount}
+              </span>
+            ) : null}
           </Button>
         ))}
       </div>
 
+      {statusTab !== 'action_required' ? (
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
         <div className="relative flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -285,8 +415,168 @@ export default function OrdersPage() {
           )}
         </div>
       </div>
+      ) : null}
 
-      {isLoading ? (
+      {statusTab === 'action_required' ? (
+        actionRequiredQuery.isLoading ? (
+          <Skeleton className="h-64 w-full rounded-xl" />
+        ) : actionRequiredQuery.isError ? (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
+            Could not load action-required orders. Please refresh.
+          </div>
+        ) : actionRequiredOrders.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
+            <CheckCircle2 className="size-10 text-muted-foreground opacity-50" />
+            <p className="text-sm text-muted-foreground">No pending cancellation or refund requests.</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {actionRequiredOrders.map((order) => {
+              const requestType = actionRequestType(order);
+              const requestAt = actionRequestTimestamp(order);
+              const form = formForOrder(order.id);
+              return (
+                <div key={order.id} className="rounded-xl border border-red-500/30 bg-card p-4 shadow-sm">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center rounded-md bg-muted p-1.5">
+                          {renderOrderChannelIcon(order.channel_type)}
+                        </span>
+                        <p className="truncate text-base font-semibold">{order.customer_name}</p>
+                      </div>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {order.product_name} · Qty {order.quantity} · ${order.total_price.toFixed(2)} ·{' '}
+                        {formatRelativeShort(order.created_at)}
+                      </p>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className={
+                        requestType === 'cancellation'
+                          ? 'border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-200'
+                          : 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200'
+                      }
+                    >
+                      {requestType === 'cancellation' ? 'Cancellation Request' : 'Refund Request'}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Reason</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm">
+                      {order.request_reason?.trim() || 'No reason provided yet'}
+                    </p>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-muted-foreground">
+                      Requested {requestAt ? formatRelativeShort(requestAt) : 'recently'}
+                    </p>
+                    <Link
+                      to={`/inbox?c=${order.conversation_id}`}
+                      className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
+                    >
+                      View Conversation
+                    </Link>
+                  </div>
+
+                  <div className="mt-4 space-y-3 rounded-lg border border-border p-3">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">Resolution</label>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger
+                            render={
+                              <Button type="button" variant="outline" className="w-full justify-between">
+                                {RESOLUTION_OPTIONS.find((o) => o.value === form.resolution_status)?.label}
+                                <MoreHorizontal className="size-4 opacity-60" />
+                              </Button>
+                            }
+                          />
+                          <DropdownMenuContent align="start">
+                            {RESOLUTION_OPTIONS.map((option) => (
+                              <DropdownMenuItem
+                                key={option.value}
+                                onClick={() => patchForm(order.id, { resolution_status: option.value })}
+                              >
+                                {option.label}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                      <div className="flex items-end justify-between rounded-md border border-border px-3 py-2">
+                        <span className="text-sm">Resume AI after sending</span>
+                        <Switch
+                          checked={form.resume_ai}
+                          onCheckedChange={(checked) => patchForm(order.id, { resume_ai: checked })}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Resolution notes (internal)
+                      </label>
+                      <Textarea
+                        value={form.resolution_notes}
+                        onChange={(e) => patchForm(order.id, { resolution_notes: e.target.value })}
+                        placeholder="Add internal notes for this decision"
+                        rows={3}
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Message to customer
+                      </label>
+                      <Textarea
+                        value={form.customer_message}
+                        onChange={(e) => patchForm(order.id, { customer_message: e.target.value })}
+                        placeholder="Type the message to send to the customer"
+                        rows={4}
+                      />
+                    </div>
+
+                    <div className="flex justify-end">
+                      <Button
+                        type="button"
+                        disabled={
+                          sendResolutionMutation.isPending ||
+                          !form.customer_message.trim() ||
+                          !form.resolution_notes.trim()
+                        }
+                        onClick={() =>
+                          sendResolutionMutation.mutate({
+                            orderId: order.id,
+                            resolution_status: form.resolution_status,
+                            resolution_notes: form.resolution_notes.trim(),
+                            message: form.customer_message.trim(),
+                            resume_ai: form.resume_ai,
+                          })
+                        }
+                      >
+                        {sendResolutionMutation.isPending ? (
+                          <>
+                            <Loader2 className="size-4 animate-spin" />
+                            Sending…
+                          </>
+                        ) : (
+                          <>
+                            <ShieldAlert className="size-4" />
+                            Send Resolution
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )
+      ) : isLoading ? (
         <Skeleton className="h-96 w-full rounded-xl" />
       ) : isError ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">

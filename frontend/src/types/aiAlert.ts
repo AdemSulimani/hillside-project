@@ -12,8 +12,8 @@ export type AIAlertFlagReason =
 export interface AIAlertRow {
   id: string;
   tenant_id: string;
-  conversation_id: string;
-  message_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
   reason: AIAlertFlagReason | string;
   status: AIAlertStatus;
   created_at: string;
@@ -32,8 +32,8 @@ export interface AIAlertRow {
 export interface AIAlertSocketPayload {
   id: string;
   tenant_id: string;
-  conversation_id: string;
-  message_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
   reason: string;
   status: AIAlertStatus;
   created_at: string;

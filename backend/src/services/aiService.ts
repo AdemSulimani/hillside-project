@@ -248,6 +248,58 @@ export async function isUsageQuestionUnanswered(
   }
 }
 
+export async function detectCancellationOrRefundIntent(
+  inboundMessage: string,
+  conversationHistory: Message[],
+): Promise<{ is_cancellation: boolean; is_refund: boolean; reason: string | null }> {
+  const historySlice = conversationHistory.slice(-8);
+  const historyText = historySlice
+    .map((msg) => {
+      const who = msg.sent_by === 'customer' ? 'Customer' : 'Agent';
+      return `${who}: ${(msg.content ?? '').trim()}`;
+    })
+    .join('\n');
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a strict intent classifier. Detect if the latest customer message requests order cancellation and/or refund in any language, including Albanian and slang/abbreviations. Extract the explicit reason if present. Return ONLY valid JSON with keys: is_cancellation (boolean), is_refund (boolean), reason (string or null). Do not infer a reason unless the customer provided one.',
+      },
+      {
+        role: 'user',
+        content: `Conversation context:\n${historyText || '(none)'}\n\nLatest customer message:\n${inboundMessage}`,
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 120,
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) {
+    return { is_cancellation: false, is_refund: false, reason: null };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      is_cancellation?: boolean;
+      is_refund?: boolean;
+      reason?: string | null;
+    };
+    const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
+    return {
+      is_cancellation: parsed.is_cancellation === true,
+      is_refund: parsed.is_refund === true,
+      reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
+    };
+  } catch {
+    return { is_cancellation: false, is_refund: false, reason: null };
+  }
+}
+
 type ChatMessageContent = string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: ChatMessageContent };
 

@@ -4,6 +4,7 @@ import { CRMRouteFallback } from '@/components/layouts/RouteFallback';
 import { CrmSocketProvider } from '@/contexts/CrmSocketContext';
 import { useOrderCreatedToast } from '@/hooks/useOrderCreatedToast';
 import { useAiAlertToast } from '@/hooks/useAiAlertToast';
+import { useOrderActionRequiredToast } from '@/hooks/useOrderActionRequiredToast';
 import Sidebar from './Sidebar';
 import Header from './Header';
 import LegalFooter from './LegalFooter';
@@ -11,6 +12,7 @@ import LegalFooter from './LegalFooter';
 function CrmRealtimeListeners() {
   useOrderCreatedToast();
   useAiAlertToast();
+  useOrderActionRequiredToast();
   return null;
 }
 

@@ -18,8 +18,8 @@ function normalizeAIAlertRow(raw: Record<string, unknown>): AIAlertRow {
   return {
     id: String(raw.id),
     tenant_id: String(raw.tenant_id),
-    conversation_id: String(raw.conversation_id),
-    message_id: String(raw.message_id),
+    conversation_id: raw.conversation_id != null ? String(raw.conversation_id) : null,
+    message_id: raw.message_id != null ? String(raw.message_id) : null,
     reason: String(raw.reason ?? ''),
     status: (raw.status as AIAlertStatus) ?? 'unread',
     created_at: String(raw.created_at ?? ''),
