@@ -10,6 +10,15 @@ export interface OpenAIAlertSummary {
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageSender = 'customer' | 'ai' | 'human';
 
+/** Referenced parent message on a thread reply (API + socket). */
+export interface MessageReplyTo {
+  id: string;
+  content: string | null;
+  sent_by: MessageSender;
+  attachment_url: string | null;
+  direction: MessageDirection;
+}
+
 /** One row in the inbox conversation list (from GET /conversations). */
 export interface ConversationSummary {
   id: string;
@@ -67,6 +76,7 @@ export interface InboxMessage {
   flag_reason: string | null;
   send_status: string | null;
   send_error: string | null;
+  replyTo?: MessageReplyTo;
 }
 
 export interface ConversationThread {

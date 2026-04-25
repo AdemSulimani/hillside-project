@@ -3,6 +3,12 @@ import type { MessageType } from '../db/models/message';
 
 export interface InboundMessageDTO {
   channelType: ChannelType;
+  /**
+   * Thread / quoted reply — external id of the referenced message:
+   * Instagram & Facebook Messenger: `message.reply_to.mid`
+   * WhatsApp Cloud API: `message.context.message_id` (or `context.id`)
+   */
+  replyToExternalId?: string;
   /** True when Meta delivers a message echo (e.g. native Instagram app reply). */
   isEcho?: boolean;
   /** Inbound stored but AI reply job is skipped (reactions; Facebook stickers). */
@@ -134,6 +140,28 @@ function instagramAttachmentNodes(message: Record<string, unknown> | null): Reco
 
 function strTrim(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/** Page Messenger / Instagram DM: `message.reply_to.mid` references another message in the thread. */
+function messengerThreadReplyExternalId(
+  message: Record<string, unknown> | null,
+  currentExternalId: string | null,
+): string | undefined {
+  const replyTo = message ? asRecord(message.reply_to) : null;
+  const mid = strTrim(replyTo?.mid);
+  if (!mid || !currentExternalId || mid === currentExternalId) return undefined;
+  return mid;
+}
+
+/** WhatsApp Cloud API: optional `context.message_id` (WAMID) on quoted replies. */
+function whatsAppReplyToExternalId(
+  message: Record<string, unknown> | null,
+  currentExternalId: string | null,
+): string | undefined {
+  const ctx = message ? asRecord(message.context) : null;
+  const ref = strTrim(ctx?.message_id) || strTrim(ctx?.id);
+  if (!ref || !currentExternalId || ref === currentExternalId) return undefined;
+  return ref;
 }
 
 function uniqStrings(urls: string[]): string[] {
@@ -664,6 +692,8 @@ function extractMetaMessage(
     throw new Error('Invalid webhook payload: required message identifiers are missing');
   }
 
+  const replyToExternalId = whatsAppReplyToExternalId(message, externalMessageId);
+
   return {
     channelExternalId,
     externalMessageId,
@@ -674,6 +704,7 @@ function extractMetaMessage(
     content,
     attachmentUrls: mediaUrl ? [mediaUrl] : [],
     rawPayload: payload,
+    ...(replyToExternalId ? { replyToExternalId } : {}),
   };
 }
 
@@ -742,6 +773,8 @@ function extractFacebookMessengerMessage(payload: Record<string, unknown>): Inbo
 
   const skipAiReply = rich.skipAiReply === true;
 
+  const replyToExternalId = messengerThreadReplyExternalId(message, externalMessageId);
+
   return {
     channelType: 'facebook',
     isEcho,
@@ -755,6 +788,7 @@ function extractFacebookMessengerMessage(payload: Record<string, unknown>): Inbo
     content,
     attachmentUrls,
     rawPayload: payload,
+    ...(replyToExternalId ? { replyToExternalId } : {}),
   };
 }
 
@@ -825,6 +859,8 @@ export class WebhookNormalizerService {
       throw new Error('Invalid webhook payload: required message identifiers are missing');
     }
 
+    const replyToExternalId = messengerThreadReplyExternalId(message, externalMessageId);
+
     return {
       channelType: 'instagram',
       isEcho,
@@ -838,6 +874,7 @@ export class WebhookNormalizerService {
       content,
       attachmentUrls,
       rawPayload: payload,
+      ...(replyToExternalId ? { replyToExternalId } : {}),
     };
   }
 

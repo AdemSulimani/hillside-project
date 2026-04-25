@@ -670,6 +670,7 @@ export default function InboxPage() {
                       key={m.id}
                       message={m}
                       agentDisplayName={agentName}
+                      contactDisplayName={thread.conversation.contact_name}
                       qualityFlagged={m.sent_by === 'ai' && m.flagged}
                     />
                   ))}
