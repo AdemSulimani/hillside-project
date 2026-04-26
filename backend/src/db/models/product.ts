@@ -238,6 +238,33 @@ export async function searchProducts(
   return rows;
 }
 
+/**
+ * Match products if any term hits name, brand, description, or tags (each term uses ILIKE).
+ * De-duplicates by product id. Use when a full-sentence search string would not appear
+ * contiguously in catalog fields (e.g. "A keni mass gainer?" vs "Mass Gainer Pro").
+ */
+export async function searchProductsByDisjunctiveTerms(
+  tenantId: string,
+  terms: string[],
+  limit = 10,
+): Promise<Product[]> {
+  const cleaned = [...new Set(terms.map((t) => t.trim()).filter((t) => t.length >= 2))].slice(0, 10);
+  if (cleaned.length === 0) return [];
+  const seen = new Set<string>();
+  const out: Product[] = [];
+  for (const term of cleaned) {
+    const rows = await searchProducts(tenantId, term, limit);
+    for (const p of rows) {
+      if (!seen.has(p.id)) {
+        seen.add(p.id);
+        out.push(p);
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+  return out;
+}
+
 export interface SimilarProduct extends Product {
   similarity: number;
 }

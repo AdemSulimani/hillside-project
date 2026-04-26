@@ -1,7 +1,12 @@
 import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
-import { searchProducts, searchProductsBySimilarity, type Product } from '../db/models/product';
+import {
+  searchProducts,
+  searchProductsByDisjunctiveTerms,
+  searchProductsBySimilarity,
+  type Product,
+} from '../db/models/product';
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
@@ -119,7 +124,7 @@ async function loadProductCatalog(tenantId: string): Promise<Product[]> {
   return products;
 }
 
-function extractKeywords(text: string): string[] {
+export function extractKeywords(text: string): string[] {
   const stopWords = new Set([
     'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they',
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
@@ -138,6 +143,21 @@ function extractKeywords(text: string): string[] {
     .replace(/[^a-z0-9\s]/g, '')
     .split(/\s+/)
     .filter((w) => w.length > 2 && !stopWords.has(w));
+}
+
+/** Lexical catalog lookup for inbound customer text (short phrase or full question). */
+export async function findProductsForInboundMessage(
+  tenantId: string,
+  inboundMessage: string,
+  limit = 5,
+): Promise<Product[]> {
+  const searchText = inboundMessage.trim();
+  if (!searchText) return [];
+  const direct = await searchProducts(tenantId, searchText, limit);
+  if (direct.length > 0) return direct;
+  const keywords = extractKeywords(searchText);
+  if (keywords.length === 0) return [];
+  return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
 }
 
 export function formatProductCatalog(products: Product[]): string {
@@ -654,8 +674,7 @@ export async function generateReply(
   if (products.length === 0) {
     const keywords = extractKeywords(searchText);
     if (keywords.length > 0) {
-      const searchQuery = keywords.slice(0, 5).join(' ');
-      products = await searchProducts(tenantId, searchQuery, 5);
+      products = await searchProductsByDisjunctiveTerms(tenantId, keywords, 5);
     }
   }
 

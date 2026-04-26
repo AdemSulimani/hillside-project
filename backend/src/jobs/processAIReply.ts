@@ -22,11 +22,11 @@ import {
   markOrderCancellationRequested,
   markOrderRefundRequested,
 } from '../db/models/order';
-import { findProductByNameCaseInsensitive, searchProducts } from '../db/models/product';
+import { findProductByNameCaseInsensitive } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   detectCancellationOrRefundIntent,
-  formatProductCatalog,
+  findProductsForInboundMessage,
   generateReply,
   isUsageQuestionUnanswered,
 } from '../services/aiService';
@@ -407,26 +407,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const relevantProducts = inboundText
-    ? await searchProducts(tenantId, inboundText, 5)
-    : [];
-  const productCatalogContext = formatProductCatalog(relevantProducts);
-
-  const { reply: replyText } = await generateReply(
+  const { reply: replyText, productCatalogContext } = await generateReply(
     conversationId,
     tenantId,
     inboundText,
     attachmentUrls,
-    productCatalogContext,
   );
 
   if (replyText.trim() === '[NO_REPLY]') {
     return;
   }
 
-  const usageCandidates = inboundText
-    ? await searchProducts(tenantId, inboundText, 5)
-    : [];
+  const usageCandidates = inboundText ? await findProductsForInboundMessage(tenantId, inboundText, 5) : [];
   const productWithUsage = usageCandidates.find((p) => typeof p.usage_description === 'string' && p.usage_description.trim() !== '');
   const usageDescription = productWithUsage?.usage_description?.trim() ?? null;
 
@@ -493,7 +485,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const containsNegativeAvailabilityPhrase = NEGATIVE_AVAILABILITY_PHRASES.some((phrase) =>
     finalReplyText.toLowerCase().includes(phrase),
   );
-  const hasNoMatchingProducts = relevantProducts.length === 0;
+  const hasNoMatchingProducts =
+    productCatalogContext.trim() === 'No matching products found in the catalog.';
   const skipEvaluationForHonestNegative =
     !usageEscalated && containsNegativeAvailabilityPhrase && hasNoMatchingProducts;
   const qualityEval = usageEscalated
