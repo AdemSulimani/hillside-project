@@ -140,7 +140,7 @@ function extractKeywords(text: string): string[] {
     .filter((w) => w.length > 2 && !stopWords.has(w));
 }
 
-function formatProductCatalog(products: Product[]): string {
+export function formatProductCatalog(products: Product[]): string {
   if (products.length === 0) return 'No matching products found in the catalog.';
 
   return products
@@ -622,6 +622,7 @@ export async function generateReply(
   tenantId: string,
   inboundMessage: string,
   attachmentUrlsRaw: unknown = [],
+  productCatalogContext?: string,
 ): Promise<{ reply: string; productCatalogContext: string }> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
@@ -630,7 +631,7 @@ export async function generateReply(
     loadTenant(tenantId),
     loadAIConfig(tenantId),
     findMessagesByConversation(conversationId, 10),
-    loadProductCatalog(tenantId),
+    productCatalogContext ? Promise.resolve([] as Product[]) : loadProductCatalog(tenantId),
   ]);
 
   if (!tenant) {
@@ -711,8 +712,11 @@ export async function generateReply(
     }
   }
 
-  const productCatalogContext = formatProductCatalog(products);
-  let systemPrompt = buildSystemPrompt(tenant.name, config, productCatalogContext, hasImages);
+  const resolvedProductCatalogContext =
+    typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
+      ? productCatalogContext
+      : formatProductCatalog(products);
+  let systemPrompt = buildSystemPrompt(tenant.name, config, resolvedProductCatalogContext, hasImages);
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
     systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
@@ -764,7 +768,7 @@ export async function generateReply(
     conversationEnding = false;
   }
   if (conversationEnding && !inboundMessage.includes('?')) {
-    return { reply: '[NO_REPLY]', productCatalogContext };
+    return { reply: '[NO_REPLY]', productCatalogContext: resolvedProductCatalogContext };
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
@@ -794,5 +798,5 @@ export async function generateReply(
     throw new Error('OpenAI returned an empty response');
   }
 
-  return { reply: reply.trim(), productCatalogContext };
+  return { reply: reply.trim(), productCatalogContext: resolvedProductCatalogContext };
 }
