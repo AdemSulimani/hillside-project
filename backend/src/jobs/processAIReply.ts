@@ -26,6 +26,7 @@ import { findProductByNameCaseInsensitive, searchProducts } from '../db/models/p
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   detectCancellationOrRefundIntent,
+  formatProductCatalog,
   generateReply,
   isUsageQuestionUnanswered,
 } from '../services/aiService';
@@ -78,6 +79,24 @@ function looksLikeUsageQuestion(message: string): boolean {
     'usage',
     'use it',
     'take it',
+    'si ta përdor',
+    'si e përdor',
+    'si duhet ta përdor',
+    'si ta marr',
+    'si e marr',
+    'dozimi',
+    'dozë',
+    'aplikim',
+    'apliko',
+    'udhëzime',
+    'paralajmërim',
+    'paralajmërime',
+    'efekte anësore',
+    'përdorim',
+    'përdore',
+    'merre',
+    'perdor',
+    'qysh me perdor',
   ].some((needle) => t.includes(needle));
 }
 
@@ -105,6 +124,19 @@ function messageSuggestsNewOrder(message: string): boolean {
 function logJsonStringOrNull(value: string | null): string {
   return value === null ? 'null' : JSON.stringify(value);
 }
+
+const NEGATIVE_AVAILABILITY_PHRASES = [
+  'nuk e kemi',
+  'nuk kemi',
+  'nuk gjendet',
+  'not available',
+  "don't have",
+  'do not have',
+  'not in stock',
+  'not in our catalog',
+  'nuk ndodhet',
+  'nuk është në',
+];
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
@@ -375,11 +407,17 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const { reply: replyText, productCatalogContext } = await generateReply(
+  const relevantProducts = inboundText
+    ? await searchProducts(tenantId, inboundText, 5)
+    : [];
+  const productCatalogContext = formatProductCatalog(relevantProducts);
+
+  const { reply: replyText } = await generateReply(
     conversationId,
     tenantId,
     inboundText,
     attachmentUrls,
+    productCatalogContext,
   );
 
   if (replyText.trim() === '[NO_REPLY]') {
@@ -452,9 +490,24 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   const qualityThreshold = getQualityThreshold();
+  const containsNegativeAvailabilityPhrase = NEGATIVE_AVAILABILITY_PHRASES.some((phrase) =>
+    finalReplyText.toLowerCase().includes(phrase),
+  );
+  const hasNoMatchingProducts = relevantProducts.length === 0;
+  const skipEvaluationForHonestNegative =
+    !usageEscalated && containsNegativeAvailabilityPhrase && hasNoMatchingProducts;
   const qualityEval = usageEscalated
     ? null
-    : await evaluateReply(inboundText, finalReplyText, tenantId, productCatalogContext);
+    : skipEvaluationForHonestNegative
+      ? {
+          quality_score: 0.95,
+          is_off_topic: false,
+          is_unclear: false,
+          is_irrelevant: false,
+          reason: null,
+          flagging_rule_triggered: null,
+        }
+      : await evaluateReply(inboundText, finalReplyText, tenantId, productCatalogContext);
   const qualityFailing =
     qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
   const qualityScore = qualityEval?.quality_score ?? null;
@@ -464,6 +517,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   if (usageEscalated) {
     console.info(
       `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: usage_escalated`,
+    );
+  } else if (skipEvaluationForHonestNegative) {
+    console.info(
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: honest_negative_no_matching_products`,
     );
   } else if (!qualityEval) {
     console.info(
