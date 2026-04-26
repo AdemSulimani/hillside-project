@@ -1,6 +1,6 @@
 import type { Message } from '../db/models/message';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
-import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
+import { openai, OPENAI_INTENT_MODEL } from './openaiClient';
 
 export interface IntentResult {
   intent_score: number;
@@ -8,6 +8,7 @@ export interface IntentResult {
   quantity: number | null;
   delivery_address: string | null;
   is_ready_to_order: boolean;
+  reasoning: string;
 }
 
 function formatTranscript(messages: Message[]): string {
@@ -53,12 +54,18 @@ function parseIntentJson(raw: string): IntentResult {
 
   const is_ready_to_order = parsed.is_ready_to_order === true;
 
+  const reasoning =
+    typeof parsed.reasoning === 'string' && parsed.reasoning.trim()
+      ? parsed.reasoning.trim()
+      : '';
+
   return {
     intent_score: Math.min(1, Math.max(0, intent_score)),
     product_name,
     quantity,
     delivery_address,
     is_ready_to_order,
+    reasoning,
   };
 }
 
@@ -77,28 +84,27 @@ export async function detect(
       quantity: null,
       delivery_address: null,
       is_ready_to_order: false,
+      reasoning: '',
     };
   }
 
   const config = await findAIConfigByTenant(tenantId);
-  const model = process.env.OPENAI_INTENT_MODEL?.trim() || 'gpt-4o-mini';
+  const model = process.env.OPENAI_INTENT_MODEL?.trim() || OPENAI_INTENT_MODEL;
 
-  const systemPrompt = `You analyze customer–business chat transcripts for purchase intent.
-Respond with a single JSON object only (no markdown), matching this shape exactly:
-{
-  "intent_score": number,
-  "product_name": string | null,
-  "quantity": number | null,
-  "delivery_address": string | null,
-  "is_ready_to_order": boolean
-}
+  const systemPrompt = `You are a precise purchase intent classifier for a sales business. Your job is to determine if a customer is actively trying to place an order RIGHT NOW — not just showing interest or asking questions.
+A high intent score (above 0.75) requires ALL of the following signals to be present:
 
-Rules:
-- intent_score is a number from 0 to 1 (1 = very strong purchase intent).
-- product_name: the specific product or item the customer wants, or null if unclear.
-- quantity: positive integer if stated or clearly implied, else null (default interpretation is 1 when ordering one item).
-- delivery_address: shipping or delivery location if stated, else null.
-- is_ready_to_order: true only if the customer has clearly committed to placing an order (e.g. confirmed they want to buy, sent address, or equivalent).`;
+The customer has explicitly said they want to buy, order, or purchase — not just asking about price or availability
+The customer has either named a specific product or confirmed a product from earlier in the conversation
+The customer has either provided a quantity or confirmed one when asked
+The customer has not asked any more clarifying questions in their latest message
+
+A medium score (0.4 to 0.74) means the customer is interested but has not committed — they are asking about price, availability, or details.
+A low score (below 0.4) means the customer is browsing, asking general questions, or the message is unrelated to purchasing.
+Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, delivery_address: string | null, is_ready_to_order: boolean, reasoning: string }
+The is_ready_to_order field must only be true if intent_score is above 0.85 AND all four signals above are present. Do not set is_ready_to_order to true based on intent_score alone.
+
+Respond with a single JSON object only (no markdown), matching that shape exactly.`;
 
   const completion = await openai.chat.completions.create({
     model,

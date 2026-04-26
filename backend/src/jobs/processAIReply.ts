@@ -102,6 +102,10 @@ function messageSuggestsNewOrder(message: string): boolean {
   ].some((needle) => t.includes(needle));
 }
 
+function logJsonStringOrNull(value: string | null): string {
+  return value === null ? 'null' : JSON.stringify(value);
+}
+
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
 
@@ -234,10 +238,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         inboundText,
         recentMessages,
       );
-      if (
-        cancellationRefundIntent.is_cancellation ||
-        cancellationRefundIntent.is_refund
-      ) {
+      console.info(
+        `[CANCEL/REFUND] tenantId: ${tenantId} conversationId: ${conversationId} is_cancel: ${cancellationRefundIntent.is_cancellation} is_refund: ${cancellationRefundIntent.is_refund} confidence: ${cancellationRefundIntent.confidence} reasoning: ${logJsonStringOrNull(cancellationRefundIntent.reason)}`,
+      );
+      const hasCancelOrRefundIntent =
+        cancellationRefundIntent.is_cancellation || cancellationRefundIntent.is_refund;
+      const confidentCancelOrRefund = cancellationRefundIntent.confidence > 0.8;
+
+      if (hasCancelOrRefundIntent && confidentCancelOrRefund) {
         const candidateOrder = await findLatestConfirmedOrProcessingOrderForContact(
           tenantId,
           conversation.contact_id,
@@ -367,7 +375,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const replyText = await generateReply(conversationId, tenantId, inboundText, attachmentUrls);
+  const { reply: replyText, productCatalogContext } = await generateReply(
+    conversationId,
+    tenantId,
+    inboundText,
+    attachmentUrls,
+  );
 
   if (replyText.trim() === '[NO_REPLY]') {
     return;
@@ -439,12 +452,32 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   const qualityThreshold = getQualityThreshold();
-  const qualityEval = usageEscalated ? null : await evaluateReply(inboundText, finalReplyText, tenantId);
+  const qualityEval = usageEscalated
+    ? null
+    : await evaluateReply(inboundText, finalReplyText, tenantId, productCatalogContext);
   const qualityFailing =
     qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
   const qualityScore = qualityEval?.quality_score ?? null;
   const flagReason =
     qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
+
+  if (usageEscalated) {
+    console.info(
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: usage_escalated`,
+    );
+  } else if (!qualityEval) {
+    console.info(
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} score: n/a flagged: n/a rule: n/a reasoning: "evaluation_unavailable"`,
+    );
+  } else {
+    const ruleDisplay =
+      qualityEval.flagging_rule_triggered === null || qualityEval.flagging_rule_triggered === ''
+        ? 'null'
+        : JSON.stringify(qualityEval.flagging_rule_triggered);
+    console.info(
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} score: ${qualityEval.quality_score} flagged: ${qualityFailing} rule: ${ruleDisplay} reasoning: ${logJsonStringOrNull(qualityEval.reason)}`,
+    );
+  }
 
   const contact = await findContactById(conversation.contact_id);
   let sendResult:
@@ -562,8 +595,23 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     const messagesForIntent = await findMessagesByConversation(conversationId, 40);
     const intent = await detect(messagesForIntent, tenantId);
+    const qtyDisplay = intent.quantity === null ? 'null' : String(intent.quantity);
+    console.info(
+      `[INTENT DETECTION] tenantId: ${tenantId} conversationId: ${conversationId} score: ${intent.intent_score} is_ready: ${intent.is_ready_to_order} product_name: ${logJsonStringOrNull(intent.product_name)} quantity: ${qtyDisplay} delivery_address: ${logJsonStringOrNull(intent.delivery_address)} reasoning: ${JSON.stringify(intent.reasoning)}`,
+    );
 
-    if (!intent.is_ready_to_order || intent.intent_score <= 0.75) {
+    const parsedIntentThreshold = parseFloat(process.env.INTENT_THRESHOLD ?? '0.85');
+    const intentOrderMinScore =
+      Number.isFinite(parsedIntentThreshold) && parsedIntentThreshold > 0 && parsedIntentThreshold < 1
+        ? parsedIntentThreshold
+        : 0.85;
+
+    const passesDraftOrderValidation =
+      intent.is_ready_to_order === true &&
+      intent.intent_score > intentOrderMinScore &&
+      intent.product_name != null;
+
+    if (!passesDraftOrderValidation) {
       return;
     }
 

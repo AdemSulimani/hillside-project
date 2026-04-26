@@ -176,7 +176,7 @@ function formatQAPairs(pairs: { question: string; answer: string }[]): string {
 function buildSystemPrompt(
   businessName: string,
   config: typeof DEFAULT_AI_CONFIG,
-  products: Product[],
+  productCatalogContext: string,
   hasImages: boolean,
 ): string {
   const lines: string[] = [
@@ -203,7 +203,7 @@ function buildSystemPrompt(
     );
   }
 
-  lines.push('', 'Product catalog:', formatProductCatalog(products));
+  lines.push('', 'Product catalog:', productCatalogContext);
 
   const qa = formatQAPairs(config.qa_pairs);
   if (qa) lines.push(qa);
@@ -242,7 +242,7 @@ export async function isUsageQuestionUnanswered(
   productUsageDescription: string,
 ): Promise<boolean> {
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: OPENAI_CHAT_MODEL,
     messages: [
       {
         role: 'system',
@@ -273,7 +273,12 @@ export async function isUsageQuestionUnanswered(
 export async function detectCancellationOrRefundIntent(
   inboundMessage: string,
   conversationHistory: Message[],
-): Promise<{ is_cancellation: boolean; is_refund: boolean; reason: string | null }> {
+): Promise<{
+  is_cancellation: boolean;
+  is_refund: boolean;
+  reason: string | null;
+  confidence: number;
+}> {
   const historySlice = conversationHistory.slice(-8);
   const historyText = historySlice
     .map((msg) => {
@@ -283,12 +288,30 @@ export async function detectCancellationOrRefundIntent(
     .join('\n');
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: OPENAI_CHAT_MODEL,
     messages: [
       {
         role: 'system',
-        content:
-          'You are a strict intent classifier. Detect if the latest customer message requests order cancellation and/or refund in any language, including Albanian and slang/abbreviations. Extract the explicit reason if present. Return ONLY valid JSON with keys: is_cancellation (boolean), is_refund (boolean), reason (string or null). Do not infer a reason unless the customer provided one.',
+        content: `You are a precise intent classifier. Determine if a customer is requesting to cancel or refund a SPECIFIC PRODUCT ORDER they have already placed with this business.
+Only return is_cancellation: true if:
+
+The customer explicitly says they want to cancel an order they already placed
+The context makes clear this is about a completed purchase, not a hypothetical or future one
+They are not talking about cancelling a subscription, newsletter, or other non-product service
+
+Only return is_refund: true if:
+
+The customer explicitly says they want a refund for something they already purchased and paid for
+The context makes clear money was exchanged for a product
+
+Return is_cancellation: false and is_refund: false for:
+
+Questions about the return or cancellation policy
+Hypothetical questions like 'what if I want to cancel?'
+Cancelling something unrelated to a product order
+General complaints without a refund request
+
+Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | null, confidence: number }`,
       },
       {
         role: 'user',
@@ -297,12 +320,12 @@ export async function detectCancellationOrRefundIntent(
     ],
     response_format: { type: 'json_object' },
     temperature: 0,
-    max_tokens: 120,
+    max_tokens: 200,
   });
 
   const raw = completion.choices[0]?.message?.content;
   if (!raw?.trim()) {
-    return { is_cancellation: false, is_refund: false, reason: null };
+    return { is_cancellation: false, is_refund: false, reason: null, confidence: 0 };
   }
 
   try {
@@ -310,15 +333,25 @@ export async function detectCancellationOrRefundIntent(
       is_cancellation?: boolean;
       is_refund?: boolean;
       reason?: string | null;
+      confidence?: number;
     };
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
+
+    let confidence = 0;
+    const confRaw = parsed.confidence;
+    if (typeof confRaw === 'number' && Number.isFinite(confRaw)) {
+      confidence = confRaw > 1 ? confRaw / 100 : confRaw;
+    }
+    confidence = Math.min(1, Math.max(0, confidence));
+
     return {
       is_cancellation: parsed.is_cancellation === true,
       is_refund: parsed.is_refund === true,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
+      confidence,
     };
   } catch {
-    return { is_cancellation: false, is_refund: false, reason: null };
+    return { is_cancellation: false, is_refund: false, reason: null, confidence: 0 };
   }
 }
 
@@ -563,7 +596,7 @@ async function isConversationEnding(
   const userText = `Last few messages of conversation:\n${formattedLastFew || '(none)'}\n\nLatest customer message: ${messageContent}`;
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: OPENAI_CHAT_MODEL,
     messages: [
       { role: 'system', content: CONVERSATION_ENDING_ANALYST_SYSTEM },
       { role: 'user', content: userText },
@@ -589,7 +622,7 @@ export async function generateReply(
   tenantId: string,
   inboundMessage: string,
   attachmentUrlsRaw: unknown = [],
-): Promise<string> {
+): Promise<{ reply: string; productCatalogContext: string }> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
@@ -678,7 +711,8 @@ export async function generateReply(
     }
   }
 
-  let systemPrompt = buildSystemPrompt(tenant.name, config, products, hasImages);
+  const productCatalogContext = formatProductCatalog(products);
+  let systemPrompt = buildSystemPrompt(tenant.name, config, productCatalogContext, hasImages);
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
     systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
@@ -730,7 +764,7 @@ export async function generateReply(
     conversationEnding = false;
   }
   if (conversationEnding && !inboundMessage.includes('?')) {
-    return '[NO_REPLY]';
+    return { reply: '[NO_REPLY]', productCatalogContext };
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
@@ -760,5 +794,5 @@ export async function generateReply(
     throw new Error('OpenAI returned an empty response');
   }
 
-  return reply.trim();
+  return { reply: reply.trim(), productCatalogContext };
 }
