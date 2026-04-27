@@ -145,6 +145,323 @@ export function extractKeywords(text: string): string[] {
     .filter((w) => w.length > 2 && !stopWords.has(w));
 }
 
+const USAGE_QUESTION_KEYWORDS = [
+  'how to use',
+  'how do i use',
+  'how should i use',
+  'how to take',
+  'how do i take',
+  'dosage',
+  'dose',
+  'application',
+  'apply',
+  'instructions',
+  'warning',
+  'warnings',
+  'side effects',
+  'usage',
+  'use it',
+  'take it',
+  'si ta përdor',
+  'si e përdor',
+  'si duhet ta përdor',
+  'si ta marr',
+  'si e marr',
+  'dozimi',
+  'dozë',
+  'aplikim',
+  'apliko',
+  'udhëzime',
+  'paralajmërim',
+  'paralajmërime',
+  'efekte anësore',
+  'përdorim',
+  'përdore',
+  'merre',
+  'perdor',
+  'qysh me perdor',
+];
+
+const NEW_ORDER_SIGNAL_KEYWORDS = [
+  'new order',
+  'another order',
+  'one more',
+  'again',
+  'also order',
+  'order again',
+  'porosi tjeter',
+  'porosi tjetër',
+  'edhe nje',
+  'edhe një',
+  'nje tjeter',
+  'një tjetër',
+  'dua edhe',
+  'shto edhe',
+];
+
+const NEGATIVE_AVAILABILITY_KEYWORDS = [
+  'nuk e kemi',
+  'nuk kemi',
+  'nuk gjendet',
+  'not available',
+  "don't have",
+  'do not have',
+  'not in stock',
+  'not in our catalog',
+  'nuk ndodhet',
+  'nuk është në',
+];
+
+const ORDER_CONFIRMATION_INBOUND_FALLBACK_KEYWORDS = [
+  'porosi',
+  'porosine',
+  'porosia',
+  'dua',
+  'me bej',
+  'beje porosine',
+  'do ta marr',
+  'adresa',
+  'adrese',
+  'derges',
+  'delivery',
+  'address',
+  'order',
+  'confirm',
+];
+
+const ORDER_CONFIRMATION_REPLY_FALLBACK_KEYWORDS = [
+  'porosia u konfirmua',
+  'porosia u krijua',
+  'porosia juaj',
+  'porosine tuaj',
+  'faleminderit porosia',
+  'order confirmed',
+  'order created',
+  'your order is confirmed',
+  'review in orders',
+];
+
+function includesAnyKeyword(message: string, keywords: string[]): boolean {
+  const t = message.trim().toLowerCase();
+  if (!t) return false;
+  return keywords.some((needle) => t.includes(needle));
+}
+
+function normalizeForIntentMatch(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export async function classifyUsageQuestionIntent(message: string): Promise<boolean> {
+  const inbound = message.trim();
+  if (!inbound) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict intent classifier. Determine whether the customer message asks about product usage, dosage, instructions, application, side effects, or warnings in any language/slang/typo. Return only JSON: {"is_usage_question": true} or {"is_usage_question": false}.',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_usage_question?: boolean };
+      if (parsed.is_usage_question === true) return true;
+      if (parsed.is_usage_question === false) return false;
+    }
+  } catch {
+    // Fall through to keyword fallback when classifier is unavailable.
+  }
+
+  return includesAnyKeyword(inbound, USAGE_QUESTION_KEYWORDS);
+}
+
+export async function classifyNewOrderSignal(message: string): Promise<boolean> {
+  const inbound = message.trim();
+  if (!inbound) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict intent classifier. Determine whether the message indicates the customer wants to place an additional/new order (e.g., another one, order again) rather than just discussing an existing order. Return only JSON: {"is_new_order_signal": true} or {"is_new_order_signal": false}.',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_new_order_signal?: boolean };
+      if (parsed.is_new_order_signal === true) return true;
+      if (parsed.is_new_order_signal === false) return false;
+    }
+  } catch {
+    // Fall through to keyword fallback when classifier is unavailable.
+  }
+
+  return includesAnyKeyword(inbound, NEW_ORDER_SIGNAL_KEYWORDS);
+}
+
+export async function classifyNegativeAvailabilityReply(message: string): Promise<boolean> {
+  const inbound = message.trim();
+  if (!inbound) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict classifier. Detect if the assistant reply says the requested product is unavailable/out of stock/not carried (in any language). Return only JSON: {"is_negative_availability": true} or {"is_negative_availability": false}.',
+        },
+        {
+          role: 'user',
+          content: `Assistant reply:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_negative_availability?: boolean };
+      if (parsed.is_negative_availability === true) return true;
+      if (parsed.is_negative_availability === false) return false;
+    }
+  } catch {
+    // Fall through to keyword fallback when classifier is unavailable.
+  }
+
+  return includesAnyKeyword(inbound, NEGATIVE_AVAILABILITY_KEYWORDS);
+}
+
+export async function classifyOrderConfirmationReplyIntent(
+  inboundMessage: string,
+  replyMessage: string,
+): Promise<boolean> {
+  const inbound = inboundMessage.trim();
+  const reply = replyMessage.trim();
+  if (!reply) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict classifier. Determine whether the assistant reply is a valid order confirmation that directly acknowledges the customer order request/details (any language). Return only JSON: {"is_order_confirmation_reply": true} or {"is_order_confirmation_reply": false}. Return true only when the reply clearly confirms/acknowledges an order creation/confirmation; polite fillers alone are false.\n\nClassification guidance:\n- True: clearly confirms order creation/confirmation, often restating key order details (product, address, quantity, or next step in orders).\n- False: generic support response, product info, upsell, greeting, or unclear message with no explicit confirmation.\n\nExamples:\n1) Customer: "Po, guralisht! Për të bërë porosinë, më jep adresën e plotë të dërgesës."\nAssistant: "Faleminderit! Porosia për Mass Gainer Pro u konfirmua. Do të dërgohet në adresën e dhënë."\n=> true\n\n2) Customer: "A mundem me bo 1 porosi per kete produkt"\nAssistant: "Po, porosia u krijua me sukses. Mund ta shikoni te Orders."\n=> true\n\n3) Customer: "Sa kushton ky?"\nAssistant: "Ky produkt kushton 34.50$."\n=> false\n\n4) Customer: "A e keni ne stok?"\nAssistant: "Po, e kemi në stok. Dëshiron ta porosisësh?"\n=> false\n\n5) Customer: "Dua ta porosis."\nAssistant: "Faleminderit për interesimin! Si mund t’ju ndihmoj më tej?"\n=> false',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound || '(empty)'}\n\nAssistant reply:\n${reply}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 96,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_order_confirmation_reply?: boolean };
+      if (parsed.is_order_confirmation_reply === true) return true;
+      if (parsed.is_order_confirmation_reply === false) return false;
+    }
+  } catch {
+    // Fall through to lexical fallback when classifier is unavailable.
+  }
+
+  const inboundNormalized = normalizeForIntentMatch(inbound);
+  const replyNormalized = normalizeForIntentMatch(reply);
+  const inboundLooksOrderRelated = includesAnyKeyword(
+    inboundNormalized,
+    ORDER_CONFIRMATION_INBOUND_FALLBACK_KEYWORDS,
+  );
+  const replyLooksLikeConfirmation = includesAnyKeyword(
+    replyNormalized,
+    ORDER_CONFIRMATION_REPLY_FALLBACK_KEYWORDS,
+  );
+
+  return inboundLooksOrderRelated && replyLooksLikeConfirmation;
+}
+
+async function customerAskedAboutPrice(message: string): Promise<boolean> {
+  const inbound = message.trim();
+  if (!inbound) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict intent classifier. Detect whether the customer message explicitly asks for product price/cost/payment amount (in any language, slang, shorthand, or misspelling). Return only JSON: {"is_price_question": true} or {"is_price_question": false}. Mark true only when price/cost is explicitly requested.',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_price_question?: boolean };
+      if (parsed.is_price_question === true) return true;
+      if (parsed.is_price_question === false) return false;
+    }
+  } catch {
+    // Fall through to lightweight lexical fallback if classifier is unavailable.
+  }
+
+  const t = inbound.toLowerCase();
+  return [
+    'price',
+    'cost',
+    'how much',
+    'sa kushton',
+    'cmim',
+    'qmim',
+    '$',
+    '€',
+  ].some((needle) => t.includes(needle));
+}
+
 /** Lexical catalog lookup for inbound customer text (short phrase or full question). */
 export async function findProductsForInboundMessage(
   tenantId: string,
@@ -160,7 +477,8 @@ export async function findProductsForInboundMessage(
   return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
 }
 
-export function formatProductCatalog(products: Product[]): string {
+export function formatProductCatalog(products: Product[], options?: { includePrice?: boolean }): string {
+  const includePrice = options?.includePrice ?? true;
   if (products.length === 0) return 'No matching products found in the catalog.';
 
   return products
@@ -168,8 +486,10 @@ export function formatProductCatalog(products: Product[]): string {
       const typeText = p.tags.length > 0 ? p.tags.join(', ') : 'N/A';
       const parts = [
         `- Brand: ${getProductBrand(p) ?? 'Unknown'}, Product: ${p.name}, Type: ${typeText}`,
-        `  Price: $${Number(p.price).toFixed(2)}`,
       ];
+      if (includePrice) {
+        parts.push(`  Price: $${Number(p.price).toFixed(2)}`);
+      }
       if (p.description) parts.push(`  ${p.description}`);
       if (p.usage_description) {
         parts.push('  Usage description:');
@@ -198,6 +518,7 @@ function buildSystemPrompt(
   config: typeof DEFAULT_AI_CONFIG,
   productCatalogContext: string,
   hasImages: boolean,
+  customerAskedPrice: boolean,
 ): string {
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
@@ -237,6 +558,9 @@ function buildSystemPrompt(
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
     '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
     '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
+    customerAskedPrice
+      ? '- The customer asked about price in this message. You may include pricing only if it matches the catalog exactly.'
+      : '- Do not mention any product price unless the customer explicitly asks for the price/cost in their message.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
   );
 
@@ -247,7 +571,7 @@ function buildSystemPrompt(
       'Step 1 - Identify the product in the image as specifically as possible. Extract: the brand name, product name, flavor or variant, size or weight, and any other distinguishing details visible on the packaging.',
       'Step 2 - Search the provided product catalog for an exact or near-exact match. A match is only valid if the brand name AND product type match. A different brand of the same product type is NOT a match.',
       'Step 3 - Apply one of these three responses only:',
-      'Response A - Exact match found: You have that exact product or a version of it from the same brand. Confirm availability with the price and details from your catalog.',
+      'Response A - Exact match found: You have that exact product or a version of it from the same brand. Confirm availability with details from your catalog.',
       'Response B - Similar product, different brand: You have a similar product but a different brand. Be honest - say you do not carry that exact brand but offer your alternative. Example: "We do not carry [Brand X] specifically, but we do have [Your Brand] which is a similar mass gainer - would you like details on that?"',
       'Response C - No match at all: You do not have anything similar. Tell the customer honestly and ask if they are looking for something specific you might be able to help with.',
       'Never confirm you have a product just because the product category matches. Brand accuracy matters.',
@@ -653,6 +977,7 @@ export async function generateReply(
     findMessagesByConversation(conversationId, 10),
     productCatalogContext ? Promise.resolve([] as Product[]) : loadProductCatalog(tenantId),
   ]);
+  const customerAskedPrice = await customerAskedAboutPrice(inboundMessage);
 
   if (!tenant) {
     throw new Error(`Tenant not found: ${tenantId}`);
@@ -734,8 +1059,14 @@ export async function generateReply(
   const resolvedProductCatalogContext =
     typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
       ? productCatalogContext
-      : formatProductCatalog(products);
-  let systemPrompt = buildSystemPrompt(tenant.name, config, resolvedProductCatalogContext, hasImages);
+      : formatProductCatalog(products, { includePrice: customerAskedPrice });
+  let systemPrompt = buildSystemPrompt(
+    tenant.name,
+    config,
+    resolvedProductCatalogContext,
+    hasImages,
+    customerAskedPrice,
+  );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
     systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
