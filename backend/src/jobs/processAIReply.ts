@@ -25,6 +25,10 @@ import {
 import { findProductByNameCaseInsensitive } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
+  classifyNegativeAvailabilityReply,
+  classifyNewOrderSignal,
+  classifyOrderConfirmationReplyIntent,
+  classifyUsageQuestionIntent,
   detectCancellationOrRefundIntent,
   findProductsForInboundMessage,
   generateReply,
@@ -59,84 +63,45 @@ function normalizeVerbatimComparison(value: string | null | undefined): string {
     .trim();
 }
 
-function looksLikeUsageQuestion(message: string): boolean {
-  const t = normalizeLooseText(message);
-  if (!t) return false;
-  return [
-    'how to use',
-    'how do i use',
-    'how should i use',
-    'how to take',
-    'how do i take',
-    'dosage',
-    'dose',
-    'application',
-    'apply',
-    'instructions',
-    'warning',
-    'warnings',
-    'side effects',
-    'usage',
-    'use it',
-    'take it',
-    'si ta përdor',
-    'si e përdor',
-    'si duhet ta përdor',
-    'si ta marr',
-    'si e marr',
-    'dozimi',
-    'dozë',
-    'aplikim',
-    'apliko',
-    'udhëzime',
-    'paralajmërim',
-    'paralajmërime',
-    'efekte anësore',
-    'përdorim',
-    'përdore',
-    'merre',
-    'perdor',
-    'qysh me perdor',
-  ].some((needle) => t.includes(needle));
-}
-
-function messageSuggestsNewOrder(message: string): boolean {
-  const t = normalizeLooseText(message);
-  if (!t) return false;
-  return [
-    'new order',
-    'another order',
-    'one more',
-    'again',
-    'also order',
-    'order again',
-    'porosi tjeter',
-    'porosi tjetër',
-    'edhe nje',
-    'edhe një',
-    'nje tjeter',
-    'një tjetër',
-    'dua edhe',
-    'shto edhe',
-  ].some((needle) => t.includes(needle));
-}
-
 function logJsonStringOrNull(value: string | null): string {
   return value === null ? 'null' : JSON.stringify(value);
 }
 
-const NEGATIVE_AVAILABILITY_PHRASES = [
-  'nuk e kemi',
-  'nuk kemi',
-  'nuk gjendet',
-  'not available',
-  "don't have",
-  'do not have',
-  'not in stock',
-  'not in our catalog',
-  'nuk ndodhet',
-  'nuk është në',
-];
+function normalizeEscalationMessage(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function isUsageEscalationHoldingMessage(value: string): boolean {
+  const normalized = normalizeEscalationMessage(value);
+  const exactCandidates = [
+    'pershendetje, se shpejti do t\'ju kontaktoje nje specialist lidhur me kete ceshtje.',
+    'pershendetje, se shpejti do tju kontaktoje nje specialist lidhur me kete ceshtje.',
+    "that's a great question — let me connect you with our team who can give you the most accurate answer on that.",
+    "that's a great question - let me connect you with our team who can give you the most accurate answer on that.",
+  ];
+  if (exactCandidates.some((candidate) => normalized === normalizeEscalationMessage(candidate))) {
+    return true;
+  }
+
+  const looksLikeAlbanianEscalation =
+    normalized.includes('specialist') &&
+    (normalized.includes('kontaktoje') || normalized.includes('kontaktoj')) &&
+    (normalized.includes('se shpejti') || normalized.includes('shpejt')) &&
+    normalized.includes('ceshtje');
+
+  const looksLikeEnglishEscalation =
+    normalized.includes('connect you with our team') ||
+    (normalized.includes('team') &&
+      normalized.includes('accurate answer') &&
+      normalized.includes('great question'));
+
+  return looksLikeAlbanianEscalation || looksLikeEnglishEscalation;
+}
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
@@ -425,15 +390,21 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const usedVerbatimUsageDescription = usageDescription
     ? normalizeVerbatimComparison(replyText) === normalizeVerbatimComparison(usageDescription)
     : false;
-  const usageRelated = Boolean(usageDescription) && (looksLikeUsageQuestion(inboundText) || usedVerbatimUsageDescription);
+  const usageQuestionIntent = inboundText
+    ? await classifyUsageQuestionIntent(inboundText)
+    : false;
+  const usageRelated =
+    Boolean(usageDescription) && (usageQuestionIntent || usedVerbatimUsageDescription);
 
-  const USAGE_HOLDING_MESSAGE = "That's a great question — let me connect you with our team who can give you the most accurate answer on that.";
+  const USAGE_HOLDING_MESSAGE = "Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.";
   let finalReplyText = replyText;
   let usageEscalated = false;
+  let usageQuestionUnanswered: boolean | null = null;
 
   if (usageRelated && usageDescription && !usedVerbatimUsageDescription) {
     try {
       const unanswered = await isUsageQuestionUnanswered(inboundText, usageDescription);
+      usageQuestionUnanswered = unanswered;
       if (unanswered) {
         const client = await pool.connect();
         let alert: AIAlert | undefined;
@@ -481,10 +452,112 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
+  if (!usageEscalated && isUsageEscalationHoldingMessage(finalReplyText)) {
+    if (usageDescription && usageQuestionIntent) {
+      if (usageQuestionUnanswered === null) {
+        try {
+          usageQuestionUnanswered = await isUsageQuestionUnanswered(inboundText, usageDescription);
+        } catch (err) {
+          console.warn('[ai.reply] usage unanswered classifier failed in fallback guard', {
+            conversationId,
+            tenantId,
+            err,
+          });
+          usageQuestionUnanswered = false;
+        }
+      }
+
+      if (usageQuestionUnanswered === false) {
+        console.info('[ai.reply] Skipping usage escalation alert because usage description covers the question', {
+          conversationId,
+          tenantId,
+        });
+      } else {
+        const client = await pool.connect();
+        let alert: AIAlert | undefined;
+        try {
+          await client.query('BEGIN');
+          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+          alert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'usage_question_unanswered',
+            },
+            client,
+          );
+          await client.query('COMMIT');
+          usageEscalated = true;
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('[ai.reply] Usage escalation fallback transaction failed', {
+            conversationId,
+            tenantId,
+            err,
+          });
+        } finally {
+          client.release();
+        }
+
+        if (alert) {
+          const contactForAlert = await findContactById(conversation.contact_id);
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForAlert?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+          socketService.emitConversationUpdated(tenantId, conversationId);
+        }
+      }
+    } else {
+    const client = await pool.connect();
+    let alert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationHumanReplied(conversationId, tenantId, false, client);
+      alert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: lastInbound?.id ?? null,
+          reason: 'usage_question_unanswered',
+        },
+        client,
+      );
+      await client.query('COMMIT');
+      usageEscalated = true;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[ai.reply] Usage escalation fallback transaction failed', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    } finally {
+      client.release();
+    }
+
+    if (alert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...alert,
+        message_content: inboundText || null,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    }
+    }
+  }
+
   const qualityThreshold = getQualityThreshold();
-  const containsNegativeAvailabilityPhrase = NEGATIVE_AVAILABILITY_PHRASES.some((phrase) =>
-    finalReplyText.toLowerCase().includes(phrase),
-  );
+  const containsNegativeAvailabilityPhrase = await classifyNegativeAvailabilityReply(finalReplyText);
   const hasNoMatchingProducts =
     productCatalogContext.trim() === 'No matching products found in the catalog.';
   const skipEvaluationForHonestNegative =
@@ -501,11 +574,24 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           flagging_rule_triggered: null,
         }
       : await evaluateReply(inboundText, finalReplyText, tenantId, productCatalogContext);
-  const qualityFailing =
+  let qualityFailing =
     qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
   const qualityScore = qualityEval?.quality_score ?? null;
-  const flagReason =
+  let flagReason =
     qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
+  const suppressFalseIrrelevantOnOrderConfirmation =
+    qualityEval !== null &&
+    qualityFailing &&
+    flagReason === 'irrelevant' &&
+    (await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText));
+  if (suppressFalseIrrelevantOnOrderConfirmation) {
+    qualityFailing = false;
+    flagReason = null;
+    console.info(
+      '[QUALITY EVAL] Suppressing false irrelevant flag for likely order confirmation reply',
+      { tenantId, conversationId },
+    );
+  }
 
   if (usageEscalated) {
     console.info(
@@ -688,7 +774,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       const incomingProduct = normalizeLooseText(productName);
       const existingProduct = normalizeLooseText(latestActiveOrder.product_name);
       const productChanged = incomingProduct.length > 0 && incomingProduct !== existingProduct;
-      const explicitNewOrder = messageSuggestsNewOrder(inboundText);
+      const explicitNewOrder = await classifyNewOrderSignal(inboundText);
 
       if (!productChanged && !explicitNewOrder) {
         console.info('[ai.reply] Skipping duplicate order creation', {
