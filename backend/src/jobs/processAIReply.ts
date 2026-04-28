@@ -579,16 +579,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const qualityScore = qualityEval?.quality_score ?? null;
   let flagReason =
     qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
-  const suppressFalseIrrelevantOnOrderConfirmation =
+  const suppressibleOrderConfirmationFlags = new Set(['irrelevant', 'off_topic', 'low_confidence']);
+  const suppressFalseQualityFlagOnOrderConfirmation =
     qualityEval !== null &&
     qualityFailing &&
-    flagReason === 'irrelevant' &&
+    flagReason !== null &&
+    suppressibleOrderConfirmationFlags.has(flagReason) &&
     (await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText));
-  if (suppressFalseIrrelevantOnOrderConfirmation) {
+  if (suppressFalseQualityFlagOnOrderConfirmation) {
     qualityFailing = false;
     flagReason = null;
     console.info(
-      '[QUALITY EVAL] Suppressing false irrelevant flag for likely order confirmation reply',
+      '[QUALITY EVAL] Suppressing false quality flag for likely order confirmation reply',
       { tenantId, conversationId },
     );
   }

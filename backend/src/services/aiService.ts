@@ -499,7 +499,9 @@ export function formatProductCatalog(products: Product[], options?: { includePri
       }
       if (p.category) parts.push(`  Category: ${p.category}`);
       if (p.tags.length > 0) parts.push(`  Tags: ${p.tags.join(', ')}`);
-      if (p.stock_quantity !== null) parts.push(`  In stock: ${p.stock_quantity}`);
+      if (p.stock_quantity !== null) {
+        parts.push(`  Internal stock (agent-only, do not reveal unless needed): ${p.stock_quantity}`);
+      }
       return parts.join('\n');
     })
     .join('\n');
@@ -557,13 +559,21 @@ function buildSystemPrompt(
     '- Keep replies concise and conversational — this is a chat, not an email.',
     '- If the customer asks about a product you don\'t have, say so honestly.',
     '- Never fabricate product details, prices, or availability.',
+    '- Strict rule: never mention product price or stock availability unless the customer explicitly asks for price/stock in their current message.',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
     '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
     '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
     customerAskedPrice
       ? '- The customer asked about price in this message. You may include pricing only if it matches the catalog exactly.'
       : '- Do not mention any product price unless the customer explicitly asks for the price/cost in their message.',
+    '- Never volunteer stock numbers in normal replies.',
+    '- Treat stock_quantity as internal information. Mention an exact stock number only when the customer explicitly asks for stock or requests a quantity higher than available.',
+    '- If the customer requests more units than available, clearly state the maximum currently available quantity for that product and offer that amount.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
+    '- Do not automatically end every reply with a generic follow-up question.',
+    '- Ask a follow-up question only when it is useful to move the conversation forward (for example: confirming order intent, collecting missing order details, clarifying customer needs, or offering a relevant next step).',
+    '- Avoid robotic closings like "anything else I can help with?" unless the conversation context clearly requires it.',
+    '- If the customer only asked for basic info (e.g., price/availability) and there is no buying signal yet, end naturally without forcing a question.',
   );
 
   if (hasImages) {
