@@ -348,6 +348,8 @@ export default function InboxPage() {
   const hasCancellationOrRefundAlert =
     openQualityAlert?.reason === 'cancellation_request' ||
     openQualityAlert?.reason === 'refund_request';
+  const hasPostPurchaseSupportAlert =
+    openQualityAlert?.reason === 'post_purchase_support_request';
   const cancellationRefundType: 'cancellation' | 'refund' | null =
     openQualityAlert?.reason === 'refund_request'
       ? 'refund'
@@ -592,10 +594,20 @@ export default function InboxPage() {
                 <CancellationRefundConversationBanner requestType={cancellationRefundType} />
               ) : null}
 
+              {hasPostPurchaseSupportAlert ? (
+                <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
+                  <p className="text-sm font-medium text-foreground">
+                    Customer has a delivery/product issue. AI has been paused and the customer received
+                    a hold message. Please continue manually.
+                  </p>
+                </div>
+              ) : null}
+
               {openQualityAlert &&
               openQualityAlert.reason !== 'usage_question_unanswered' &&
               openQualityAlert.reason !== 'cancellation_request' &&
-              openQualityAlert.reason !== 'refund_request' ? (
+              openQualityAlert.reason !== 'refund_request' &&
+              openQualityAlert.reason !== 'post_purchase_support_request' ? (
                 <AiQualityConversationBanner
                   openAlert={openQualityAlert}
                   resolvePending={resolveQualityAlertMutation.isPending}

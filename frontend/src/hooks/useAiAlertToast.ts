@@ -63,6 +63,19 @@ const warningIcon = createElement(AlertTriangle, {
   'aria-hidden': true,
 });
 
+function getAlertToastDescription(reason: string): string {
+  if (reason === 'post_purchase_support_request') {
+    return 'Customer has a delivery or product issue. Please review and reply manually.';
+  }
+  if (reason === 'cancellation_request' || reason === 'refund_request') {
+    return 'Customer requested an order action. Open Orders > Action Required.';
+  }
+  if (reason === 'usage_question_unanswered') {
+    return 'AI could not answer a product-usage question. Please step in manually.';
+  }
+  return 'Review the thread and decide whether to take over or resume the chatbot.';
+}
+
 /**
  * App-wide listener for AI quality alerts: persistent toast + React Query invalidation.
  */
@@ -90,7 +103,7 @@ export function useAiAlertToast(): void {
         dismissible: false,
         closeButton: true,
         icon: warningIcon,
-        description: 'Review the thread and decide whether to take over or resume the chatbot.',
+        description: getAlertToastDescription(payload.reason),
         action: {
           label: 'View Conversation',
           onClick: () => {

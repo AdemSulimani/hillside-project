@@ -31,6 +31,7 @@ import {
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
   detectCancellationOrRefundIntent,
+  detectPostPurchaseSupportIntent,
   findProductsForInboundMessage,
   generateReply,
   isUsageQuestionUnanswered,
@@ -102,6 +103,41 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
       normalized.includes('great question'));
 
   return looksLikeAlbanianEscalation || looksLikeEnglishEscalation;
+}
+
+const HOLDING_MESSAGES = {
+  sq: {
+    postPurchaseSupport:
+      'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet.',
+    usageEscalation:
+      'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
+  },
+  en: {
+    postPurchaseSupport:
+      "Hello, we're sorry for the issue. A member of our team will reply to you shortly.",
+    usageEscalation:
+      "Hello, a specialist from our team will contact you shortly regarding this issue.",
+  },
+} as const;
+
+type HoldingMessageLocale = keyof typeof HOLDING_MESSAGES;
+
+function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
+  const normalized = normalizeEscalationMessage(text);
+  if (!normalized) return 'sq';
+
+  const albanianSignal =
+    /(^|\b)(pershendetje|porosi|porosia|derges|dorez|ankes|problem|gabuar|nuk|ende|kam|nuk me ka ardh|seshte)\b/.test(
+      normalized,
+    ) || /[ëç]/i.test(text);
+  const englishSignal =
+    /(^|\b)(hello|hi|order|delivery|shipping|refund|wrong|item|problem|issue|not delivered|still havent|still haven't|received)\b/.test(
+      normalized,
+    );
+
+  if (albanianSignal) return 'sq';
+  if (englishSignal) return 'en';
+  return 'en';
 }
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
@@ -364,8 +400,98 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           return;
         }
       }
+
+      const postPurchaseSupportIntent = await detectPostPurchaseSupportIntent(
+        inboundText,
+        recentMessages,
+      );
+      const hasPostPurchaseSupportIntent =
+        postPurchaseSupportIntent.is_delivery_eta_query ||
+        postPurchaseSupportIntent.is_not_delivered_complaint ||
+        postPurchaseSupportIntent.is_wrong_product_issue ||
+        postPurchaseSupportIntent.is_product_problem_issue;
+      const confidentPostPurchaseSupportIntent = postPurchaseSupportIntent.confidence > 0.8;
+      console.info(
+        `[POST_PURCHASE_SUPPORT] tenantId: ${tenantId} conversationId: ${conversationId} eta_query: ${postPurchaseSupportIntent.is_delivery_eta_query} not_delivered: ${postPurchaseSupportIntent.is_not_delivered_complaint} wrong_product: ${postPurchaseSupportIntent.is_wrong_product_issue} product_problem: ${postPurchaseSupportIntent.is_product_problem_issue} confidence: ${postPurchaseSupportIntent.confidence} reasoning: ${logJsonStringOrNull(postPurchaseSupportIntent.reason)}`,
+      );
+
+      if (hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent) {
+        const locale = inferHoldingMessageLocale(inboundText);
+        const postPurchaseHoldingMessage = HOLDING_MESSAGES[locale].postPurchaseSupport;
+        const client = await pool.connect();
+        let alert: AIAlert | undefined;
+        try {
+          await client.query('BEGIN');
+          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+          alert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'post_purchase_support_request',
+            },
+            client,
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('[ai.reply] Post-purchase support escalation transaction failed', {
+            conversationId,
+            tenantId,
+            err,
+          });
+        } finally {
+          client.release();
+        }
+
+        const contactForSend = await findContactById(conversation.contact_id);
+        let sendResult:
+          | Awaited<ReturnType<typeof sendMessage>>
+          | null = null;
+        if (contactForSend) {
+          sendResult = await sendMessage(
+            channel,
+            contactForSend.external_id,
+            postPurchaseHoldingMessage,
+          );
+        }
+
+        const outboundAck = await createMessage({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+          direction: 'outbound',
+          type: 'text',
+          content: postPurchaseHoldingMessage,
+          sent_by: 'ai',
+        });
+
+        if (alert) {
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForSend?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+        }
+        socketService.emitNewMessage(tenantId, outboundAck);
+        socketService.emitConversationUpdated(tenantId, conversationId);
+
+        if (!sendResult?.success && sendResult) {
+          const errReason = sendResult.error ?? 'Failed to send acknowledgment';
+          await updateMessageSendFailure(outboundAck.id, tenantId, 'failed', errReason);
+          socketService.emitMessageSendFailed(tenantId, {
+            messageId: outboundAck.id,
+            conversationId,
+            error: errReason,
+          });
+        }
+        return;
+      }
     } catch (err) {
-      console.warn('[ai.reply] cancellation/refund escalation path failed, continuing normal flow', {
+      console.warn('[ai.reply] escalation detection path failed, continuing normal flow', {
         conversationId,
         tenantId,
         err,
@@ -397,7 +523,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const usageRelated =
     Boolean(usageDescription) && (usageQuestionIntent || usedVerbatimUsageDescription);
 
-  const USAGE_HOLDING_MESSAGE = "Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.";
+  const usageHoldingMessage = HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText)].usageEscalation;
   let finalReplyText = replyText;
   let usageEscalated = false;
   let usageQuestionUnanswered: boolean | null = null;
@@ -424,7 +550,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           );
           await client.query('COMMIT');
           usageEscalated = true;
-          finalReplyText = USAGE_HOLDING_MESSAGE;
+          finalReplyText = usageHoldingMessage;
         } catch (err) {
           await client.query('ROLLBACK');
           console.error('[ai.reply] Usage escalation transaction failed', { conversationId, tenantId, err });
