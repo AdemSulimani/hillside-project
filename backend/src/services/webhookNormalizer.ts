@@ -300,16 +300,8 @@ function displayShareLinkForText(link: string): string {
   return l;
 }
 
-function formatPostShareLine(title: string, link: string, description: string): string {
-  const titlePart = title || 'Post';
-  const rawLink = (link || '').trim() || titlePart;
-  const linkPart = displayShareLinkForText(rawLink);
-  let line = `Customer shared a post: ${titlePart} — ${linkPart}`;
-  const desc = truncateShareCaption(description);
-  if (desc && desc !== titlePart && desc !== linkPart) {
-    line += `\n${desc}`;
-  }
-  return line;
+function formatPostShareLine(): string {
+  return 'Customer shared a post';
 }
 
 function formatVideoReelLine(title: string, description: string): string {
@@ -380,7 +372,7 @@ export function inboundMessageIndicatesInstagramSharedContext(content: string | 
   const t = (content ?? '').trim();
   if (!t) return false;
   return (
-    t.startsWith('Customer shared a post:') ||
+    t.startsWith('Customer shared a post') ||
     t.includes('Customer mentioned you in their story') ||
     t.includes('Customer replied to your story') ||
     t.includes('Customer shared a story') ||
@@ -483,7 +475,7 @@ function extractMessengerRichContent(
       if (isVideoShare) {
         contentLines.push(formatVideoReelLine(title, description));
       } else if (link || title) {
-        contentLines.push(formatPostShareLine(title, link || title, description));
+        contentLines.push(formatPostShareLine());
       }
 
       // Attach a preview image so the vision model can actually see the shared post/story. For
@@ -604,11 +596,16 @@ function extractMessengerRichContent(
 function userTextAfterRichLines(contentLines: string[], baseText: string | null): string {
   let user = baseText?.trim() ?? '';
   const richJoined = contentLines.length > 0 ? contentLines.join('\n') : '';
+  const hasPostShareLine = contentLines.some((l) => l === 'Customer shared a post');
+  if (user && hasPostShareLine) {
+    // For Instagram post shares, suppress caption/body text to keep AI context short.
+    return '';
+  }
   const shareRichForUserCap =
     Boolean(richJoined) &&
     contentLines.some(
       (l) =>
-        l.startsWith('Customer shared a post:') ||
+        l.startsWith('Customer shared a post') ||
         l.startsWith('Customer shared a video/reel:') ||
         l.startsWith('Customer shared content') ||
         l.includes('Customer shared a story'),

@@ -121,6 +121,8 @@ Rule 1b — If the customer asked whether you have / stock / price of a product 
 
 Rule 1c — Customers may write in any language (including Albanian). Replies in the same language as the customer are preferred. Never penalize a reply for not being in English.
 
+Rule 1d — If the AI asks for order-required details (for example: customer name, delivery/shipping address, phone number, quantity, variant/flavor, or other information needed to proceed with an order), that is ON-TOPIC and should score 0.9 or higher when it logically follows the customer intent to buy/order. Do not mark these replies as off-topic or irrelevant.
+
 Rule 2 — Only flag a response as low quality if it meets one of these conditions:
 
 The AI gave a completely irrelevant response that does not address what the customer asked

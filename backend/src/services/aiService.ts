@@ -33,10 +33,10 @@ const SHARED_CONTENT_SYSTEM_APPEND =
   '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
 
 const SHARED_POST_VISION_APPEND =
-  ' For Instagram post shares, rely primarily on the attached preview image(s); any caption excerpt in the message may be shortened.';
+  ' For Instagram post shares, rely primarily on the attached preview image(s).';
 
 function inboundTextIsPostShare(content: string): boolean {
-  return content.trimStart().startsWith('Customer shared a post:');
+  return content.trimStart().startsWith('Customer shared a post');
 }
 
 function inboundTextIsStoryThread(content: string): boolean {
@@ -243,6 +243,31 @@ const ORDER_CONFIRMATION_REPLY_FALLBACK_KEYWORDS = [
   'review in orders',
 ];
 
+const ORDER_DETAILS_COLLECTION_REPLY_FALLBACK_KEYWORDS = [
+  'adresen e plote',
+  'adresën e plotë',
+  'adresen e dërgesës',
+  'adresën e dërgesës',
+  'numrin e telefonit',
+  'numerin e telefonit',
+  'na jep',
+  'na dergo',
+  'na dërgo',
+  'na shkruaj',
+  'ploteso',
+  'plotëso',
+  'te vazhdojme porosine',
+  'të vazhdojmë porosinë',
+  'per te vazhduar porosine',
+  'për të vazhduar porosinë',
+  'shipping address',
+  'delivery address',
+  'full address',
+  'phone number',
+  'to proceed with your order',
+  'complete your order',
+];
+
 function includesAnyKeyword(message: string, keywords: string[]): boolean {
   const t = message.trim().toLowerCase();
   if (!t) return false;
@@ -418,6 +443,47 @@ export async function classifyOrderConfirmationReplyIntent(
   return inboundLooksOrderRelated && replyLooksLikeConfirmation;
 }
 
+export async function classifyOrderDetailsCollectionReplyIntent(
+  inboundMessage: string,
+  replyMessage: string,
+): Promise<boolean> {
+  const inbound = inboundMessage.trim();
+  const reply = replyMessage.trim();
+  if (!reply) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict classifier. Determine whether the assistant reply is collecting required delivery details to proceed with purchase in any language. In this system, valid requested delivery details are ONLY: phone number and full delivery/shipping address. Return only JSON: {"is_order_details_collection_reply": true} or {"is_order_details_collection_reply": false}. Return true only when the reply asks for phone number and/or full delivery address as the next ordering step. Return false if the reply asks for unrelated personal data (e.g., full name, surname, ID number, birthday) or unrelated chit-chat.',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound || '(empty)'}\n\nAssistant reply:\n${reply}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 96,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_order_details_collection_reply?: boolean };
+      if (parsed.is_order_details_collection_reply === true) return true;
+      if (parsed.is_order_details_collection_reply === false) return false;
+    }
+  } catch {
+    // Fall through to lexical fallback when classifier is unavailable.
+  }
+
+  const replyNormalized = normalizeForIntentMatch(reply);
+  return includesAnyKeyword(replyNormalized, ORDER_DETAILS_COLLECTION_REPLY_FALLBACK_KEYWORDS);
+}
+
 async function customerAskedAboutPrice(message: string): Promise<boolean> {
   const inbound = message.trim();
   if (!inbound) return false;
@@ -558,6 +624,8 @@ function buildSystemPrompt(
     'Guidelines:',
     '- Keep replies concise and conversational — this is a chat, not an email.',
     '- If the customer asks about a product you don\'t have, say so honestly.',
+    '- When the requested product is unavailable or not an exact match, clearly say that exact product is not available, then immediately suggest 2-3 similar alternatives from the same category in the catalog.',
+    '- For unavailable-product cases, keep the sequence: (1) unavailable acknowledgement, (2) relevant alternatives from same category, (3) short order-oriented follow-up question.',
     '- Never fabricate product details, prices, or availability.',
     '- Strict rule: never mention product price or stock availability unless the customer explicitly asks for price/stock in their current message.',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
@@ -570,10 +638,12 @@ function buildSystemPrompt(
     '- Treat stock_quantity as internal information. Mention an exact stock number only when the customer explicitly asks for stock or requests a quantity higher than available.',
     '- If the customer requests more units than available, clearly state the maximum currently available quantity for that product and offer that amount.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
-    '- Do not automatically end every reply with a generic follow-up question.',
-    '- Ask a follow-up question only when it is useful to move the conversation forward (for example: confirming order intent, collecting missing order details, clarifying customer needs, or offering a relevant next step).',
+    '- Do not automatically end non-product/general conversation replies with a generic follow-up question.',
+    '- If the customer asks about any product (availability, details, comparison, or alternatives), always end the reply with one short order-oriented follow-up question.',
     '- Avoid robotic closings like "anything else I can help with?" unless the conversation context clearly requires it.',
-    '- If the customer only asked for basic info (e.g., price/availability) and there is no buying signal yet, end naturally without forcing a question.',
+    '- For non-product/general chat, end naturally when appropriate without forcing a question.',
+    '- For product-related replies, the order-focused follow-up is mandatory (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni").',
+    '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
   );
 
   if (hasImages) {

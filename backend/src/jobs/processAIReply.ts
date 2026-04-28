@@ -27,6 +27,7 @@ import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   classifyNegativeAvailabilityReply,
   classifyNewOrderSignal,
+  classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
   detectCancellationOrRefundIntent,
@@ -586,12 +587,23 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     flagReason !== null &&
     suppressibleOrderConfirmationFlags.has(flagReason) &&
     (await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText));
-  if (suppressFalseQualityFlagOnOrderConfirmation) {
+  const suppressFalseQualityFlagOnOrderDetailsCollection =
+    qualityEval !== null &&
+    qualityFailing &&
+    flagReason !== null &&
+    suppressibleOrderConfirmationFlags.has(flagReason) &&
+    (await classifyOrderDetailsCollectionReplyIntent(inboundText, finalReplyText));
+  if (suppressFalseQualityFlagOnOrderConfirmation || suppressFalseQualityFlagOnOrderDetailsCollection) {
     qualityFailing = false;
     flagReason = null;
     console.info(
-      '[QUALITY EVAL] Suppressing false quality flag for likely order confirmation reply',
-      { tenantId, conversationId },
+      '[QUALITY EVAL] Suppressing false quality flag for likely order flow reply',
+      {
+        tenantId,
+        conversationId,
+        isOrderConfirmationReply: suppressFalseQualityFlagOnOrderConfirmation,
+        isOrderDetailsCollectionReply: suppressFalseQualityFlagOnOrderDetailsCollection,
+      },
     );
   }
 

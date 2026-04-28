@@ -24,7 +24,7 @@ interface MessageBubbleProps {
 const REPLY_PREVIEW_MAX = 60;
 
 function isSharedPostReplyContent(content: string | null | undefined): boolean {
-  return (content ?? '').trimStart().startsWith('Customer shared a post:');
+  return (content ?? '').trimStart().startsWith('Customer shared a post');
 }
 
 function isLikelyHttpImageUrl(url: string): boolean {
