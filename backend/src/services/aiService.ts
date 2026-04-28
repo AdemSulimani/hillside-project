@@ -20,6 +20,8 @@ const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : 6000;
 })();
+const RECENT_RAW_HISTORY_MESSAGES = 10;
+const HISTORY_FETCH_LIMIT = 40;
 
 /** Rough GPT token estimate: ~4 characters per token. */
 function estimateTokens(text: string): number {
@@ -850,16 +852,61 @@ function formatCustomerMessageContentForPrompt(msg: Message): string {
   return body;
 }
 
+function summarizeOlderConversationContext(messages: Message[]): string | null {
+  if (messages.length === 0) return null;
+
+  const total = messages.length;
+  const customerMessages = messages.filter((msg) => msg.sent_by === 'customer');
+  const agentMessages = messages.filter((msg) => msg.sent_by !== 'customer');
+  const first = messages[0];
+  const last = messages[messages.length - 1];
+
+  const firstText = (first.content ?? '').trim();
+  const lastText = (last.content ?? '').trim();
+  const firstPreview = firstText ? firstText.replace(/\s+/g, ' ').slice(0, 140) : null;
+  const lastPreview = lastText ? lastText.replace(/\s+/g, ' ').slice(0, 140) : null;
+
+  const customerHighlights = customerMessages
+    .map((msg) => formatCustomerMessageContentForPrompt(msg).replace(/\s+/g, ' ').trim())
+    .filter((txt) => txt.length > 0)
+    .slice(-2)
+    .map((txt) => `"${txt.slice(0, 120)}${txt.length > 120 ? '...' : ''}"`);
+
+  const parts: string[] = [
+    `Earlier context summary (${total} older messages): customer sent ${customerMessages.length} message(s), assistant/agent sent ${agentMessages.length}.`,
+  ];
+
+  if (firstPreview) {
+    parts.push(`The earlier thread starts with: "${firstPreview}${firstText.length > 140 ? '...' : ''}".`);
+  }
+  if (lastPreview) {
+    parts.push(`Before the recent 10-message window, it most recently included: "${lastPreview}${lastText.length > 140 ? '...' : ''}".`);
+  }
+  if (customerHighlights.length > 0) {
+    parts.push(`Notable recent customer points from that older segment: ${customerHighlights.join(' | ')}.`);
+  }
+
+  return parts.join(' ');
+}
+
 function buildMessagesArray(
   systemPrompt: string,
   conversationHistory: Message[],
   inboundMessage: string,
   attachmentUrls: string[] = [],
   visionContext: string | null = null,
+  olderHistorySummary: string | null = null,
 ): ChatMessage[] {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
   ];
+
+  if (olderHistorySummary) {
+    messages.push({
+      role: 'assistant',
+      content: olderHistorySummary,
+    });
+  }
 
   for (const msg of conversationHistory) {
     const histUrls = normalizeAttachmentUrls(msg.attachment_urls);
@@ -971,12 +1018,21 @@ export async function generateReply(
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
-  const [tenant, config, conversationHistory, cachedCatalogProducts] = await Promise.all([
+  const [tenant, config, conversationHistoryWindow, cachedCatalogProducts] = await Promise.all([
     loadTenant(tenantId),
     loadAIConfig(tenantId),
-    findMessagesByConversation(conversationId, 10),
+    findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT),
     productCatalogContext ? Promise.resolve([] as Product[]) : loadProductCatalog(tenantId),
   ]);
+  const olderHistory =
+    conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
+      ? conversationHistoryWindow.slice(0, -RECENT_RAW_HISTORY_MESSAGES)
+      : [];
+  const olderHistorySummary = summarizeOlderConversationContext(olderHistory);
+  const conversationHistory =
+    conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
+      ? conversationHistoryWindow.slice(-RECENT_RAW_HISTORY_MESSAGES)
+      : conversationHistoryWindow;
   const customerAskedPrice = await customerAskedAboutPrice(inboundMessage);
 
   if (!tenant) {
@@ -1077,6 +1133,7 @@ export async function generateReply(
 
   const systemPromptTokenEstimate = estimateTokens(systemPrompt);
   const inboundTokenEstimate = estimateTokens(inboundMessage.trim());
+  const olderHistorySummaryTokens = estimateTokens(olderHistorySummary ?? '');
   const historyMessageTokenEstimates = conversationHistory.map((msg) =>
     estimateTokens(
       msg.sent_by === 'customer'
@@ -1087,7 +1144,8 @@ export async function generateReply(
 
   const originalHistoryCount = conversationHistory.length;
   let historyForPrompt = conversationHistory;
-  let historyTokenTotal = historyMessageTokenEstimates.reduce((sum, t) => sum + t, 0);
+  let historyTokenTotal =
+    historyMessageTokenEstimates.reduce((sum, t) => sum + t, 0) + olderHistorySummaryTokens;
 
   while (historyTokenTotal > CONTEXT_MAX_HISTORY_TOKENS && historyForPrompt.length > 3) {
     const [removed, ...rest] = historyForPrompt;
@@ -1101,6 +1159,8 @@ export async function generateReply(
       JSON.stringify({
         tenantId,
         conversationId,
+        olderSummaryIncluded: Boolean(olderHistorySummary),
+        olderSummarizedMessageCount: olderHistory.length,
         originalMessageCount: originalHistoryCount,
         truncatedMessageCount: historyForPrompt.length,
         estimatedTokenCount: historyTokenTotal,
@@ -1130,6 +1190,7 @@ export async function generateReply(
     inboundMessage,
     attachmentUrls,
     visionContext,
+    olderHistorySummary,
   );
 
   const model = hasImages
