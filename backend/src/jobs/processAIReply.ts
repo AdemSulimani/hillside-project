@@ -1019,20 +1019,33 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     const latestMessageAffirmsOrder =
       orderAffirmationIntent.is_order_affirmation === true && orderAffirmationIntent.confidence > 0.7;
 
+    const hasDeliveryAddress =
+      typeof intent.delivery_address === 'string' && intent.delivery_address.trim().length > 0;
+
+    const meta = contact.metadata ?? {};
+    const phoneRaw = meta.phone ?? meta.phone_number ?? meta.phoneNumber;
+    const customerPhone =
+      typeof phoneRaw === 'string' && phoneRaw.trim() ? phoneRaw.trim() : null;
+    const hasCustomerPhone = typeof customerPhone === 'string' && customerPhone.length > 0;
+
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
       intent.intent_score > intentOrderMinScore &&
       intent.product_name != null &&
+      hasDeliveryAddress &&
+      hasCustomerPhone &&
       (latestMessageAffirmsOrder || explicitNewOrder);
 
     if (!passesDraftOrderValidation) {
-      console.info('[ai.reply] Skipping draft order creation due to missing order affirmation', {
+      console.info('[ai.reply] Skipping draft order creation due to failed validation', {
         conversationId,
         tenantId,
         explicitNewOrder,
         latestMessageAffirmsOrder,
         orderAffirmationConfidence: orderAffirmationIntent.confidence,
         orderAffirmationReason: orderAffirmationIntent.reason,
+        hasDeliveryAddress,
+        hasCustomerPhone,
       });
       return;
     }
@@ -1082,11 +1095,6 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       ? Math.round(totalPrice * 0.05 * 100) / 100
       : null;
 
-    const meta = contact.metadata ?? {};
-    const phoneRaw = meta.phone ?? meta.phone_number ?? meta.phoneNumber;
-    const customerPhone =
-      typeof phoneRaw === 'string' && phoneRaw.trim() ? phoneRaw.trim() : null;
-
     const order = await createOrder({
       tenant_id: tenantId,
       conversation_id: conversationId,
@@ -1099,7 +1107,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       status: 'draft',
       customer_name: contact.name || 'Unknown',
       customer_phone: customerPhone,
-      delivery_address: intent.delivery_address,
+      delivery_address: intent.delivery_address?.trim() ?? null,
       notes: null,
       detected_by: 'ai',
       is_commissionable: isCommissionable,
