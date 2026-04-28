@@ -643,6 +643,8 @@ function buildSystemPrompt(
     '- Avoid robotic closings like "anything else I can help with?" unless the conversation context clearly requires it.',
     '- For non-product/general chat, end naturally when appropriate without forcing a question.',
     '- For product-related replies, the order-focused follow-up is mandatory (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni").',
+    '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
+    '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
   );
 
@@ -1052,6 +1054,30 @@ function buildMessagesArray(
 const CONVERSATION_ENDING_ANALYST_SYSTEM =
   "You are a conversation analyst. Your only job is to determine if a message signals that a conversation is ending. This includes any form of goodbye, thank you and goodbye combined, polite dismissal, or closing pleasantry in ANY language including formal and informal versions, slang, abbreviations, and regional variations. For example in Albanian 'klm' means 'kalofshi mirë' which is have a nice day. 'fln' means 'faleminderit' which is thank you. Consider all such abbreviations and slang as ending signals. Return only a JSON object with a single boolean field: { is_ending: true } or { is_ending: false }";
 
+const CLOSING_REPLY_SYSTEM_APPEND = `
+Final-closing behavior:
+- If the latest customer message is a closing/thank-you/goodbye signal, reply with exactly one short polite closing sentence.
+- Keep it brief (around 2-7 words), warm, and natural in the customer's language.
+- Do not ask any follow-up question.
+- Do not continue the sales flow or introduce new topics.
+`.trim();
+
+function getPreviousAssistantMessageBeforeLatestCustomer(
+  conversationHistory: Message[],
+): Message | undefined {
+  if (conversationHistory.length === 0) return undefined;
+  const latestIndex = conversationHistory.length - 1;
+  const latest = conversationHistory[latestIndex];
+  if (latest.sent_by !== 'customer') return undefined;
+
+  for (let i = latestIndex - 1; i >= 0; i -= 1) {
+    if (conversationHistory[i].sent_by !== 'customer') {
+      return conversationHistory[i];
+    }
+  }
+  return undefined;
+}
+
 async function isConversationEnding(
   messageContent: string,
   conversationHistory: Message[],
@@ -1257,8 +1283,27 @@ export async function generateReply(
   } catch {
     conversationEnding = false;
   }
+
+  let previousAssistantWasClosing = false;
   if (conversationEnding && !inboundMessage.includes('?')) {
-    return { reply: '[NO_REPLY]', productCatalogContext: resolvedProductCatalogContext };
+    const previousAssistant = getPreviousAssistantMessageBeforeLatestCustomer(historyForPrompt);
+    const previousAssistantText = (previousAssistant?.content ?? '').trim();
+    if (previousAssistantText) {
+      try {
+        previousAssistantWasClosing = await isConversationEnding(
+          previousAssistantText,
+          historyForPrompt.slice(0, -1),
+        );
+      } catch {
+        previousAssistantWasClosing = false;
+      }
+    }
+
+    if (previousAssistantWasClosing) {
+      return { reply: '[NO_REPLY]', productCatalogContext: resolvedProductCatalogContext };
+    }
+
+    systemPrompt += `\n\n${CLOSING_REPLY_SYSTEM_APPEND}`;
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
