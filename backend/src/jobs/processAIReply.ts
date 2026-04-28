@@ -31,6 +31,7 @@ import {
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
   detectCancellationOrRefundIntent,
+  detectOrderAffirmationIntent,
   detectPostPurchaseSupportIntent,
   findProductsForInboundMessage,
   generateReply,
@@ -127,6 +128,18 @@ const ORDER_CONFIRMATION_FOLLOW_UP =
     en: 'If you have any other questions or would like to place another order, I am here to help.',
   } as const;
 
+const BILINGUAL_GUARD_PHRASE_PAIRS = [
+  ORDER_CONFIRMATION_FOLLOW_UP,
+  {
+    sq: HOLDING_MESSAGES.sq.postPurchaseSupport,
+    en: HOLDING_MESSAGES.en.postPurchaseSupport,
+  },
+  {
+    sq: HOLDING_MESSAGES.sq.usageEscalation,
+    en: HOLDING_MESSAGES.en.usageEscalation,
+  },
+] as const;
+
 function normalizeForIncludesCheck(value: string): string {
   return value
     .normalize('NFD')
@@ -152,6 +165,61 @@ function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
   if (albanianSignal) return 'sq';
   if (englishSignal) return 'en';
   return 'en';
+}
+
+function stripExactSentenceLine(text: string, sentence: string): string {
+  const target = normalizeForIncludesCheck(sentence);
+  const cleaned = text
+    .split(/\r?\n/)
+    .filter((line) => normalizeForIncludesCheck(line.replace(/^[-*]\s*/, '')) !== target)
+    .join('\n');
+  return cleaned.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function enforceSingleLanguageSystemPhrases(
+  text: string,
+  locale: HoldingMessageLocale,
+): string {
+  const oppositeLocale: HoldingMessageLocale = locale === 'sq' ? 'en' : 'sq';
+  let result = text;
+
+  for (const pair of BILINGUAL_GUARD_PHRASE_PAIRS) {
+    const keepPhrase = pair[locale];
+    const removePhrase = pair[oppositeLocale];
+    const hasKeep = normalizeForIncludesCheck(result).includes(
+      normalizeForIncludesCheck(keepPhrase),
+    );
+    const hasRemove = normalizeForIncludesCheck(result).includes(
+      normalizeForIncludesCheck(removePhrase),
+    );
+    if (hasKeep && hasRemove) {
+      result = stripExactSentenceLine(result, removePhrase);
+    }
+  }
+
+  return result;
+}
+
+function hasPostPurchaseIssueCue(text: string): boolean {
+  const normalized = normalizeEscalationMessage(text);
+  if (!normalized) return false;
+  return (
+    /(kur|when).*(vjen|arrive|arrival|deliver|delivery|shipping)/.test(normalized) ||
+    /(nuk me ka ardh|nuk ka ardh|nuk ka mberrit|still havent received|still haven't received|not delivered)/.test(normalized) ||
+    /(produkt.*gabuar|wrong item|wrong product|received.*wrong)/.test(normalized) ||
+    /(defekt|prish|problem me produkt|damaged|broken|faulty|defective)/.test(normalized)
+  );
+}
+
+function looksLikeOrderAffirmation(text: string): boolean {
+  const normalized = normalizeEscalationMessage(text);
+  if (!normalized) return false;
+  return (
+    /^(po|ok|okej|yes|yep|sure|alright)\b/.test(normalized) ||
+    /(dua|dush|do|doni|please|ju lutem).*(porosi|order)/.test(normalized) ||
+    /(beje porosine|beje porosin|place the order|make the order)/.test(normalized) ||
+    /^(po ju lutem|po beje|beje|ok beje)$/.test(normalized)
+  );
 }
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
@@ -415,10 +483,41 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         }
       }
 
-      const postPurchaseSupportIntent = await detectPostPurchaseSupportIntent(
-        inboundText,
-        recentMessages,
-      );
+      const isLikelyNewOrderSignal = await classifyNewOrderSignal(inboundText);
+      const orderAffirmationIntent = await detectOrderAffirmationIntent(inboundText, recentMessages);
+      const isLikelyOrderAffirmation =
+        orderAffirmationIntent.is_order_affirmation && orderAffirmationIntent.confidence > 0.7;
+      const shouldCheckPostPurchaseSupport =
+        hasPostPurchaseIssueCue(inboundText) && !looksLikeOrderAffirmation(inboundText) && !isLikelyOrderAffirmation;
+      if (isLikelyNewOrderSignal) {
+        console.info('[POST_PURCHASE_SUPPORT] skipped because message indicates new order intent', {
+          conversationId,
+          tenantId,
+        });
+      }
+      if (isLikelyOrderAffirmation) {
+        console.info(
+          `[POST_PURCHASE_SUPPORT] skipped because message indicates order affirmation confidence: ${orderAffirmationIntent.confidence} reasoning: ${logJsonStringOrNull(orderAffirmationIntent.reason)}`,
+        );
+      }
+      if (!shouldCheckPostPurchaseSupport || isLikelyNewOrderSignal) {
+        console.info('[POST_PURCHASE_SUPPORT] skipped because no post-purchase issue cue found', {
+          conversationId,
+          tenantId,
+          inboundText,
+        });
+      }
+      const postPurchaseSupportIntent =
+        shouldCheckPostPurchaseSupport && !isLikelyNewOrderSignal
+          ? await detectPostPurchaseSupportIntent(inboundText, recentMessages)
+          : {
+              is_delivery_eta_query: false,
+              is_not_delivered_complaint: false,
+              is_wrong_product_issue: false,
+              is_product_problem_issue: false,
+              confidence: 0,
+              reason: null as string | null,
+            };
       const hasPostPurchaseSupportIntent =
         postPurchaseSupportIntent.is_delivery_eta_query ||
         postPurchaseSupportIntent.is_not_delivered_complaint ||
@@ -710,6 +809,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       finalReplyText = `${finalReplyText.trim()}\n\n${orderFollowUp}`;
     }
   }
+  if (inboundText) {
+    finalReplyText = enforceSingleLanguageSystemPhrases(
+      finalReplyText,
+      inferHoldingMessageLocale(inboundText),
+    );
+  }
 
   const qualityThreshold = getQualityThreshold();
   const containsNegativeAvailabilityPhrase = await classifyNegativeAvailabilityReply(finalReplyText);
@@ -909,13 +1014,26 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       Number.isFinite(parsedIntentThreshold) && parsedIntentThreshold > 0 && parsedIntentThreshold < 1
         ? parsedIntentThreshold
         : 0.85;
+    const explicitNewOrder = await classifyNewOrderSignal(inboundText);
+    const orderAffirmationIntent = await detectOrderAffirmationIntent(inboundText, messagesForIntent);
+    const latestMessageAffirmsOrder =
+      orderAffirmationIntent.is_order_affirmation === true && orderAffirmationIntent.confidence > 0.7;
 
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
       intent.intent_score > intentOrderMinScore &&
-      intent.product_name != null;
+      intent.product_name != null &&
+      (latestMessageAffirmsOrder || explicitNewOrder);
 
     if (!passesDraftOrderValidation) {
+      console.info('[ai.reply] Skipping draft order creation due to missing order affirmation', {
+        conversationId,
+        tenantId,
+        explicitNewOrder,
+        latestMessageAffirmsOrder,
+        orderAffirmationConfidence: orderAffirmationIntent.confidence,
+        orderAffirmationReason: orderAffirmationIntent.reason,
+      });
       return;
     }
 
@@ -942,7 +1060,6 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       const incomingProduct = normalizeLooseText(productName);
       const existingProduct = normalizeLooseText(latestActiveOrder.product_name);
       const productChanged = incomingProduct.length > 0 && incomingProduct !== existingProduct;
-      const explicitNewOrder = await classifyNewOrderSignal(inboundText);
 
       if (!productChanged && !explicitNewOrder) {
         console.info('[ai.reply] Skipping duplicate order creation', {

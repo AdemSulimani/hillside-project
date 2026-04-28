@@ -646,7 +646,9 @@ function buildSystemPrompt(
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
-    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in the customer language only: Albanian: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar." English: "If you have any other questions or would like to place another order, I am here to help."',
+    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in the customer language only: Albanian: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar." English: "If you have any other questions or would like to place another order, I am here to help." Never include both language versions in the same reply.',
+    '- For ambiguous short customer replies (e.g., "po", "ok", "yes", "po ju lutem"), rely on conversation context and classifier signals to decide intent. Do not classify based only on keywords. If classifier/context indicates order affirmation, continue order flow; escalate only when classifier/context indicates a real post-purchase issue.',
+    '- Draft/confirm order behavior must be triggered only when classifier + conversation context indicate explicit order affirmation. Product inquiries alone (price, stock, details, comparison, availability) are not order confirmation.',
     '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one sentence based on the customer language and nothing else. Albanian exact sentence: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet." English exact sentence: "Hello, we\'re sorry for the issue. A member of our team will reply to you shortly."',
   );
 
@@ -889,6 +891,70 @@ Return JSON exactly:
       confidence: 0,
       reason: null,
     };
+  }
+}
+
+export async function detectOrderAffirmationIntent(
+  inboundMessage: string,
+  conversationHistory: Message[],
+): Promise<{ is_order_affirmation: boolean; confidence: number; reason: string | null }> {
+  const historySlice = conversationHistory.slice(-8);
+  const historyText = historySlice
+    .map((msg) => {
+      const who = msg.sent_by === 'customer' ? 'Customer' : 'Agent';
+      return `${who}: ${(msg.content ?? '').trim()}`;
+    })
+    .join('\n');
+
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_CHAT_MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: `You are a strict intent classifier for order-confirmation replies.
+Detect whether the latest customer message is an affirmation to proceed with an order (including short confirmations) rather than a complaint.
+
+Return is_order_affirmation: true for messages like:
+- "po", "po ju lutem", "ok", "yes", "sure", "vazhdo", "beje porosine", "place it"
+- especially when prior assistant message asks to proceed/order.
+
+Return is_order_affirmation: false when the customer is reporting post-purchase issues (delivery delay, non-delivery, wrong item, damaged/defective product), asking for cancellation/refund, or asking unrelated questions.
+
+Return JSON exactly:
+{ "is_order_affirmation": boolean, "confidence": number, "reason": string | null }`,
+      },
+      {
+        role: 'user',
+        content: `Conversation context:\n${historyText || '(none)'}\n\nLatest customer message:\n${inboundMessage}`,
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 180,
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) return { is_order_affirmation: false, confidence: 0, reason: null };
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      is_order_affirmation?: boolean;
+      confidence?: number;
+      reason?: string | null;
+    };
+    let confidence = 0;
+    if (typeof parsed.confidence === 'number' && Number.isFinite(parsed.confidence)) {
+      confidence = parsed.confidence > 1 ? parsed.confidence / 100 : parsed.confidence;
+    }
+    confidence = Math.min(1, Math.max(0, confidence));
+    const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
+    return {
+      is_order_affirmation: parsed.is_order_affirmation === true,
+      confidence,
+      reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
+    };
+  } catch {
+    return { is_order_affirmation: false, confidence: 0, reason: null };
   }
 }
 
