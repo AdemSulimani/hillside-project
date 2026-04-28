@@ -646,6 +646,7 @@ function buildSystemPrompt(
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
+    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in the customer language only: Albanian: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar." English: "If you have any other questions or would like to place another order, I am here to help."',
     '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one sentence based on the customer language and nothing else. Albanian exact sentence: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet." English exact sentence: "Hello, we\'re sorry for the issue. A member of our team will reply to you shortly."',
   );
 
@@ -1166,9 +1167,46 @@ const CLOSING_REPLY_SYSTEM_APPEND = `
 Final-closing behavior:
 - If the latest customer message is a closing/thank-you/goodbye signal, reply with exactly one short polite closing sentence.
 - Keep it brief (around 2-7 words), warm, and natural in the customer's language.
+- If the customer language is Albanian, use this exact sentence: "Pa problem, kaloni bukur."
 - Do not ask any follow-up question.
 - Do not continue the sales flow or introduce new topics.
 `.trim();
+
+function normalizeClosingSignalText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function looksLikePoliteThanksClosing(messageContent: string): boolean {
+  const normalized = normalizeClosingSignalText(messageContent);
+  if (!normalized) return false;
+
+  const explicitClosingPatterns = [
+    /\b(jo|ska nevoje|ska nevoj|nuk ka nevoje|nuk ka nevoj)\s+(faleminderit|flm|fln)\b/,
+    /\b(faleminderit|faleminderit shume|flm|flm shume|fln|rrofsh|ju faleminderit)\b/,
+    /\b(no thanks|no thank you|thanks|thanks a lot|thank you|thank you very much|thx|ty)\b/,
+  ];
+  if (explicitClosingPatterns.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
+  const shortMessageWordCount = normalized.split(' ').filter(Boolean).length;
+  const hasThanksToken =
+    /\b(faleminderit|flm|fln|rrofsh|thanks|thank you|thx|ty)\b/.test(normalized);
+  const hasClosingToken =
+    /\b(bye|goodbye|good night|good day|klm|kalofsh|kalofshi|kaloni bukur|nat e mire|naten e mire|diten e mire)\b/.test(
+      normalized,
+    );
+  if (shortMessageWordCount <= 6 && hasThanksToken) {
+    return true;
+  }
+  return shortMessageWordCount <= 8 && hasClosingToken;
+}
 
 function getPreviousAssistantMessageBeforeLatestCustomer(
   conversationHistory: Message[],
@@ -1190,6 +1228,10 @@ async function isConversationEnding(
   messageContent: string,
   conversationHistory: Message[],
 ): Promise<boolean> {
+  if (looksLikePoliteThanksClosing(messageContent)) {
+    return true;
+  }
+
   const lastThree = conversationHistory.slice(-3);
   const formattedLastFew = lastThree
     .map((msg) => {

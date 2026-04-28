@@ -121,6 +121,20 @@ const HOLDING_MESSAGES = {
 } as const;
 
 type HoldingMessageLocale = keyof typeof HOLDING_MESSAGES;
+const ORDER_CONFIRMATION_FOLLOW_UP =
+  {
+    sq: 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.',
+    en: 'If you have any other questions or would like to place another order, I am here to help.',
+  } as const;
+
+function normalizeForIncludesCheck(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
 
 function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
   const normalized = normalizeEscalationMessage(text);
@@ -683,6 +697,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
+  let isOrderConfirmationReply = false;
+  if (!usageEscalated && inboundText) {
+    isOrderConfirmationReply = await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText);
+    const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[inferHoldingMessageLocale(inboundText)];
+    if (
+      isOrderConfirmationReply &&
+      !normalizeForIncludesCheck(finalReplyText).includes(
+        normalizeForIncludesCheck(orderFollowUp),
+      )
+    ) {
+      finalReplyText = `${finalReplyText.trim()}\n\n${orderFollowUp}`;
+    }
+  }
+
   const qualityThreshold = getQualityThreshold();
   const containsNegativeAvailabilityPhrase = await classifyNegativeAvailabilityReply(finalReplyText);
   const hasNoMatchingProducts =
@@ -712,7 +740,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     qualityFailing &&
     flagReason !== null &&
     suppressibleOrderConfirmationFlags.has(flagReason) &&
-    (await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText));
+    isOrderConfirmationReply;
   const suppressFalseQualityFlagOnOrderDetailsCollection =
     qualityEval !== null &&
     qualityFailing &&
