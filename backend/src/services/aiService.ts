@@ -646,6 +646,7 @@ function buildSystemPrompt(
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
+    '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one sentence based on the customer language and nothing else. Albanian exact sentence: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet." English exact sentence: "Hello, we\'re sorry for the issue. A member of our team will reply to you shortly."',
   );
 
   if (hasImages) {
@@ -780,6 +781,113 @@ Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | nu
     };
   } catch {
     return { is_cancellation: false, is_refund: false, reason: null, confidence: 0 };
+  }
+}
+
+export async function detectPostPurchaseSupportIntent(
+  inboundMessage: string,
+  conversationHistory: Message[],
+): Promise<{
+  is_delivery_eta_query: boolean;
+  is_not_delivered_complaint: boolean;
+  is_wrong_product_issue: boolean;
+  is_product_problem_issue: boolean;
+  confidence: number;
+  reason: string | null;
+}> {
+  const historySlice = conversationHistory.slice(-8);
+  const historyText = historySlice
+    .map((msg) => {
+      const who = msg.sent_by === 'customer' ? 'Customer' : 'Agent';
+      return `${who}: ${(msg.content ?? '').trim()}`;
+    })
+    .join('\n');
+
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_CHAT_MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: `You are a strict support-intent classifier for post-purchase issues.
+Detect only these intents about an order that has already been placed:
+1) delivery ETA query (customer asks when the package/product will arrive),
+2) not delivered complaint (customer says they still have not received it),
+3) wrong product issue (customer says they received the wrong item),
+4) product problem issue (damaged/defective/problematic product received).
+
+Set booleans to true only when the latest message clearly refers to a completed purchase/order context.
+Set all booleans false for:
+- pre-purchase shipping policy questions,
+- generic delivery information not tied to their own order,
+- vague complaints without delivery/product issue context.
+
+Return JSON exactly:
+{
+  "is_delivery_eta_query": boolean,
+  "is_not_delivered_complaint": boolean,
+  "is_wrong_product_issue": boolean,
+  "is_product_problem_issue": boolean,
+  "confidence": number,
+  "reason": string | null
+}`,
+      },
+      {
+        role: 'user',
+        content: `Conversation context:\n${historyText || '(none)'}\n\nLatest customer message:\n${inboundMessage}`,
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 240,
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) {
+    return {
+      is_delivery_eta_query: false,
+      is_not_delivered_complaint: false,
+      is_wrong_product_issue: false,
+      is_product_problem_issue: false,
+      confidence: 0,
+      reason: null,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      is_delivery_eta_query?: boolean;
+      is_not_delivered_complaint?: boolean;
+      is_wrong_product_issue?: boolean;
+      is_product_problem_issue?: boolean;
+      confidence?: number;
+      reason?: string | null;
+    };
+
+    let confidence = 0;
+    const confRaw = parsed.confidence;
+    if (typeof confRaw === 'number' && Number.isFinite(confRaw)) {
+      confidence = confRaw > 1 ? confRaw / 100 : confRaw;
+    }
+    confidence = Math.min(1, Math.max(0, confidence));
+    const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
+
+    return {
+      is_delivery_eta_query: parsed.is_delivery_eta_query === true,
+      is_not_delivered_complaint: parsed.is_not_delivered_complaint === true,
+      is_wrong_product_issue: parsed.is_wrong_product_issue === true,
+      is_product_problem_issue: parsed.is_product_problem_issue === true,
+      confidence,
+      reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
+    };
+  } catch {
+    return {
+      is_delivery_eta_query: false,
+      is_not_delivered_complaint: false,
+      is_wrong_product_issue: false,
+      is_product_problem_issue: false,
+      confidence: 0,
+      reason: null,
+    };
   }
 }
 
