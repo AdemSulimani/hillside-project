@@ -30,10 +30,10 @@ function estimateTokens(text: string): number {
 
 /** Matches normalized inbound text from webhookNormalizer (Feature 22). */
 const SHARED_CONTENT_SYSTEM_APPEND =
-  '\n\nThe customer has shared content with you. Use the context provided to respond appropriately and relate it to available products where relevant.';
+  '\n\nKlienti ka ndare permbajtje me ju. Përdor kontekstin qe jepet per te dhene pergjigjen e pershtatshme dhe lidhe me produktet nga katalogu kur eshte relevante.';
 
 const SHARED_POST_VISION_APPEND =
-  ' For Instagram post shares, rely primarily on the attached preview image(s).';
+  ' Per postimet e Instagram-it (shares), mbeshtetu kryesisht te pamjet/parapamjet e bashkengjitura.';
 
 function inboundTextIsPostShare(content: string): boolean {
   return content.trimStart().startsWith('Customer shared a post');
@@ -622,6 +622,7 @@ function buildSystemPrompt(
   lines.push(
     '',
     'Guidelines:',
+    '- You MUST reply in Albanian only (shqip). Never output English.',
     '- Keep replies concise and conversational — this is a chat, not an email.',
     '- If the customer asks about a product you don\'t have, say so honestly.',
     '- When the requested product is unavailable or not an exact match, clearly say that exact product is not available, then immediately suggest 2-3 similar alternatives from the same category in the catalog.',
@@ -646,11 +647,11 @@ function buildSystemPrompt(
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
-    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in the customer language only: Albanian: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar." English: "If you have any other questions or would like to place another order, I am here to help." Never include both language versions in the same reply.',
+    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in Albanian only: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar."',
     '- For ambiguous short customer replies (e.g., "po", "ok", "yes", "po ju lutem"), rely on conversation context and classifier signals to decide intent. Do not classify based only on keywords. If classifier/context indicates order affirmation, continue order flow; escalate only when classifier/context indicates a real post-purchase issue.',
     '- Draft/confirm order behavior must be triggered only when classifier + conversation context indicate explicit order affirmation. Product inquiries alone (price, stock, details, comparison, availability) are not order confirmation.',
     '- Never treat an order as complete/ready for creation unless BOTH required delivery details are present: a contact phone number and a full delivery/shipping address. If either detail is missing, ask specifically for the missing detail and do not confirm order placement yet.',
-    '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one sentence based on the customer language and nothing else. Albanian exact sentence: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet." English exact sentence: "Hello, we\'re sorry for the issue. A member of our team will reply to you shortly."',
+    '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one Albanian sentence and nothing else: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet."',
   );
 
   if (hasImages) {
@@ -1230,11 +1231,11 @@ function buildMessagesArray(
 const CONVERSATION_ENDING_ANALYST_SYSTEM =
   "You are a conversation analyst. Your only job is to determine if a message signals that a conversation is ending. This includes any form of goodbye, thank you and goodbye combined, polite dismissal, or closing pleasantry in ANY language including formal and informal versions, slang, abbreviations, and regional variations. For example in Albanian 'klm' means 'kalofshi mirë' which is have a nice day. 'fln' means 'faleminderit' which is thank you. Consider all such abbreviations and slang as ending signals. Return only a JSON object with a single boolean field: { is_ending: true } or { is_ending: false }";
 
-const CLOSING_REPLY_SYSTEM_APPEND = `
+const CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE = `
 Final-closing behavior:
 - If the latest customer message is a closing/thank-you/goodbye signal, reply with exactly one short polite closing sentence.
-- Keep it brief (around 2-7 words), warm, and natural in the customer's language.
-- If the customer language is Albanian, use this exact sentence: "Pa problem, kaloni bukur."
+- Keep it brief (around 2-7 words), warm, and natural in Albanian.
+- Reply ONLY in Albanian. Use this exact sentence: "__CLOSING_SENTENCE__".
 - Do not ask any follow-up question.
 - Do not continue the sales flow or introduce new topics.
 `.trim();
@@ -1273,6 +1274,26 @@ function looksLikePoliteThanksClosing(messageContent: string): boolean {
     return true;
   }
   return shortMessageWordCount <= 8 && hasClosingToken;
+}
+
+type ClosingFlavor = 'no_thanks' | 'greeting';
+
+function classifyClosingFlavor(messageContent: string): ClosingFlavor {
+  const normalized = normalizeClosingSignalText(messageContent);
+  if (!normalized) return 'greeting';
+
+  const noThanksPatterns = [
+    /\b(jo|sjo)\b/,
+    /\b(ska nevoje|ska nevoj|s ka nevoje|s ka nevoj)\b/,
+    /\b(nuk ka nevoje|nuk ka nevoj)\b/,
+    /\b(no thanks|no thank you)\b/,
+  ];
+
+  if (noThanksPatterns.some((pattern) => pattern.test(normalized))) {
+    return 'no_thanks';
+  }
+
+  return 'greeting';
 }
 
 function getPreviousAssistantMessageBeforeLatestCustomer(
@@ -1501,26 +1522,26 @@ export async function generateReply(
     conversationEnding = false;
   }
 
-  let previousAssistantWasClosing = false;
   if (conversationEnding && !inboundMessage.includes('?')) {
+    const closingFlavor = classifyClosingFlavor(inboundMessage);
+    const noThanksClosing = 'Pa problem, kaloni bukur.';
+    const greetingClosing = 'Edhe ju gjithashtu, kalofshi bukur.';
+    const closingSentence =
+      closingFlavor === 'no_thanks' ? noThanksClosing : greetingClosing;
+
     const previousAssistant = getPreviousAssistantMessageBeforeLatestCustomer(historyForPrompt);
     const previousAssistantText = (previousAssistant?.content ?? '').trim();
-    if (previousAssistantText) {
-      try {
-        previousAssistantWasClosing = await isConversationEnding(
-          previousAssistantText,
-          historyForPrompt.slice(0, -1),
-        );
-      } catch {
-        previousAssistantWasClosing = false;
-      }
-    }
+    const explicitClosingReplies = new Set([noThanksClosing, greetingClosing]);
 
-    if (previousAssistantWasClosing) {
+    if (previousAssistantText && explicitClosingReplies.has(previousAssistantText)) {
       return { reply: '[NO_REPLY]', productCatalogContext: resolvedProductCatalogContext };
     }
 
-    systemPrompt += `\n\n${CLOSING_REPLY_SYSTEM_APPEND}`;
+    const closingAppend = CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE.replace(
+      '__CLOSING_SENTENCE__',
+      closingSentence,
+    );
+    systemPrompt += `\n\n${closingAppend}`;
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as

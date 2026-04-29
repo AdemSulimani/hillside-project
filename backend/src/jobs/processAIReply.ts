@@ -79,13 +79,40 @@ function normalizeEscalationMessage(value: string): string {
     .toLowerCase();
 }
 
+function extractPhoneNumberCandidate(text: string): string | null {
+  const raw = String(text ?? '').trim();
+  if (!raw) return null;
+
+  // Capture phone-like sequences that include digits, spaces, dashes, parentheses and optional leading '+'.
+  const candidates = raw.match(/\+?\d[\d\s().-]{5,}\d/g) ?? [];
+  if (candidates.length === 0) return null;
+
+  const best = candidates.reduce((a, b) => (b.length > a.length ? b : a));
+  const hasPlus = best.trim().startsWith('+');
+  const digits = best.replace(/[^\d]/g, '');
+
+  if (digits.length < 7 || digits.length > 15) return null;
+  return hasPlus ? `+${digits}` : digits;
+}
+
+function extractPhoneNumberFromMessages(
+  messages: Array<{ sent_by: string; content: string | null }>,
+): string | null {
+  // Prefer the latest customer-provided phone number in recent messages.
+  const recent = [...messages].reverse();
+  for (const msg of recent) {
+    if (msg.sent_by !== 'customer') continue;
+    const phone = extractPhoneNumberCandidate(msg.content ?? '');
+    if (phone) return phone;
+  }
+  return null;
+}
+
 function isUsageEscalationHoldingMessage(value: string): boolean {
   const normalized = normalizeEscalationMessage(value);
   const exactCandidates = [
     'pershendetje, se shpejti do t\'ju kontaktoje nje specialist lidhur me kete ceshtje.',
     'pershendetje, se shpejti do tju kontaktoje nje specialist lidhur me kete ceshtje.',
-    "that's a great question — let me connect you with our team who can give you the most accurate answer on that.",
-    "that's a great question - let me connect you with our team who can give you the most accurate answer on that.",
   ];
   if (exactCandidates.some((candidate) => normalized === normalizeEscalationMessage(candidate))) {
     return true;
@@ -97,13 +124,7 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
     (normalized.includes('se shpejti') || normalized.includes('shpejt')) &&
     normalized.includes('ceshtje');
 
-  const looksLikeEnglishEscalation =
-    normalized.includes('connect you with our team') ||
-    (normalized.includes('team') &&
-      normalized.includes('accurate answer') &&
-      normalized.includes('great question'));
-
-  return looksLikeAlbanianEscalation || looksLikeEnglishEscalation;
+  return looksLikeAlbanianEscalation;
 }
 
 const HOLDING_MESSAGES = {
@@ -113,32 +134,13 @@ const HOLDING_MESSAGES = {
     usageEscalation:
       'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
   },
-  en: {
-    postPurchaseSupport:
-      "Hello, we're sorry for the issue. A member of our team will reply to you shortly.",
-    usageEscalation:
-      "Hello, a specialist from our team will contact you shortly regarding this issue.",
-  },
 } as const;
 
 type HoldingMessageLocale = keyof typeof HOLDING_MESSAGES;
 const ORDER_CONFIRMATION_FOLLOW_UP =
   {
     sq: 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.',
-    en: 'If you have any other questions or would like to place another order, I am here to help.',
   } as const;
-
-const BILINGUAL_GUARD_PHRASE_PAIRS = [
-  ORDER_CONFIRMATION_FOLLOW_UP,
-  {
-    sq: HOLDING_MESSAGES.sq.postPurchaseSupport,
-    en: HOLDING_MESSAGES.en.postPurchaseSupport,
-  },
-  {
-    sq: HOLDING_MESSAGES.sq.usageEscalation,
-    en: HOLDING_MESSAGES.en.usageEscalation,
-  },
-] as const;
 
 function normalizeForIncludesCheck(value: string): string {
   return value
@@ -150,21 +152,8 @@ function normalizeForIncludesCheck(value: string): string {
 }
 
 function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
-  const normalized = normalizeEscalationMessage(text);
-  if (!normalized) return 'sq';
-
-  const albanianSignal =
-    /(^|\b)(pershendetje|porosi|porosia|derges|dorez|ankes|problem|gabuar|nuk|ende|kam|nuk me ka ardh|seshte)\b/.test(
-      normalized,
-    ) || /[ëç]/i.test(text);
-  const englishSignal =
-    /(^|\b)(hello|hi|order|delivery|shipping|refund|wrong|item|problem|issue|not delivered|still havent|still haven't|received)\b/.test(
-      normalized,
-    );
-
-  if (albanianSignal) return 'sq';
-  if (englishSignal) return 'en';
-  return 'en';
+  // Shqip-only mode.
+  return 'sq';
 }
 
 function stripExactSentenceLine(text: string, sentence: string): string {
@@ -178,26 +167,35 @@ function stripExactSentenceLine(text: string, sentence: string): string {
 
 function enforceSingleLanguageSystemPhrases(
   text: string,
-  locale: HoldingMessageLocale,
+  _locale: HoldingMessageLocale,
 ): string {
-  const oppositeLocale: HoldingMessageLocale = locale === 'sq' ? 'en' : 'sq';
-  let result = text;
+  return text;
+}
 
-  for (const pair of BILINGUAL_GUARD_PHRASE_PAIRS) {
-    const keepPhrase = pair[locale];
-    const removePhrase = pair[oppositeLocale];
-    const hasKeep = normalizeForIncludesCheck(result).includes(
-      normalizeForIncludesCheck(keepPhrase),
-    );
-    const hasRemove = normalizeForIncludesCheck(result).includes(
-      normalizeForIncludesCheck(removePhrase),
-    );
-    if (hasKeep && hasRemove) {
-      result = stripExactSentenceLine(result, removePhrase);
-    }
-  }
+const KNOWN_ENGLISH_REPLY_LINES = [
+  'If you have any other questions or would like to place another order, I am here to help.',
+  "Hello, we're sorry for the issue. A member of our team will reply to you shortly.",
+  'Hello, a specialist from our team will contact you shortly regarding this issue.',
+] as const;
 
-  return result;
+const KNOWN_ENGLISH_REPLY_LINES_NORMALIZED = new Set(
+  KNOWN_ENGLISH_REPLY_LINES.map((line) => normalizeForIncludesCheck(line)),
+);
+
+function stripKnownEnglishPhrases(text: string): string {
+  const cleanedLines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return true;
+      const normalizedLine = normalizeForIncludesCheck(line.replace(/^[-*]\s*/, ''));
+      return !KNOWN_ENGLISH_REPLY_LINES_NORMALIZED.has(normalizedLine);
+    });
+
+  return cleanedLines
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function hasPostPurchaseIssueCue(text: string): boolean {
@@ -810,21 +808,29 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
   if (inboundText) {
-    finalReplyText = enforceSingleLanguageSystemPhrases(
-      finalReplyText,
-      inferHoldingMessageLocale(inboundText),
-    );
+    finalReplyText = stripKnownEnglishPhrases(finalReplyText);
   }
 
   const qualityThreshold = getQualityThreshold();
+  const explicitClosingReplies = [
+    'Pa problem, kaloni bukur.',
+    'Edhe ju gjithashtu, kalofshi bukur.',
+  ];
   const containsNegativeAvailabilityPhrase = await classifyNegativeAvailabilityReply(finalReplyText);
   const hasNoMatchingProducts =
     productCatalogContext.trim() === 'No matching products found in the catalog.';
   const skipEvaluationForHonestNegative =
     !usageEscalated && containsNegativeAvailabilityPhrase && hasNoMatchingProducts;
+  const skipEvaluationForClosingReply =
+    !usageEscalated &&
+    explicitClosingReplies.some(
+      (sentence) =>
+        normalizeForIncludesCheck(finalReplyText) ===
+        normalizeForIncludesCheck(sentence),
+    );
   const qualityEval = usageEscalated
     ? null
-    : skipEvaluationForHonestNegative
+    : skipEvaluationForHonestNegative || skipEvaluationForClosingReply
       ? {
           quality_score: 0.95,
           is_off_topic: false,
@@ -873,6 +879,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   } else if (skipEvaluationForHonestNegative) {
     console.info(
       `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: honest_negative_no_matching_products`,
+    );
+  } else if (skipEvaluationForClosingReply) {
+    console.info(
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: closing_reply`,
     );
   } else if (!qualityEval) {
     console.info(
@@ -1024,9 +1034,26 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     const meta = contact.metadata ?? {};
     const phoneRaw = meta.phone ?? meta.phone_number ?? meta.phoneNumber;
-    const customerPhone =
+    const customerPhoneFromMetadata =
       typeof phoneRaw === 'string' && phoneRaw.trim() ? phoneRaw.trim() : null;
+    const customerPhoneFromConversation = extractPhoneNumberFromMessages(messagesForIntent);
+    const customerPhoneFromContactExternalId =
+      channel.type === 'whatsapp' ? extractPhoneNumberCandidate(contact.external_id) : null;
+    const customerPhone =
+      customerPhoneFromMetadata ?? customerPhoneFromConversation ?? customerPhoneFromContactExternalId;
     const hasCustomerPhone = typeof customerPhone === 'string' && customerPhone.length > 0;
+
+    const recentCustomerAffirmation = messagesForIntent
+      .slice(-20)
+      .some(
+        (msg) =>
+          msg.sent_by === 'customer' &&
+          typeof msg.content === 'string' &&
+          looksLikeOrderAffirmation(msg.content),
+      );
+
+    const shouldAffirmOrder =
+      latestMessageAffirmsOrder || explicitNewOrder || recentCustomerAffirmation;
 
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
@@ -1034,7 +1061,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       intent.product_name != null &&
       hasDeliveryAddress &&
       hasCustomerPhone &&
-      (latestMessageAffirmsOrder || explicitNewOrder);
+      shouldAffirmOrder;
 
     if (!passesDraftOrderValidation) {
       console.info('[ai.reply] Skipping draft order creation due to failed validation', {
@@ -1042,6 +1069,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         tenantId,
         explicitNewOrder,
         latestMessageAffirmsOrder,
+        recentCustomerAffirmation,
+        shouldAffirmOrder,
         orderAffirmationConfidence: orderAffirmationIntent.confidence,
         orderAffirmationReason: orderAffirmationIntent.reason,
         hasDeliveryAddress,
