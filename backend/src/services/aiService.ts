@@ -583,6 +583,76 @@ function formatQAPairs(pairs: { question: string; answer: string }[]): string {
   return `\n\nFrequently Asked Questions:\n${formatted}`;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractCatalogBrandProductPairs(
+  productCatalogContext: string,
+): Array<{ brand: string; product: string }> {
+  if (!productCatalogContext.trim()) return [];
+  const pairs: Array<{ brand: string; product: string }> = [];
+  const lines = productCatalogContext.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const match = /^-\s*Brand:\s*(.+?),\s*Product:\s*(.+?),\s*Type:/i.exec(line);
+    if (!match) continue;
+    const brand = match[1]?.trim();
+    const product = match[2]?.trim();
+    if (!brand || !product) continue;
+    if (brand.toLowerCase() === 'unknown') continue;
+    pairs.push({ brand, product });
+  }
+  return pairs;
+}
+
+function normalizeProductMentionsForReply(
+  reply: string,
+  productCatalogContext: string,
+): string {
+  let normalized = reply;
+  const quoteChars = `"'“”‘’`;
+  const escapedQuoteChars = `"'“”‘’`;
+  const pairs = extractCatalogBrandProductPairs(productCatalogContext);
+
+  for (const { brand, product } of pairs) {
+    const escapedBrand = escapeRegExp(brand);
+    const escapedProduct = escapeRegExp(product);
+    const brandPlusProduct = new RegExp(`\\b${escapedBrand}\\s+${escapedProduct}\\b`, 'giu');
+    normalized = normalized.replace(brandPlusProduct, product);
+
+    const wrappedProduct = new RegExp(
+      `[\"'“”‘’]\\s*(${escapedProduct})\\s*[\"'“”‘’]`,
+      'giu',
+    );
+    normalized = normalized.replace(wrappedProduct, '$1');
+
+    const leadingQuotedProduct = new RegExp(
+      `([\\s(\\[{:,;-])["'“”‘’]\\s*(${escapedProduct})(?=[\\s)\\]}.!?,;:-]|$)`,
+      'giu',
+    );
+    normalized = normalized.replace(leadingQuotedProduct, '$1$2');
+  }
+
+  // Remove quote artifacts after Albanian product-article words.
+  normalized = normalized.replace(
+    new RegExp(`\\b(produkti|produktin|produktit|produktet)\\s*[${escapedQuoteChars}]+`, 'giu'),
+    '$1 ',
+  );
+  // Remove quote artifacts before punctuation and duplicated whitespace.
+  normalized = normalized
+    .replace(new RegExp(`[${escapedQuoteChars}]+(?=[.,!?;:])`, 'gu'), '')
+    .replace(/\s{2,}/g, ' ');
+
+  // If there are unmatched quote chars left in message, strip them to avoid odd rendering.
+  const quoteCount = [...normalized].filter((ch) => quoteChars.includes(ch)).length;
+  if (quoteCount % 2 === 1) {
+    normalized = normalized.replace(new RegExp(`[${escapedQuoteChars}]`, 'gu'), '');
+  }
+
+  return normalized.trim();
+}
+
 function buildSystemPrompt(
   businessName: string,
   config: typeof DEFAULT_AI_CONFIG,
@@ -641,6 +711,10 @@ function buildSystemPrompt(
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
     '- Do not automatically end non-product/general conversation replies with a generic follow-up question.',
     '- If the customer asks about any product (availability, details, comparison, or alternatives), always end the reply with one short order-oriented follow-up question.',
+    '- If the latest customer messages repeat or paraphrase the same question, combine them and answer once without repeating the same information.',
+    '- Do not wrap product names in quotation marks when answering normally. Mention product names naturally in the sentence, or use a generic reference like "produkti" when the exact name is unnecessary.',
+    '- Exception: when the customer asks for recommendations or asks which product to choose/compare, explicitly mention the relevant product names clearly (still without quotation marks).',
+    '- In customer-facing text, refer to items by product name only; do not include the brand name unless the customer explicitly asks for brand details.',
     '- Avoid robotic closings like "anything else I can help with?" unless the conversation context clearly requires it.',
     '- For non-product/general chat, end naturally when appropriate without forcing a question.',
     '- For product-related replies, the order-focused follow-up is mandatory (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni").',
@@ -1572,5 +1646,8 @@ export async function generateReply(
     throw new Error('OpenAI returned an empty response');
   }
 
-  return { reply: reply.trim(), productCatalogContext: resolvedProductCatalogContext };
+  return {
+    reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
+    productCatalogContext: resolvedProductCatalogContext,
+  };
 }
