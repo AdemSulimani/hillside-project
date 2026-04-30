@@ -12,6 +12,7 @@ import { findContactById } from '../db/models/contact';
 import {
   createMessage,
   findMessagesByConversation,
+  type Message,
   updateMessageSendFailure,
 } from '../db/models/message';
 import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
@@ -106,6 +107,104 @@ function extractPhoneNumberFromMessages(
     if (phone) return phone;
   }
   return null;
+}
+
+function normalizeQuestionForSimilarity(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function tokenSet(value: string): Set<string> {
+  return new Set(
+    normalizeQuestionForSimilarity(value)
+      .split(' ')
+      .filter((token) => token.length > 2),
+  );
+}
+
+function areLikelyDuplicateQuestions(a: string, b: string): boolean {
+  const normalizedA = normalizeQuestionForSimilarity(a);
+  const normalizedB = normalizeQuestionForSimilarity(b);
+  if (!normalizedA || !normalizedB) return false;
+  if (normalizedA === normalizedB) return true;
+
+  const minLen = Math.min(normalizedA.length, normalizedB.length);
+  if (
+    minLen >= 12 &&
+    (normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA))
+  ) {
+    return true;
+  }
+
+  const tokensA = tokenSet(normalizedA);
+  const tokensB = tokenSet(normalizedB);
+  if (tokensA.size === 0 || tokensB.size === 0) return false;
+
+  let overlap = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) overlap += 1;
+  }
+  const union = new Set([...tokensA, ...tokensB]).size;
+  const jaccard = union === 0 ? 0 : overlap / union;
+  return jaccard >= 0.82;
+}
+
+function buildInboundBurstContext(recentMessages: Message[]): {
+  latestInbound: Message | null;
+  mergedInboundText: string;
+  mergedAttachmentUrls: string[];
+} {
+  const reversed = [...recentMessages].reverse();
+  const latestInbound = reversed.find((msg) => msg.direction === 'inbound') ?? null;
+  if (!latestInbound) {
+    return { latestInbound: null, mergedInboundText: '', mergedAttachmentUrls: [] };
+  }
+
+  const latestOutboundIndex = reversed.findIndex((msg) => msg.direction === 'outbound');
+  const burstSource = reversed
+    .slice(0, latestOutboundIndex >= 0 ? latestOutboundIndex : reversed.length)
+    .filter((msg) => msg.direction === 'inbound')
+    .reverse()
+    .slice(-5);
+
+  const uniqueQuestions: string[] = [];
+  for (const msg of burstSource) {
+    const text = (msg.content ?? '').trim();
+    if (!text) continue;
+    const alreadyIncluded = uniqueQuestions.some((existing) =>
+      areLikelyDuplicateQuestions(existing, text),
+    );
+    if (!alreadyIncluded) {
+      uniqueQuestions.push(text);
+    }
+  }
+
+  const mergedInboundText =
+    uniqueQuestions.length > 0
+      ? uniqueQuestions.join('\n')
+      : (latestInbound.content ?? '').trim();
+  const mergedAttachmentUrls = burstSource.flatMap((msg) =>
+    Array.isArray(msg.attachment_urls)
+      ? msg.attachment_urls.filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : [],
+  );
+
+  return { latestInbound, mergedInboundText, mergedAttachmentUrls };
+}
+
+async function latestInboundStillMatches(
+  conversationId: string,
+  expectedExternalMessageId: string,
+): Promise<boolean> {
+  const latestMessages = await findMessagesByConversation(conversationId, 8);
+  const latestInbound = [...latestMessages].reverse().find((msg) => msg.direction === 'inbound');
+  if (!latestInbound) return false;
+  return latestInbound.external_message_id === expectedExternalMessageId;
 }
 
 function isUsageEscalationHoldingMessage(value: string): boolean {
@@ -329,17 +428,27 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
-  const recentMessages = await findMessagesByConversation(conversationId, 10);
-  const lastInbound = [...recentMessages].reverse().find((m) => m.direction === 'inbound');
-  const inboundText = (lastInbound?.content ?? '').trim();
+  const recentMessages = await findMessagesByConversation(conversationId, 25);
+  const { latestInbound: lastInbound, mergedInboundText, mergedAttachmentUrls } =
+    buildInboundBurstContext(recentMessages);
+  if (!lastInbound) {
+    console.info('[ai.reply] No inbound message found in conversation, skipping', { conversationId });
+    return;
+  }
+  if (lastInbound.external_message_id !== data.messageExternalId) {
+    console.info('[ai.reply] Skipping stale AI job because a newer inbound message exists', {
+      conversationId,
+      scheduledFor: data.messageExternalId,
+      latestInboundExternalId: lastInbound.external_message_id,
+    });
+    return;
+  }
+  const inboundText = mergedInboundText.trim();
   if (inboundText.startsWith('Customer sent a reaction:')) {
     console.info('[ai.reply] Skipping automated reply for reaction-only inbound', { conversationId });
     return;
   }
-  const rawUrls = lastInbound?.attachment_urls;
-  const attachmentUrls = Array.isArray(rawUrls)
-    ? rawUrls.filter((u): u is string => typeof u === 'string' && u.length > 0)
-    : [];
+  const attachmentUrls = mergedAttachmentUrls;
 
   if (!inboundText && attachmentUrls.length === 0) {
     console.info('[ai.reply] No text content or attachments in inbound message, skipping');
@@ -403,6 +512,17 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           let sendResult:
             | Awaited<ReturnType<typeof sendMessage>>
             | null = null;
+          const stillLatestBeforeAck = await latestInboundStillMatches(
+            conversationId,
+            data.messageExternalId,
+          );
+          if (!stillLatestBeforeAck) {
+            console.info('[ai.reply] Skipping cancellation/refund ack because newer inbound arrived', {
+              conversationId,
+              scheduledFor: data.messageExternalId,
+            });
+            return;
+          }
           if (contactForSend) {
             sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
           }
@@ -560,6 +680,17 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let sendResult:
           | Awaited<ReturnType<typeof sendMessage>>
           | null = null;
+        const stillLatestBeforePostPurchaseAck = await latestInboundStillMatches(
+          conversationId,
+          data.messageExternalId,
+        );
+        if (!stillLatestBeforePostPurchaseAck) {
+          console.info('[ai.reply] Skipping post-purchase holding message because newer inbound arrived', {
+            conversationId,
+            scheduledFor: data.messageExternalId,
+          });
+          return;
+        }
         if (contactForSend) {
           sendResult = await sendMessage(
             channel,
@@ -902,6 +1033,17 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
+  const stillLatestBeforeSend = await latestInboundStillMatches(
+    conversationId,
+    data.messageExternalId,
+  );
+  if (!stillLatestBeforeSend) {
+    console.info('[ai.reply] Skipping AI send because newer inbound arrived during processing', {
+      conversationId,
+      scheduledFor: data.messageExternalId,
+    });
+    return;
+  }
   if (contact) {
     sendResult = await sendMessage(channel, contact.external_id, finalReplyText);
   } else {
