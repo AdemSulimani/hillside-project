@@ -20,6 +20,12 @@ export const updateBusinessSchema = z.object({
     .array(z.string().min(1))
     .min(1, 'At least one delivery method is required')
     .optional(),
+  delivery_time: z
+    .enum(['24h', '48h', '72h'], {
+      message: 'Delivery time must be one of 24h, 48h, or 72h',
+    })
+    .nullable()
+    .optional(),
   plan: z
     .string()
     .max(50, 'Plan must be at most 50 characters')

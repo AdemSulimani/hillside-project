@@ -5,6 +5,7 @@ import { findTenantById, updateTenant } from '../db/models/tenant';
 import { sendSuccess, sendError } from '../utils/response';
 import type { UpdateBusinessInput } from '../validators/business';
 import { uploadImage } from '../services/cloudinaryService';
+import { redisConnection } from '../jobs/redisConnection';
 
 export async function show(req: Request, res: Response): Promise<void> {
   try {
@@ -33,6 +34,8 @@ export async function update(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    await redisConnection.del(`tenant:${tenantId}`);
+
     sendSuccess(res, { business: updated }, 'Business updated successfully');
   } catch (err) {
     sendError(res, 'Failed to update business', 500, err);
@@ -57,6 +60,8 @@ export async function uploadLogo(req: Request, res: Response): Promise<void> {
       sendError(res, 'Business not found', 404);
       return;
     }
+
+    await redisConnection.del(`tenant:${tenantId}`);
 
     sendSuccess(res, { logo_url: logoUrl }, 'Logo uploaded successfully');
   } catch (err) {

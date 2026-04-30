@@ -8,12 +8,15 @@ export interface User {
   updated_at: string;
 }
 
+export type DeliveryTime = '24h' | '48h' | '72h';
+
 export interface Tenant {
   id: string;
   name: string;
   niche: string;
   description: string | null;
   delivery_methods: string[];
+  delivery_time: DeliveryTime | null;
   logo_url: string | null;
   plan: string;
   created_at: string;

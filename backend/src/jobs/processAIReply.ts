@@ -9,6 +9,7 @@ import {
   touchConversationLastMessageAt,
 } from '../db/models/conversation';
 import { findContactById } from '../db/models/contact';
+import { findTenantById, type DeliveryTime } from '../db/models/tenant';
 import {
   createMessage,
   findMessagesByConversation,
@@ -235,6 +236,17 @@ const HOLDING_MESSAGES = {
       'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
   },
 } as const;
+
+const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
+  '24h': 24,
+  '48h': 48,
+  '72h': 72,
+};
+
+function buildDeliveryEtaReply(deliveryTime: DeliveryTime): string {
+  const hours = DELIVERY_TIME_LABEL_HOURS[deliveryTime];
+  return `Përshëndetje, porosia juaj do të mbërrijë brenda ${hours} orëve.`;
+}
 
 type HoldingMessageLocale = keyof typeof HOLDING_MESSAGES;
 const ORDER_CONFIRMATION_FOLLOW_UP =
@@ -758,6 +770,80 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       console.info(
         `[POST_PURCHASE_SUPPORT] tenantId: ${tenantId} conversationId: ${conversationId} eta_query: ${postPurchaseSupportIntent.is_delivery_eta_query} not_delivered: ${postPurchaseSupportIntent.is_not_delivered_complaint} wrong_product: ${postPurchaseSupportIntent.is_wrong_product_issue} product_problem: ${postPurchaseSupportIntent.is_product_problem_issue} confidence: ${postPurchaseSupportIntent.confidence} reasoning: ${logJsonStringOrNull(postPurchaseSupportIntent.reason)}`,
       );
+
+      // Auto-reply with the configured delivery time when the customer is only asking
+      // about ETA (not a delay/issue complaint). The existing alert system for delays
+      // and post-purchase issues below remains untouched.
+      const isDeliveryEtaOnlyQuery =
+        postPurchaseSupportIntent.is_delivery_eta_query &&
+        !postPurchaseSupportIntent.is_not_delivered_complaint &&
+        !postPurchaseSupportIntent.is_wrong_product_issue &&
+        !postPurchaseSupportIntent.is_product_problem_issue &&
+        confidentPostPurchaseSupportIntent;
+
+      if (isDeliveryEtaOnlyQuery) {
+        const tenantForDelivery = await findTenantById(tenantId);
+        const configuredDeliveryTime = tenantForDelivery?.delivery_time ?? null;
+        if (configuredDeliveryTime) {
+          const deliveryEtaReply = buildDeliveryEtaReply(configuredDeliveryTime);
+          const stillLatestBeforeEtaAck = await latestInboundStillMatches(
+            conversationId,
+            data.messageExternalId,
+          );
+          if (!stillLatestBeforeEtaAck) {
+            console.info('[ai.reply] Skipping delivery ETA auto-reply because newer inbound arrived', {
+              conversationId,
+              scheduledFor: data.messageExternalId,
+            });
+            return;
+          }
+
+          const contactForEtaSend = await findContactById(conversation.contact_id);
+          let etaSendResult:
+            | Awaited<ReturnType<typeof sendMessage>>
+            | null = null;
+          if (contactForEtaSend) {
+            etaSendResult = await sendMessage(
+              channel,
+              contactForEtaSend.external_id,
+              deliveryEtaReply,
+            );
+          }
+
+          const outboundEta = await createMessage({
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            external_message_id: etaSendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+            direction: 'outbound',
+            type: 'text',
+            content: deliveryEtaReply,
+            sent_by: 'ai',
+          });
+
+          socketService.emitNewMessage(tenantId, outboundEta);
+          socketService.emitConversationUpdated(tenantId, conversationId);
+
+          if (!etaSendResult?.success && etaSendResult) {
+            const errReason = etaSendResult.error ?? 'Failed to send delivery ETA reply';
+            await updateMessageSendFailure(outboundEta.id, tenantId, 'failed', errReason);
+            socketService.emitMessageSendFailed(tenantId, {
+              messageId: outboundEta.id,
+              conversationId,
+              error: errReason,
+            });
+          }
+
+          await touchConversationLastMessageAt(conversationId);
+          console.info(
+            `[DELIVERY_ETA_AUTO_REPLY] tenantId: ${tenantId} conversationId: ${conversationId} delivery_time: ${configuredDeliveryTime}`,
+          );
+          return;
+        }
+
+        console.info(
+          `[DELIVERY_ETA_AUTO_REPLY] skipped because tenant has no delivery_time configured tenantId: ${tenantId} conversationId: ${conversationId}`,
+        );
+      }
 
       if (hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent) {
         const locale = inferHoldingMessageLocale(inboundText);
