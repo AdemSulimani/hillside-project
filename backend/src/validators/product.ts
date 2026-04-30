@@ -1,104 +1,137 @@
 import { z } from 'zod';
 
-export const createProductSchema = z.object({
-  name: z
-    .string()
-    .min(1, 'Product name is required')
-    .max(255, 'Product name must be at most 255 characters'),
-  brand: z
-    .string()
-    .max(255, 'Brand must be at most 255 characters')
-    .nullable()
-    .optional(),
-  price: z
-    .number()
-    .min(0, 'Price must be a positive number'),
-  description: z
-    .string()
-    .max(5000, 'Description must be at most 5000 characters')
-    .nullable()
-    .optional(),
-  usage_description: z
-    .string()
-    .max(10000, 'Usage description must be at most 10000 characters')
-    .nullable()
-    .optional(),
-  sku: z
-    .string()
-    .max(100, 'SKU must be at most 100 characters')
-    .nullable()
-    .optional(),
-  category: z
-    .string()
-    .max(255, 'Category must be at most 255 characters')
-    .nullable()
-    .optional(),
-  tags: z
-    .array(z.string().min(1))
-    .optional()
-    .default([]),
-  is_active: z
-    .boolean()
-    .optional()
-    .default(true),
-  stock_quantity: z
-    .number()
-    .int('Stock quantity must be a whole number')
-    .min(0, 'Stock quantity must be non-negative')
-    .nullable()
-    .optional(),
-});
+export const createProductSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1, 'Product name is required')
+      .max(255, 'Product name must be at most 255 characters'),
+    brand: z
+      .string()
+      .max(255, 'Brand must be at most 255 characters')
+      .nullable()
+      .optional(),
+    price: z
+      .number()
+      .min(0, 'Price must be a positive number'),
+    discounted_price: z
+      .number()
+      .min(0, 'Discounted price must be a positive number')
+      .nullable()
+      .optional(),
+    description: z
+      .string()
+      .max(5000, 'Description must be at most 5000 characters')
+      .nullable()
+      .optional(),
+    usage_description: z
+      .string()
+      .max(10000, 'Usage description must be at most 10000 characters')
+      .nullable()
+      .optional(),
+    sku: z
+      .string()
+      .max(100, 'SKU must be at most 100 characters')
+      .nullable()
+      .optional(),
+    category: z
+      .string()
+      .max(255, 'Category must be at most 255 characters')
+      .nullable()
+      .optional(),
+    tags: z
+      .array(z.string().min(1))
+      .optional()
+      .default([]),
+    is_active: z
+      .boolean()
+      .optional()
+      .default(true),
+    stock_quantity: z
+      .number()
+      .int('Stock quantity must be a whole number')
+      .min(0, 'Stock quantity must be non-negative')
+      .nullable()
+      .optional(),
+  })
+  .refine(
+    (data) =>
+      data.discounted_price === undefined ||
+      data.discounted_price === null ||
+      data.discounted_price < data.price,
+    {
+      message: 'Discounted price must be lower than the regular price',
+      path: ['discounted_price'],
+    },
+  );
 
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 
-export const updateProductSchema = z.object({
-  name: z
-    .string()
-    .min(1, 'Product name is required')
-    .max(255, 'Product name must be at most 255 characters')
-    .optional(),
-  brand: z
-    .string()
-    .max(255, 'Brand must be at most 255 characters')
-    .nullable()
-    .optional(),
-  price: z
-    .number()
-    .min(0, 'Price must be a positive number')
-    .optional(),
-  description: z
-    .string()
-    .max(5000, 'Description must be at most 5000 characters')
-    .nullable()
-    .optional(),
-  usage_description: z
-    .string()
-    .max(10000, 'Usage description must be at most 10000 characters')
-    .nullable()
-    .optional(),
-  sku: z
-    .string()
-    .max(100, 'SKU must be at most 100 characters')
-    .nullable()
-    .optional(),
-  category: z
-    .string()
-    .max(255, 'Category must be at most 255 characters')
-    .nullable()
-    .optional(),
-  tags: z
-    .array(z.string().min(1))
-    .optional(),
-  is_active: z
-    .boolean()
-    .optional(),
-  stock_quantity: z
-    .number()
-    .int('Stock quantity must be a whole number')
-    .min(0, 'Stock quantity must be non-negative')
-    .nullable()
-    .optional(),
-});
+export const updateProductSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1, 'Product name is required')
+      .max(255, 'Product name must be at most 255 characters')
+      .optional(),
+    brand: z
+      .string()
+      .max(255, 'Brand must be at most 255 characters')
+      .nullable()
+      .optional(),
+    price: z
+      .number()
+      .min(0, 'Price must be a positive number')
+      .optional(),
+    discounted_price: z
+      .number()
+      .min(0, 'Discounted price must be a positive number')
+      .nullable()
+      .optional(),
+    description: z
+      .string()
+      .max(5000, 'Description must be at most 5000 characters')
+      .nullable()
+      .optional(),
+    usage_description: z
+      .string()
+      .max(10000, 'Usage description must be at most 10000 characters')
+      .nullable()
+      .optional(),
+    sku: z
+      .string()
+      .max(100, 'SKU must be at most 100 characters')
+      .nullable()
+      .optional(),
+    category: z
+      .string()
+      .max(255, 'Category must be at most 255 characters')
+      .nullable()
+      .optional(),
+    tags: z
+      .array(z.string().min(1))
+      .optional(),
+    is_active: z
+      .boolean()
+      .optional(),
+    stock_quantity: z
+      .number()
+      .int('Stock quantity must be a whole number')
+      .min(0, 'Stock quantity must be non-negative')
+      .nullable()
+      .optional(),
+  })
+  .refine(
+    (data) =>
+      data.discounted_price === undefined ||
+      data.discounted_price === null ||
+      data.price === undefined ||
+      data.discounted_price < data.price,
+    {
+      message: 'Discounted price must be lower than the regular price',
+      path: ['discounted_price'],
+    },
+  );
 
 export type UpdateProductInput = z.infer<typeof updateProductSchema>;
 
