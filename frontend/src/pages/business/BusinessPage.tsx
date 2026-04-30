@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import type { ApiResponse, Tenant } from '@/types';
+import type { ApiResponse, DeliveryTime, Tenant } from '@/types';
 
 const NICHES = [
   'E-commerce',
@@ -25,11 +25,18 @@ const DELIVERY_METHODS = [
   'Digital',
 ];
 
+const DELIVERY_TIME_OPTIONS: ReadonlyArray<{ value: DeliveryTime; label: string }> = [
+  { value: '24h', label: '24 hours' },
+  { value: '48h', label: '48 hours' },
+  { value: '72h', label: '72 hours' },
+];
+
 interface BusinessFieldErrors {
   name?: string[];
   niche?: string[];
   description?: string[];
   delivery_methods?: string[];
+  delivery_time?: string[];
 }
 
 const selectClasses =
@@ -60,6 +67,7 @@ export default function BusinessPage() {
   const [niche, setNiche] = useState('');
   const [description, setDescription] = useState('');
   const [deliveryMethods, setDeliveryMethods] = useState<string[]>([]);
+  const [deliveryTime, setDeliveryTime] = useState<DeliveryTime | ''>('');
   const [errors, setErrors] = useState<BusinessFieldErrors>({});
   const [generalError, setGeneralError] = useState('');
 
@@ -81,6 +89,7 @@ export default function BusinessPage() {
       setNiche(business.niche);
       setDescription(business.description ?? '');
       setDeliveryMethods(business.delivery_methods);
+      setDeliveryTime(business.delivery_time ?? '');
       setLogoPreview(assetUrl(business.logo_url) ?? null);
     }
   }, [business]);
@@ -92,6 +101,7 @@ export default function BusinessPage() {
       niche: string;
       description: string | null;
       delivery_methods: string[];
+      delivery_time: DeliveryTime | null;
     }) => {
       const { data } = await api.put<ApiResponse<{ business: Tenant }>>('/business', payload);
       return data.data!.business;
@@ -177,6 +187,7 @@ export default function BusinessPage() {
       niche,
       description: description.trim() || null,
       delivery_methods: deliveryMethods,
+      delivery_time: deliveryTime === '' ? null : deliveryTime,
     });
   }
 
@@ -324,6 +335,31 @@ export default function BusinessPage() {
                   <p key={msg} className="text-xs text-destructive">{msg}</p>
                 ))}
               </fieldset>
+
+              <div className="space-y-2">
+                <Label htmlFor="deliveryTime">
+                  Delivery Time Information{' '}
+                  <span className="font-normal text-muted-foreground">(optional)</span>
+                </Label>
+                <select
+                  id="deliveryTime"
+                  value={deliveryTime}
+                  onChange={(e) => setDeliveryTime(e.target.value as DeliveryTime | '')}
+                  aria-invalid={!!errors.delivery_time}
+                  className={selectClasses}
+                >
+                  <option value="">Not configured</option>
+                  {DELIVERY_TIME_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  When set, the AI will reply to delivery ETA questions with this estimated time.
+                </p>
+                {errors.delivery_time?.map((msg) => (
+                  <p key={msg} className="text-xs text-destructive">{msg}</p>
+                ))}
+              </div>
 
               <div className="pt-2">
                 <Button type="submit" disabled={updateMutation.isPending}>
