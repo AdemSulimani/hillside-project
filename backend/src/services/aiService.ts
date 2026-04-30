@@ -268,6 +268,19 @@ const ORDER_DETAILS_COLLECTION_REPLY_FALLBACK_KEYWORDS = [
   'complete your order',
 ];
 
+const ORDER_CLOSING_QUESTION_FALLBACK_KEYWORDS = [
+  'a doni ta porosisni',
+  'deshironi ta porosisni',
+  'dëshironi ta porosisni',
+  'doni ta porosisni',
+  'doni me porosit',
+  'doni me bo porosi',
+  'a e porosisni',
+  'do you want to order',
+  'would you like to order',
+  'want to order it',
+];
+
 function includesAnyKeyword(message: string, keywords: string[]): boolean {
   const t = message.trim().toLowerCase();
   if (!t) return false;
@@ -484,6 +497,43 @@ export async function classifyOrderDetailsCollectionReplyIntent(
   return includesAnyKeyword(replyNormalized, ORDER_DETAILS_COLLECTION_REPLY_FALLBACK_KEYWORDS);
 }
 
+export async function classifyOrderClosingQuestionReplyIntent(message: string): Promise<boolean> {
+  const reply = message.trim();
+  if (!reply) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict classifier. Determine whether the assistant reply includes an order-closing question that asks the customer to place/proceed with an order (in any language). Return only JSON: {"is_order_closing_question": true} or {"is_order_closing_question": false}. Mark true for phrases like "A doni ta porosisni?" or "Would you like to order?".',
+        },
+        {
+          role: 'user',
+          content: `Assistant reply:\n${reply}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_order_closing_question?: boolean };
+      if (parsed.is_order_closing_question === true) return true;
+      if (parsed.is_order_closing_question === false) return false;
+    }
+  } catch {
+    // Fall through to keyword fallback when classifier is unavailable.
+  }
+
+  const normalized = normalizeForIntentMatch(reply);
+  return includesAnyKeyword(normalized, ORDER_CLOSING_QUESTION_FALLBACK_KEYWORDS);
+}
+
 async function customerAskedAboutPrice(message: string): Promise<boolean> {
   const inbound = message.trim();
   if (!inbound) return false;
@@ -659,6 +709,7 @@ function buildSystemPrompt(
   productCatalogContext: string,
   hasImages: boolean,
   customerAskedPrice: boolean,
+  orderClosingAlreadyAskedInConversation: boolean,
 ): string {
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
@@ -710,20 +761,27 @@ function buildSystemPrompt(
     '- If the customer requests more units than available, clearly state the maximum currently available quantity for that product and offer that amount.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
     '- Do not automatically end non-product/general conversation replies with a generic follow-up question.',
-    '- If the customer asks about any product (availability, details, comparison, or alternatives), always end the reply with one short order-oriented follow-up question.',
+    '- Strict anti-repetition rule: never repeat the same order-closing question in two consecutive assistant replies for the same product context.',
+    '- After you ask an order-closing question once in a conversation, do not ask another order-closing question again in later replies.',
+    orderClosingAlreadyAskedInConversation
+      ? '- An order-closing question has already been asked earlier in this conversation. Do not ask another order-closing question in this reply.'
+      : '- If the customer asks about any product (availability, details, comparison, or alternatives), end this first product reply with one short order-oriented follow-up question.',
     '- If the latest customer messages repeat or paraphrase the same question, combine them and answer once without repeating the same information.',
     '- Do not wrap product names in quotation marks when answering normally. Mention product names naturally in the sentence, or use a generic reference like "produkti" when the exact name is unnecessary.',
     '- Exception: when the customer asks for recommendations or asks which product to choose/compare, explicitly mention the relevant product names clearly (still without quotation marks).',
     '- In customer-facing text, refer to items by product name only; do not include the brand name unless the customer explicitly asks for brand details.',
     '- Avoid robotic closings like "anything else I can help with?" unless the conversation context clearly requires it.',
     '- For non-product/general chat, end naturally when appropriate without forcing a question.',
-    '- For product-related replies, the order-focused follow-up is mandatory (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni").',
+    orderClosingAlreadyAskedInConversation
+      ? '- For this turn, do not include any order-focused closing question, because it was already asked earlier in the conversation.'
+      : '- For this turn, include one order-focused follow-up (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni").',
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
     '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in Albanian only: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar."',
     '- For ambiguous short customer replies (e.g., "po", "ok", "yes", "po ju lutem"), rely on conversation context and classifier signals to decide intent. Do not classify based only on keywords. If classifier/context indicates order affirmation, continue order flow; escalate only when classifier/context indicates a real post-purchase issue.',
     '- Draft/confirm order behavior must be triggered only when classifier + conversation context indicate explicit order affirmation. Product inquiries alone (price, stock, details, comparison, availability) are not order confirmation.',
+    '- If the assistant has already asked to proceed with an order (or requested delivery details), and the customer then provides BOTH required details (phone number and full delivery address), treat that as valid order-confirmation context even without an explicit "yes" in the latest message.',
     '- Never treat an order as complete/ready for creation unless BOTH required delivery details are present: a contact phone number and a full delivery/shipping address. If either detail is missing, ask specifically for the missing detail and do not confirm order placement yet.',
     '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one Albanian sentence and nothing else: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet."',
   );
@@ -1386,6 +1444,31 @@ function getPreviousAssistantMessageBeforeLatestCustomer(
   return undefined;
 }
 
+function assistantMessageAskedForOrder(messageContent: string): boolean {
+  const normalized = normalizeForIntentMatch(messageContent);
+  if (!normalized) return false;
+
+  const explicitOrderQuestionPatterns = [
+    /\b(a doni ta porosisni|deshironi ta porosisni|deshiron ta porositesh)\b/,
+    /\b(doni ta porosisni|doni me porosit|doni me bo porosi)\b/,
+    /\b(would you like to order|do you want to order)\b/,
+  ];
+  if (explicitOrderQuestionPatterns.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
+  const hasOrderKeyword = /\b(porosi|porosis|porosit|order)\b/.test(normalized);
+  return hasOrderKeyword && messageContent.includes('?');
+}
+
+function hasAssistantAskedForOrderInConversation(conversationHistory: Message[]): boolean {
+  return conversationHistory.some(
+    (msg) =>
+      msg.sent_by !== 'customer' &&
+      assistantMessageAskedForOrder((msg.content ?? '').trim()),
+  );
+}
+
 async function isConversationEnding(
   messageContent: string,
   conversationHistory: Message[],
@@ -1534,12 +1617,15 @@ export async function generateReply(
     typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
       ? productCatalogContext
       : formatProductCatalog(products, { includePrice: customerAskedPrice });
+  const orderClosingAlreadyAskedInConversation =
+    hasAssistantAskedForOrderInConversation(conversationHistory);
   let systemPrompt = buildSystemPrompt(
     tenant.name,
     config,
     resolvedProductCatalogContext,
     hasImages,
     customerAskedPrice,
+    orderClosingAlreadyAskedInConversation,
   );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {

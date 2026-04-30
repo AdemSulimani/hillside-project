@@ -28,6 +28,7 @@ import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   classifyNegativeAvailabilityReply,
   classifyNewOrderSignal,
+  classifyOrderClosingQuestionReplyIntent,
   classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
@@ -245,9 +246,121 @@ function normalizeForIncludesCheck(value: string): string {
   return value
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+function messageLooksLikeOrderDetailsPayload(text: string): boolean {
+  const raw = (text ?? '').trim();
+  if (!raw) return false;
+
+  const hasPhone = extractPhoneNumberCandidate(raw) !== null;
+  if (!hasPhone) return false;
+
+  const normalized = normalizeEscalationMessage(raw);
+  const hasAddressKeywords =
+    /\b(adres|address|rrug|street|banes|bllok|nr|number)\b/.test(normalized);
+  const hasAddressLikeStructure =
+    raw.includes(',') || /\b\d{1,4}\b/.test(raw) || normalized.length >= 20;
+  return hasAddressKeywords || hasAddressLikeStructure;
+}
+
+function normalizeForOrderPromptMatch(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s?]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function messageContainsOrderClosingAsk(value: string): boolean {
+  const raw = (value ?? '').trim();
+  if (!raw) return false;
+  const normalized = normalizeForOrderPromptMatch(raw);
+  if (!normalized) return false;
+
+  const explicitPatterns = [
+    /\b(a doni ta porosisni|deshironi ta porosisni|deshiron ta porositesh)\b/,
+    /\b(doni ta porosisni|doni me porosit|doni me bo porosi)\b/,
+    /\b(do you want to order|would you like to order)\b/,
+  ];
+  if (explicitPatterns.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
+  const hasOrderKeyword = /\b(porosi|porosis|porosit|order)\b/.test(normalized);
+  const hasQuestionMark = raw.includes('?');
+  const hasQuestionCue = /\b(a|deshironi|doni|mund|would|do)\b/.test(normalized);
+  return hasOrderKeyword && (hasQuestionMark || hasQuestionCue);
+}
+
+async function hasAssistantAskedOrderClosingInConversation(
+  recentMessages: Message[],
+): Promise<boolean> {
+  const assistantMessages = recentMessages.filter((msg) => msg.sent_by !== 'customer');
+  for (const msg of assistantMessages) {
+    const content = (msg.content ?? '').trim();
+    if (!content) continue;
+    if (messageContainsOrderClosingAsk(content)) return true;
+    if (await classifyOrderClosingQuestionReplyIntent(content)) return true;
+  }
+  return false;
+}
+
+async function messageContainsOrderClosingAskHybrid(value: string): Promise<boolean> {
+  const raw = (value ?? '').trim();
+  if (!raw) return false;
+  if (messageContainsOrderClosingAsk(raw)) return true;
+  return classifyOrderClosingQuestionReplyIntent(raw);
+}
+
+async function stripRepeatedOrderClosingQuestion(
+  replyText: string,
+  orderClosingAlreadyAskedInConversation: boolean,
+): Promise<string> {
+  const reply = (replyText ?? '').trim();
+  if (!reply) return reply;
+  if (!orderClosingAlreadyAskedInConversation) return reply;
+  if (!(await messageContainsOrderClosingAskHybrid(reply))) return reply;
+
+  const sentenceLikeChunks = reply
+    .split(/(?<=[.!?])\s+/u)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+  if (sentenceLikeChunks.length > 1) {
+    const cleanedChunks = sentenceLikeChunks.filter(
+      (chunk) => !messageContainsOrderClosingAsk(chunk),
+    );
+    if (cleanedChunks.length > 0 && cleanedChunks.length < sentenceLikeChunks.length) {
+      return cleanedChunks.join(' ').trim();
+    }
+  }
+
+  const cleanedLines = reply
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => !messageContainsOrderClosingAsk(line))
+    .filter((line) => line.length > 0);
+  if (cleanedLines.length > 0) {
+    return cleanedLines.join('\n').trim();
+  }
+
+  // Fallback: remove only trailing repeated order-closing questions from single-line replies.
+  return reply
+    .replace(
+      /\s*(a\s+doni\s+t[aeë]\s+porosisni(?:\s+\p{L}+){0,5}\?)\s*$/iu,
+      '',
+    )
+    .replace(
+      /\s*((d[eë]shironi|doni|mund)\s+t[aeë]\s+porosisni(?:\s+\p{L}+){0,5}\?)\s*$/iu,
+      '',
+    )
+    .replace(/\s*(do\s+you\s+want\s+to\s+order(?:\s+it)?\?)\s*$/iu, '')
+    .trim();
 }
 
 function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
@@ -940,6 +1053,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
   if (inboundText) {
     finalReplyText = stripKnownEnglishPhrases(finalReplyText);
+    const orderClosingAlreadyAskedInConversation =
+      await hasAssistantAskedOrderClosingInConversation(recentMessages);
+    finalReplyText = await stripRepeatedOrderClosingQuestion(
+      finalReplyText,
+      orderClosingAlreadyAskedInConversation,
+    );
   }
 
   const qualityThreshold = getQualityThreshold();
@@ -1194,8 +1313,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           looksLikeOrderAffirmation(msg.content),
       );
 
+    const assistantAskedOrderClosingEarlier = await hasAssistantAskedOrderClosingInConversation(
+      messagesForIntent,
+    );
+    const latestMessageProvidesOrderDetails = messageLooksLikeOrderDetailsPayload(inboundText);
     const shouldAffirmOrder =
-      latestMessageAffirmsOrder || explicitNewOrder || recentCustomerAffirmation;
+      latestMessageAffirmsOrder ||
+      explicitNewOrder ||
+      recentCustomerAffirmation ||
+      (latestMessageProvidesOrderDetails && assistantAskedOrderClosingEarlier);
 
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
@@ -1212,6 +1338,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         explicitNewOrder,
         latestMessageAffirmsOrder,
         recentCustomerAffirmation,
+        assistantAskedOrderClosingEarlier,
+        latestMessageProvidesOrderDetails,
         shouldAffirmOrder,
         orderAffirmationConfidence: orderAffirmationIntent.confidence,
         orderAffirmationReason: orderAffirmationIntent.reason,
