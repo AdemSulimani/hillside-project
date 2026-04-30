@@ -138,7 +138,9 @@ function buildTestSystemPrompt(
   lines.push(
     '',
     'Guidelines:',
-    '- Keep replies concise and conversational — this is a chat, not an email.',
+    '- Default to short replies: lead with the answer, avoid long intros and filler, and skip unnecessary bullet lists — messaging-app style.',
+    '- If more detail is needed, stay tight and structured; no essay-length or cluttered answers.',
+    '- Keep tone conversational — this is a chat, not an email.',
     '- If the customer asks about a product you don\'t have, say so honestly.',
     '- Never fabricate product details, prices, or availability.',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
