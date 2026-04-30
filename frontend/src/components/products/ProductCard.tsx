@@ -52,9 +52,20 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
           {product.brand?.trim() && (
             <p className="text-xs text-muted-foreground">{product.brand}</p>
           )}
-          <p className="text-lg font-semibold tabular-nums">
-            ${product.price.toFixed(2)}
-          </p>
+          {product.discounted_price != null ? (
+            <div className="flex items-baseline gap-2">
+              <p className="text-lg font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
+                ${product.discounted_price.toFixed(2)}
+              </p>
+              <p className="text-sm text-muted-foreground line-through tabular-nums">
+                ${product.price.toFixed(2)}
+              </p>
+            </div>
+          ) : (
+            <p className="text-lg font-semibold tabular-nums">
+              ${product.price.toFixed(2)}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap gap-1">
           {product.brand?.trim() && (

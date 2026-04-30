@@ -74,6 +74,7 @@ export async function store(req: Request, res: Response): Promise<void> {
       name: input.name,
       brand: input.brand ?? null,
       price: input.price,
+      discounted_price: input.discounted_price ?? null,
       description: input.description ?? null,
       usage_description: input.usage_description ?? null,
       sku: input.sku ?? null,

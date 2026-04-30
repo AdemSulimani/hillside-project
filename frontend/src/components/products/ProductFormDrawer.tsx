@@ -33,6 +33,7 @@ const emptyValues = (): ProductFormValues => ({
   name: '',
   brand: '',
   priceInput: '',
+  discountedPriceInput: '',
   description: '',
   usage_description: '',
   sku: '',
@@ -47,6 +48,10 @@ function productToValues(p: Product): ProductFormValues {
     name: p.name,
     brand: p.brand ?? '',
     priceInput: Number.isFinite(p.price) ? String(p.price) : '0',
+    discountedPriceInput:
+      p.discounted_price != null && Number.isFinite(p.discounted_price)
+        ? String(p.discounted_price)
+        : '',
     description: p.description ?? '',
     usage_description: p.usage_description ?? '',
     sku: p.sku ?? '',
@@ -287,6 +292,28 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
                 <p className="text-xs text-destructive">{fieldErrors.stockInput}</p>
               )}
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pf-discounted-price">
+              Discounted price{' '}
+              <span className="font-normal text-muted-foreground">(optional)</span>
+            </Label>
+            <Input
+              id="pf-discounted-price"
+              inputMode="decimal"
+              placeholder="Leave empty if no discount is available"
+              value={values.discountedPriceInput}
+              onChange={(e) => setField('discountedPriceInput', e.target.value)}
+              aria-invalid={!!fieldErrors.discountedPriceInput}
+              className="h-10"
+            />
+            <p className="text-xs text-muted-foreground">
+              Maximum discount the AI can offer when a customer asks for a lower price. Must be lower than the regular price. Leave empty if no discount is available — the AI will reply that the current price is final.
+            </p>
+            {fieldErrors.discountedPriceInput && (
+              <p className="text-xs text-destructive">{fieldErrors.discountedPriceInput}</p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">

@@ -580,6 +580,125 @@ async function customerAskedAboutPrice(message: string): Promise<boolean> {
   ].some((needle) => t.includes(needle));
 }
 
+const DISCOUNT_REQUEST_KEYWORDS = [
+  'discount',
+  'discounted',
+  'cheaper',
+  'lower price',
+  'reduce',
+  'reduction',
+  'sale',
+  'promo',
+  'promotion',
+  'deal',
+  'offer',
+  'coupon',
+  'zbritje',
+  'zbritj',
+  'ulje',
+  'me lire',
+  'me lir',
+  'me ulje',
+  'me zbritje',
+  'me zbritj',
+  'oferte',
+  'ofertë',
+  'cmim me i lire',
+  'qmim me i lire',
+  'a ben dicka',
+  'a ben gje',
+  'a ka zbritje',
+  'a ka ulje',
+];
+
+export async function customerAskedAboutDiscount(message: string): Promise<boolean> {
+  const inbound = message.trim();
+  if (!inbound) return false;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict intent classifier. Detect whether the customer message asks for a discount, price reduction, sale, promotion, special offer, deal, or any form of lower price (in any language, slang, shorthand, or misspelling). This includes negotiation phrases like "can you go lower", "any discount", "make it cheaper", or in Albanian "a ka zbritje", "a ben dicka me cmimin", "me lire". Return only JSON: {"is_discount_request": true} or {"is_discount_request": false}.',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_discount_request?: boolean };
+      if (parsed.is_discount_request === true) return true;
+      if (parsed.is_discount_request === false) return false;
+    }
+  } catch {
+    // Fall through to lexical fallback if classifier is unavailable.
+  }
+
+  return includesAnyKeyword(inbound, DISCOUNT_REQUEST_KEYWORDS);
+}
+
+function assistantAlreadyAddressedDiscount(conversationHistory: Message[]): boolean {
+  const assistantMessages = conversationHistory.filter((msg) => msg.sent_by !== 'customer');
+  if (assistantMessages.length === 0) return false;
+
+  return assistantMessages.some((msg) => {
+    const normalized = normalizeForIntentMatch(msg.content ?? '');
+    if (!normalized) return false;
+    return (
+      /\b(zbritj|ulje|me lire|me lir|cmim final|qmim final|cmimi aktual|qmimi aktual|nuk mund te aplikohet|nuk mund te bejme zbritje|asnje zbritje|nuk ka zbritje)\b/.test(
+        normalized,
+      ) ||
+      /\b(discount|reduction|final price|no further discount|no additional discount|cannot offer)\b/.test(
+        normalized,
+      )
+    );
+  });
+}
+
+/**
+ * Detects whether a previous assistant reply has already communicated that the price is final
+ * (no additional discount possible, or the displayed price is final because no discount is configured).
+ * Used to silence repeated discount requests once the matter has been finalized.
+ */
+function assistantAlreadyFinalizedDiscount(conversationHistory: Message[]): boolean {
+  const assistantMessages = conversationHistory.filter((msg) => msg.sent_by !== 'customer');
+  if (assistantMessages.length === 0) return false;
+
+  return assistantMessages.some((msg) => {
+    const normalized = normalizeForIntentMatch(msg.content ?? '');
+    if (!normalized) return false;
+
+    // Albanian: "çmim ... final" / "çmimi aktual është final" (after diacritic stripping).
+    const albanianFinalPrice =
+      /\b(final|finale)\b/.test(normalized) &&
+      /\b(cmim|cmimi|qmim|qmimi)\b/.test(normalized);
+
+    // Albanian: "nuk mund të aplikohet zbritje shtesë" / "asnjë zbritje" / "nuk është e mundur asnjë zbritje".
+    const albanianNoFurtherDiscount =
+      /\b(zbritje shtese|zbritj shtese|asnje zbritje|asnje zbritj|nuk ka zbritje|nuk ka zbritj|nuk eshte e mundur asnje zbritje|nuk eshte e mundur asnje zbritj|nuk mund te aplikohet|nuk mund te bejme zbritje|nuk mund te beje zbritje)\b/.test(
+        normalized,
+      );
+
+    // English fallback.
+    const englishFinalPrice =
+      /\b(final price|price is final|no further discount|no additional discount|no more discount|cannot offer (any|further|additional))\b/.test(
+        normalized,
+      );
+
+    return albanianFinalPrice || albanianNoFurtherDiscount || englishFinalPrice;
+  });
+}
+
 /** Lexical catalog lookup for inbound customer text (short phrase or full question). */
 export async function findProductsForInboundMessage(
   tenantId: string,
@@ -595,8 +714,12 @@ export async function findProductsForInboundMessage(
   return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
 }
 
-export function formatProductCatalog(products: Product[], options?: { includePrice?: boolean }): string {
+export function formatProductCatalog(
+  products: Product[],
+  options?: { includePrice?: boolean; includeDiscount?: boolean },
+): string {
   const includePrice = options?.includePrice ?? true;
+  const includeDiscount = options?.includeDiscount ?? false;
   if (products.length === 0) return 'No matching products found in the catalog.';
 
   return products
@@ -607,6 +730,19 @@ export function formatProductCatalog(products: Product[], options?: { includePri
       ];
       if (includePrice) {
         parts.push(`  Price: $${Number(p.price).toFixed(2)}`);
+      }
+      if (includeDiscount || includePrice) {
+        const discounted = p.discounted_price;
+        if (discounted !== null && discounted !== undefined) {
+          const discountedNum = Number(discounted);
+          if (Number.isFinite(discountedNum)) {
+            parts.push(
+              `  Discounted price (maximum offer when customer asks for a discount): $${discountedNum.toFixed(2)}`,
+            );
+          }
+        } else if (includeDiscount) {
+          parts.push('  Discounted price: not configured (no discount available)');
+        }
       }
       if (p.description) parts.push(`  ${p.description}`);
       if (p.usage_description) {
@@ -710,6 +846,8 @@ function buildSystemPrompt(
   hasImages: boolean,
   customerAskedPrice: boolean,
   orderClosingAlreadyAskedInConversation: boolean,
+  customerAskedDiscount: boolean,
+  discountAlreadyAddressedInConversation: boolean,
 ): string {
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
@@ -756,6 +894,20 @@ function buildSystemPrompt(
     customerAskedPrice
       ? '- The customer asked about price in this message. You may include pricing only if it matches the catalog exactly.'
       : '- Do not mention any product price unless the customer explicitly asks for the price/cost in their message.',
+    '- Discount handling rules:',
+    '  1) If the customer asks for a discount/lower price/promotion/offer, look up the matched product in the catalog above and check the "Discounted price" line.',
+    '  2) If a "Discounted price" value is configured for that product, offer it explicitly using the EXACT amount from the catalog. In Albanian, reply with one short sentence such as: "Mund t\'jua ofrojmë me [discounted_price].". Do not invent or round the value.',
+    '  3) The configured "Discounted price" is the MAXIMUM available discount. Never propose a value lower than the catalog discounted price, and never offer multiple progressively smaller prices.',
+    '  4) If the customer keeps insisting on a further/extra discount AFTER you have already offered the catalog discounted price (or after a previous assistant message in this conversation has already addressed the discount), reply that no additional discount can be applied. In Albanian use exactly: "Më vjen keq, nuk mund të aplikohet zbritje shtesë. Çmimi që ju ofruam është final."',
+    '  5) If the matched product has NO discounted price configured (the catalog shows "Discounted price: not configured" or no Discounted price line), inform the customer that no discount is available and that the current price is final. In Albanian use exactly: "Për këtë produkt nuk është e mundur asnjë zbritje, çmimi aktual është final." (you may include the regular catalog price if helpful).',
+    '  6) Never reveal a discounted price unless the customer is asking for a discount. Do not volunteer discount info in normal product replies.',
+    '  7) Never invent, estimate, or negotiate a discount value that is not explicitly listed as "Discounted price" in the catalog above.',
+    customerAskedDiscount
+      ? '- The customer is asking for a discount in their current message. Apply the discount handling rules above strictly.'
+      : '- The customer is not asking for a discount in their current message. Do not bring up discounts unsolicited.',
+    discountAlreadyAddressedInConversation
+      ? '- A previous assistant reply in this conversation already addressed the discount question (offered the discounted price or stated none is available). If the customer keeps insisting on a further discount, follow rule (4): no additional discount can be applied.'
+      : '- No prior assistant reply has addressed a discount yet in this conversation.',
     '- Never volunteer stock numbers in normal replies.',
     '- Treat stock_quantity as internal information. Mention an exact stock number only when the customer explicitly asks for stock or requests a quantity higher than available.',
     '- If the customer requests more units than available, clearly state the maximum currently available quantity for that product and offer that amount.',
@@ -1534,10 +1686,34 @@ export async function generateReply(
     conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
       ? conversationHistoryWindow.slice(-RECENT_RAW_HISTORY_MESSAGES)
       : conversationHistoryWindow;
-  const customerAskedPrice = await customerAskedAboutPrice(inboundMessage);
+  const [customerAskedPrice, customerAskedDiscount] = await Promise.all([
+    customerAskedAboutPrice(inboundMessage),
+    customerAskedAboutDiscount(inboundMessage),
+  ]);
 
   if (!tenant) {
     throw new Error(`Tenant not found: ${tenantId}`);
+  }
+
+  // Silence repeated discount requests: once the AI has already told the customer that no
+  // additional discount is available / that the displayed price is final, any further
+  // discount-related message from the same customer is ignored (no AI reply at all).
+  // Scan the full fetched window (not just the recent 10) so finalization is not forgotten
+  // in longer conversations.
+  if (
+    customerAskedDiscount &&
+    assistantAlreadyFinalizedDiscount(conversationHistoryWindow)
+  ) {
+    console.info(
+      `[DISCOUNT_FINALIZED_SILENT] tenantId: ${tenantId} conversationId: ${conversationId} reason: customer keeps asking for a discount after the final price was already communicated`,
+    );
+    return {
+      reply: '[NO_REPLY]',
+      productCatalogContext:
+        typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
+          ? productCatalogContext
+          : '',
+    };
   }
 
   let products: Product[] = [];
@@ -1616,9 +1792,14 @@ export async function generateReply(
   const resolvedProductCatalogContext =
     typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
       ? productCatalogContext
-      : formatProductCatalog(products, { includePrice: customerAskedPrice });
+      : formatProductCatalog(products, {
+          includePrice: customerAskedPrice || customerAskedDiscount,
+          includeDiscount: customerAskedDiscount,
+        });
   const orderClosingAlreadyAskedInConversation =
     hasAssistantAskedForOrderInConversation(conversationHistory);
+  const discountAlreadyAddressedInConversation =
+    customerAskedDiscount && assistantAlreadyAddressedDiscount(conversationHistory);
   let systemPrompt = buildSystemPrompt(
     tenant.name,
     config,
@@ -1626,6 +1807,8 @@ export async function generateReply(
     hasImages,
     customerAskedPrice,
     orderClosingAlreadyAskedInConversation,
+    customerAskedDiscount,
+    discountAlreadyAddressedInConversation,
   );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
