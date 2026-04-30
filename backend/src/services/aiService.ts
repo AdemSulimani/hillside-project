@@ -882,7 +882,10 @@ function buildSystemPrompt(
     '',
     'Guidelines:',
     '- You MUST reply in Albanian only (shqip). Never output English.',
-    '- Keep replies concise and conversational — this is a chat, not an email.',
+    '- Brevity (very important): default to the shortest reply that fully answers — usually a few clear sentences. Lead with the direct answer; avoid long introductions, filler, repeating the customer\'s whole question, essay-length blocks, and unnecessary bullet lists.',
+    '- If a topic truly needs more explanation, stay structured and tight: add only what is necessary, no padding or redundancy — it should still feel easy to skim in a chat thread.',
+    '- Tone stays warm and conversational, but this is a messaging app, not email — scannable beats wordy.',
+    '- When another guideline in this prompt requires exact fixed wording or verbatim catalog text (usage instructions, discount phrases, order confirmation footer, etc.), follow that rule even if the result is longer.',
     '- If the customer asks about a product you don\'t have, say so honestly.',
     '- When the requested product is unavailable or not an exact match, clearly say that exact product is not available, then immediately suggest 2-3 similar alternatives from the same category in the catalog.',
     '- For unavailable-product cases, keep the sequence: (1) unavailable acknowledgement, (2) relevant alternatives from same category, (3) short order-oriented follow-up question.',
@@ -949,6 +952,7 @@ function buildSystemPrompt(
       'Response B - Similar product, different brand: You have a similar product but a different brand. Be honest - say you do not carry that exact brand but offer your alternative. Example: "We do not carry [Brand X] specifically, but we do have [Your Brand] which is a similar mass gainer - would you like details on that?"',
       'Response C - No match at all: You do not have anything similar. Tell the customer honestly and ask if they are looking for something specific you might be able to help with.',
       'Never confirm you have a product just because the product category matches. Brand accuracy matters.',
+      'Use the steps above for your own reasoning only. In the customer-facing message, give a short, clean answer — do not narrate the steps or produce a long structured report.',
     );
   }
 
@@ -1907,7 +1911,8 @@ export async function generateReply(
     model,
     messages: messages as Parameters<typeof openai.chat.completions.create>[0]['messages'],
     temperature: 0.7,
-    max_tokens: 1024,
+    // Cap length to discourage rambling; still enough for verbatim usage text and required fixed phrases.
+    max_tokens: 768,
   });
 
   const reply = completion.choices[0]?.message?.content;
