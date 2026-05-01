@@ -503,6 +503,22 @@ function hasPostPurchaseIssueCue(text: string): boolean {
   );
 }
 
+function hasDeliveryEtaOnlyCue(text: string): boolean {
+  const normalized = normalizeEscalationMessage(text);
+  if (!normalized) return false;
+
+  const asksEta =
+    /(kur|when).*(vjen|arrive|arrival|mberri|deliver|delivery|shipping)/.test(normalized) ||
+    /(sa).*(kohe|ore|hours?).*(vjen|arrive|deliver|shipping)/.test(normalized);
+  const mentionsOrderContext = /\b(order|porosi|porosia|paketa|paket)\b/.test(normalized);
+  const mentionsProblemCue =
+    /(nuk|ska|s'ka|still havent|still haven't|not delivered|vonesa|delay|problem|defekt|gabuar)/.test(
+      normalized,
+    );
+
+  return asksEta && mentionsOrderContext && !mentionsProblemCue;
+}
+
 function looksLikeOrderAffirmation(text: string): boolean {
   const normalized = normalizeEscalationMessage(text);
   if (!normalized) return false;
@@ -802,6 +818,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         orderAffirmationIntent.is_order_affirmation && orderAffirmationIntent.confidence > 0.7;
       const shouldCheckPostPurchaseSupport =
         hasPostPurchaseIssueCue(inboundText) && !looksLikeOrderAffirmation(inboundText) && !isLikelyOrderAffirmation;
+      const likelyDeliveryEtaOnlyByText = hasDeliveryEtaOnlyCue(inboundText);
       if (isLikelyNewOrderSignal) {
         console.info('[POST_PURCHASE_SUPPORT] skipped because message indicates new order intent', {
           conversationId,
@@ -845,11 +862,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // about ETA (not a delay/issue complaint). The existing alert system for delays
       // and post-purchase issues below remains untouched.
       const isDeliveryEtaOnlyQuery =
-        postPurchaseSupportIntent.is_delivery_eta_query &&
-        !postPurchaseSupportIntent.is_not_delivered_complaint &&
-        !postPurchaseSupportIntent.is_wrong_product_issue &&
-        !postPurchaseSupportIntent.is_product_problem_issue &&
-        confidentPostPurchaseSupportIntent;
+        (postPurchaseSupportIntent.is_delivery_eta_query &&
+          !postPurchaseSupportIntent.is_not_delivered_complaint &&
+          !postPurchaseSupportIntent.is_wrong_product_issue &&
+          !postPurchaseSupportIntent.is_product_problem_issue &&
+          confidentPostPurchaseSupportIntent) ||
+        likelyDeliveryEtaOnlyByText;
 
       if (isDeliveryEtaOnlyQuery) {
         const tenantForDelivery = await findTenantById(tenantId);
@@ -1091,7 +1109,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   if (!usageEscalated && isUsageEscalationHoldingMessage(finalReplyText)) {
-    if (usageDescription && usageQuestionIntent) {
+    if (!usageQuestionIntent) {
+      console.info('[ai.reply] Skipping usage escalation fallback because message is not a usage question', {
+        conversationId,
+        tenantId,
+      });
+    } else if (usageDescription && usageQuestionIntent) {
       if (usageQuestionUnanswered === null) {
         try {
           usageQuestionUnanswered = await isUsageQuestionUnanswered(inboundText, usageDescription);

@@ -729,7 +729,7 @@ export function formatProductCatalog(
         `- Brand: ${getProductBrand(p) ?? 'Unknown'}, Product: ${p.name}, Type: ${typeText}`,
       ];
       if (includePrice) {
-        parts.push(`  Price: $${Number(p.price).toFixed(2)}`);
+        parts.push(`  Price: €${Number(p.price).toFixed(2)}`);
       }
       if (includeDiscount || includePrice) {
         const discounted = p.discounted_price;
@@ -737,7 +737,7 @@ export function formatProductCatalog(
           const discountedNum = Number(discounted);
           if (Number.isFinite(discountedNum)) {
             parts.push(
-              `  Discounted price (maximum offer when customer asks for a discount): $${discountedNum.toFixed(2)}`,
+              `  Discounted price (maximum offer when customer asks for a discount): €${discountedNum.toFixed(2)}`,
             );
           }
         } else if (includeDiscount) {
@@ -891,6 +891,7 @@ function buildSystemPrompt(
     '- For unavailable-product cases, keep the sequence: (1) unavailable acknowledgement, (2) relevant alternatives from same category, (3) short order-oriented follow-up question.',
     '- Never fabricate product details, prices, or availability.',
     '- Strict rule: never mention product price or stock availability unless the customer explicitly asks for price/stock in their current message.',
+    '- Currency rule: whenever you mention any product price amount, use the Euro symbol (€), never the dollar sign ($).',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
     '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
     '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
