@@ -14,7 +14,7 @@ export interface Product {
   tags: string[];
   image_urls: string[];
   is_active: boolean;
-  stock_quantity: number | null;
+  in_stock: boolean;
   source_type: ProductSourceType;
   extracted_text: string | null;
   metadata: Record<string, unknown> | null;
@@ -42,7 +42,7 @@ export interface CreateProductBody {
   category?: string | null;
   tags?: string[];
   is_active?: boolean;
-  stock_quantity?: number | null;
+  in_stock?: boolean;
 }
 
 export type UpdateProductBody = Partial<CreateProductBody> & {

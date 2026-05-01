@@ -121,7 +121,7 @@ function buildTestSystemPrompt(
         const parts = [`- ${p.name}: $${Number(p.price).toFixed(2)}`];
         if (p.description) parts.push(`  ${p.description}`);
         if (p.category) parts.push(`  Category: ${p.category}`);
-        if (p.stock_quantity !== null) parts.push(`  In stock: ${p.stock_quantity}`);
+        parts.push(`  Stock status: ${p.in_stock === false ? 'out of stock' : 'in stock'}`);
         return parts.join('\n');
       })
       .join('\n');

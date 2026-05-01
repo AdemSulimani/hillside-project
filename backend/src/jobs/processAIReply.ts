@@ -38,6 +38,7 @@ import {
   detectPostPurchaseSupportIntent,
   findProductsForInboundMessage,
   generateReply,
+  isOutOfStockProductReply,
   isUsageQuestionUnanswered,
 } from '../services/aiService';
 import {
@@ -1039,7 +1040,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
-  const usageCandidates = inboundText ? await findProductsForInboundMessage(tenantId, inboundText, 5) : [];
+  const isOosCannedReply = isOutOfStockProductReply(replyText);
+
+  const usageCandidates =
+    inboundText && !isOosCannedReply
+      ? await findProductsForInboundMessage(tenantId, inboundText, 5)
+      : [];
   const productWithUsage = usageCandidates.find((p) => typeof p.usage_description === 'string' && p.usage_description.trim() !== '');
   const usageDescription = productWithUsage?.usage_description?.trim() ?? null;
 
@@ -1218,7 +1224,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   let isOrderConfirmationReply = false;
-  if (!usageEscalated && inboundText) {
+  if (!usageEscalated && inboundText && !isOosCannedReply) {
     isOrderConfirmationReply = await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText);
     const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[inferHoldingMessageLocale(inboundText)];
     if (
@@ -1257,6 +1263,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     productCatalogContext.trim() === 'No matching products found in the catalog.';
   const skipEvaluationForHonestNegative =
     !usageEscalated && containsNegativeAvailabilityPhrase && hasNoMatchingProducts;
+  const skipEvaluationForOutOfStockCanned = !usageEscalated && isOosCannedReply;
   const skipEvaluationForClosingReply =
     !usageEscalated &&
     explicitClosingReplies.some(
@@ -1266,7 +1273,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     );
   const qualityEval = usageEscalated
     ? null
-    : skipEvaluationForHonestNegative || skipEvaluationForClosingReply
+    : skipEvaluationForHonestNegative ||
+        skipEvaluationForOutOfStockCanned ||
+        skipEvaluationForClosingReply
       ? {
           quality_score: 0.95,
           is_off_topic: false,
@@ -1315,6 +1324,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   } else if (skipEvaluationForHonestNegative) {
     console.info(
       `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: honest_negative_no_matching_products`,
+    );
+  } else if (skipEvaluationForOutOfStockCanned) {
+    console.info(
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: out_of_stock_canned_reply`,
     );
   } else if (skipEvaluationForClosingReply) {
     console.info(
@@ -1539,6 +1552,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     const matchedProduct = nameFromIntent
       ? await findProductByNameCaseInsensitive(tenantId, nameFromIntent)
       : null;
+
+    if (matchedProduct && matchedProduct.in_stock === false) {
+      console.info('[ai.reply] Skipping draft order: product is out of stock', {
+        conversationId,
+        tenantId,
+        productId: matchedProduct.id,
+        productName: matchedProduct.name,
+      });
+      return;
+    }
 
     const productName = matchedProduct?.name ?? nameFromIntent;
     if (!productName) {

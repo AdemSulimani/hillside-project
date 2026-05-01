@@ -14,6 +14,9 @@ import { redisConnection } from '../jobs/redisConnection';
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
 
+/** How many catalog rows we consider for matching + OOS canned detection (needs the named SKU in-list). */
+const FOCUSED_PRODUCT_MATCH_LIMIT = 10;
+
 const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   const raw = process.env.CONTEXT_MAX_HISTORY_TOKENS;
   if (raw === undefined || raw.trim() === '') return 6000;
@@ -714,6 +717,79 @@ export async function findProductsForInboundMessage(
   return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
 }
 
+/** Exact reply when the customer is asking about one focused catalog match that is out of stock. */
+export const OUT_OF_STOCK_PRODUCT_REPLY =
+  'Përshëndetje, produkti për momentin është jashtë stokut. Nëse jeni të interesuar për ndonjë produkt tjetër, mund te ju ndihmoj.';
+
+export function isOutOfStockProductReply(reply: string): boolean {
+  return reply.trim() === OUT_OF_STOCK_PRODUCT_REPLY;
+}
+
+function looksLikeSimpleGreetingOrClosing(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  const lower = t.toLowerCase();
+  if (t.length > 80) return false;
+  return (
+    /^(hi|hello|hey|hej|faleminderit|thanks|thank you|ok|okej)(\s*[!.?])?\s*$/i.test(lower) ||
+    /^(përshëndetje|pershendetje|mirdita)(\s*[!.?])?\s*$/i.test(lower)
+  );
+}
+
+/** Lowercase, strip diacritics, collapse punctuation to spaces (Albanian-friendly loose match). */
+function foldForProductReference(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Whether the inbound text likely names this product (used when several catalog rows matched).
+ * Uses SKU, diacritic-insensitive name match, compact name, token overlap, and brand + name word.
+ */
+function inboundTextLikelyReferencesProduct(inboundMessage: string, product: Product): boolean {
+  const raw = inboundMessage.trim();
+  if (!raw) return false;
+
+  const sku = product.sku?.trim();
+  if (sku && sku.length >= 3) {
+    const skuKey = normalizeForMatch(sku);
+    const msgKey = normalizeForMatch(raw);
+    if (skuKey.length >= 3 && msgKey.includes(skuKey)) return true;
+  }
+
+  const nameRaw = product.name?.trim() ?? '';
+  if (!nameRaw) return false;
+
+  const hay = foldForProductReference(raw);
+  const name = foldForProductReference(nameRaw);
+  if (!name) return false;
+
+  if (name.length >= 3 && hay.includes(name)) return true;
+
+  const nameCompact = name.replace(/\s/g, '');
+  const hayCompact = hay.replace(/\s/g, '');
+  if (nameCompact.length >= 4 && hayCompact.includes(nameCompact)) return true;
+
+  const tokens = name.split(/\s+/).filter((w) => w.length > 0);
+  const significant = tokens.filter((w) => w.length >= 4);
+  const check = significant.length > 0 ? significant : tokens.filter((w) => w.length >= 3);
+  if (check.length === 0) return false;
+  const hits = check.filter((w) => hay.includes(w));
+  if (hits.length >= Math.ceil(check.length * 0.5)) return true;
+
+  const brand = getProductBrand(product);
+  if (brand && brand.trim().length >= 2) {
+    const b = foldForProductReference(brand);
+    if (b.length >= 2 && hay.includes(b) && significant.some((w) => hay.includes(w))) return true;
+  }
+
+  return false;
+}
+
 export function formatProductCatalog(
   products: Product[],
   options?: { includePrice?: boolean; includeDiscount?: boolean },
@@ -751,9 +827,9 @@ export function formatProductCatalog(
       }
       if (p.category) parts.push(`  Category: ${p.category}`);
       if (p.tags.length > 0) parts.push(`  Tags: ${p.tags.join(', ')}`);
-      if (p.stock_quantity !== null) {
-        parts.push(`  Internal stock (agent-only, do not reveal unless needed): ${p.stock_quantity}`);
-      }
+      parts.push(
+        `  Stock status (agent-only; do not mention unless the customer asks about availability/stock): ${p.in_stock === false ? 'out of stock' : 'in stock'}`,
+      );
       return parts.join('\n');
     })
     .join('\n');
@@ -912,9 +988,8 @@ function buildSystemPrompt(
     discountAlreadyAddressedInConversation
       ? '- A previous assistant reply in this conversation already addressed the discount question (offered the discounted price or stated none is available). If the customer keeps insisting on a further discount, follow rule (4): no additional discount can be applied.'
       : '- No prior assistant reply has addressed a discount yet in this conversation.',
-    '- Never volunteer stock numbers in normal replies.',
-    '- Treat stock_quantity as internal information. Mention an exact stock number only when the customer explicitly asks for stock or requests a quantity higher than available.',
-    '- If the customer requests more units than available, clearly state the maximum currently available quantity for that product and offer that amount.',
+    '- Never volunteer stock or availability in normal replies.',
+    '- Treat "Stock status" in the catalog as internal information. Mention availability only when the customer explicitly asks about stock/availability in their current message.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
     '- STRICT FOLLOW-UP / CLOSING POLICY (very important): only include a follow-up question, invitation, or closing prompt in EXACTLY two cases:',
     '  (a) The very first product-related reply in this conversation (only when an order-closing question has not yet been asked in this conversation) may end with exactly ONE short order-oriented follow-up question — e.g., "A doni ta porosisni?".',
@@ -1796,12 +1871,17 @@ export async function generateReply(
   }
 
   let products: Product[] = [];
+  let usedFullCatalogFallback = false;
 
   const searchText = inboundMessage.trim();
   if (searchText) {
     try {
       const queryEmbedding = await generateEmbedding(searchText);
-      const similar = await searchProductsBySimilarity(tenantId, queryEmbedding, 5);
+      const similar = await searchProductsBySimilarity(
+        tenantId,
+        queryEmbedding,
+        FOCUSED_PRODUCT_MATCH_LIMIT,
+      );
       products = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
     } catch (err) {
       console.warn('[aiService] Semantic search failed, falling back to keyword search', err);
@@ -1811,12 +1891,17 @@ export async function generateReply(
   if (products.length === 0) {
     const keywords = extractKeywords(searchText);
     if (keywords.length > 0) {
-      products = await searchProductsByDisjunctiveTerms(tenantId, keywords, 5);
+      products = await searchProductsByDisjunctiveTerms(
+        tenantId,
+        keywords,
+        FOCUSED_PRODUCT_MATCH_LIMIT,
+      );
     }
   }
 
   if (products.length === 0) {
     products = cachedCatalogProducts;
+    usedFullCatalogFallback = true;
   }
 
   let visionContext: string | null = null;
@@ -1835,7 +1920,7 @@ export async function generateReply(
 
       let extractedMatches: Product[] = [];
       if (structuredQuery) {
-        extractedMatches = await searchProducts(tenantId, structuredQuery, 8);
+        extractedMatches = await searchProducts(tenantId, structuredQuery, FOCUSED_PRODUCT_MATCH_LIMIT);
       }
 
       const normalizedBrand = extracted.brand_name?.trim().toLowerCase() ?? null;
@@ -1850,8 +1935,10 @@ export async function generateReply(
 
       if (exactBrandMatches.length > 0) {
         products = exactBrandMatches;
+        usedFullCatalogFallback = false;
       } else if (extractedMatches.length > 0) {
         products = extractedMatches;
+        usedFullCatalogFallback = false;
       }
 
       visionContext = [
@@ -1875,6 +1962,48 @@ export async function generateReply(
           includePrice: customerAskedPrice || customerAskedDiscount,
           includeDiscount: customerAskedDiscount,
         });
+
+  const primaryFocusedProduct = products[0];
+  const referencedOosProduct =
+    searchText.length > 0
+      ? products.find(
+          (p) => p.in_stock === false && inboundTextLikelyReferencesProduct(searchText, p),
+        )
+      : undefined;
+  const primaryOosForCanned =
+    referencedOosProduct ??
+    (primaryFocusedProduct && primaryFocusedProduct.in_stock === false ? primaryFocusedProduct : null);
+
+  const allFocusedOutOfStock =
+    products.length > 0 && products.every((p) => p.in_stock === false);
+  const singleFocusedMatch = products.length === 1;
+  const multiMatchOosOk =
+    singleFocusedMatch ||
+    allFocusedOutOfStock ||
+    referencedOosProduct !== undefined ||
+    (searchText.length > 0 &&
+      primaryFocusedProduct &&
+      inboundTextLikelyReferencesProduct(searchText, primaryFocusedProduct)) ||
+    (searchText.length === 0 &&
+      hasImages &&
+      (singleFocusedMatch || allFocusedOutOfStock));
+
+  const shouldReturnOutOfStockCanned =
+    typeof productCatalogContext !== 'string' &&
+    !usedFullCatalogFallback &&
+    products.length > 0 &&
+    primaryOosForCanned &&
+    multiMatchOosOk &&
+    !looksLikeSimpleGreetingOrClosing(inboundMessage) &&
+    (searchText.length > 0 || hasImages);
+
+  if (shouldReturnOutOfStockCanned) {
+    return {
+      reply: OUT_OF_STOCK_PRODUCT_REPLY,
+      productCatalogContext: resolvedProductCatalogContext,
+    };
+  }
+
   const orderClosingAlreadyAskedInConversation =
     hasAssistantAskedForOrderInConversation(conversationHistory);
   const discountAlreadyAddressedInConversation =

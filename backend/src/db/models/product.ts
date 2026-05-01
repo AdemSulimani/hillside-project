@@ -15,7 +15,7 @@ export interface Product {
   tags: string[];
   image_urls: string[];
   is_active: boolean;
-  stock_quantity: number | null;
+  in_stock: boolean;
   source_type: 'manual' | 'pdf' | 'spreadsheet' | 'image';
   extracted_text: string | null;
   metadata: Record<string, unknown> | null;
@@ -37,7 +37,7 @@ export interface CreateProductInput {
   tags?: string[];
   image_urls?: string[];
   is_active?: boolean;
-  stock_quantity?: number | null;
+  in_stock?: boolean;
   source_type?: Product['source_type'];
   extracted_text?: string | null;
   metadata?: Record<string, unknown> | null;
@@ -55,7 +55,7 @@ export interface UpdateProductInput {
   tags?: string[];
   image_urls?: string[];
   is_active?: boolean;
-  stock_quantity?: number | null;
+  in_stock?: boolean;
   extracted_text?: string | null;
   metadata?: Record<string, unknown> | null;
 }
@@ -71,7 +71,7 @@ export interface ProductSearchParams {
 
 export async function createProduct(input: CreateProductInput): Promise<Product> {
   const { rows } = await pool.query<Product>(
-    `INSERT INTO products (tenant_id, name, brand, price, discounted_price, description, usage_description, sku, category, tags, image_urls, is_active, stock_quantity, source_type, extracted_text, metadata)
+    `INSERT INTO products (tenant_id, name, brand, price, discounted_price, description, usage_description, sku, category, tags, image_urls, is_active, in_stock, source_type, extracted_text, metadata)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb)
      RETURNING *`,
     [
@@ -87,7 +87,7 @@ export async function createProduct(input: CreateProductInput): Promise<Product>
       JSON.stringify(input.tags ?? []),
       JSON.stringify(input.image_urls ?? []),
       input.is_active ?? true,
-      input.stock_quantity ?? null,
+      input.in_stock ?? true,
       input.source_type ?? 'manual',
       input.extracted_text ?? null,
       input.metadata ? JSON.stringify(input.metadata) : null,
