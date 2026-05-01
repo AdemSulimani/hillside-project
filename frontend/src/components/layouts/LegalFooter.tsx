@@ -1,8 +1,14 @@
 import { Link } from 'react-router-dom';
+import { cn } from '@/lib/utils';
 
-export default function LegalFooter() {
+export default function LegalFooter({ className }: { className?: string }) {
   return (
-    <footer className="mt-8 border-t border-border pt-4 text-center text-xs text-muted-foreground">
+    <footer
+      className={cn(
+        'mt-8 border-t border-border pt-4 text-center text-xs text-muted-foreground',
+        className,
+      )}
+    >
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
         <Link to="/privacy-policy" className="hover:text-foreground hover:underline">
           Privacy Policy
