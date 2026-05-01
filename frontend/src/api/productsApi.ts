@@ -31,10 +31,7 @@ export function normalizeProduct(raw: Record<string, unknown>): Product {
     tags: Array.isArray(tags) ? tags.map(String) : [],
     image_urls: Array.isArray(imageUrls) ? imageUrls.map(String) : [],
     is_active: Boolean(raw.is_active),
-    stock_quantity:
-      raw.stock_quantity === null || raw.stock_quantity === undefined
-        ? null
-        : Number(raw.stock_quantity),
+    in_stock: raw.in_stock !== false,
     source_type: (raw.source_type as Product['source_type']) ?? 'manual',
     extracted_text: raw.extracted_text != null ? String(raw.extracted_text) : null,
     metadata:

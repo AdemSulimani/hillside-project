@@ -81,7 +81,7 @@ export async function store(req: Request, res: Response): Promise<void> {
       category: input.category ?? null,
       tags: input.tags,
       is_active: input.is_active,
-      stock_quantity: input.stock_quantity ?? null,
+      in_stock: input.in_stock ?? true,
       source_type: 'manual',
     });
 

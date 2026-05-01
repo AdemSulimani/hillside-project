@@ -99,9 +99,9 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
         <p className="line-clamp-2 text-xs text-muted-foreground">
           {product.description || 'No description'}
         </p>
-        {product.stock_quantity != null && (
-          <p className="text-xs text-muted-foreground">Stock: {product.stock_quantity}</p>
-        )}
+        <p className="text-xs text-muted-foreground">
+          {product.in_stock !== false ? 'In stock' : 'Out of stock'}
+        </p>
         <div>
           {product.usage_description?.trim() ? (
             <Badge className="bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300">

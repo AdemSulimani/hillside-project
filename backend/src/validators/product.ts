@@ -47,12 +47,7 @@ export const createProductSchema = z
       .boolean()
       .optional()
       .default(true),
-    stock_quantity: z
-      .number()
-      .int('Stock quantity must be a whole number')
-      .min(0, 'Stock quantity must be non-negative')
-      .nullable()
-      .optional(),
+    in_stock: z.boolean().optional().default(true),
   })
   .refine(
     (data) =>
@@ -114,12 +109,7 @@ export const updateProductSchema = z
     is_active: z
       .boolean()
       .optional(),
-    stock_quantity: z
-      .number()
-      .int('Stock quantity must be a whole number')
-      .min(0, 'Stock quantity must be non-negative')
-      .nullable()
-      .optional(),
+    in_stock: z.boolean().optional(),
   })
   .refine(
     (data) =>

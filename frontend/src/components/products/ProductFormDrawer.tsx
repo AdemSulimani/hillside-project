@@ -39,7 +39,7 @@ const emptyValues = (): ProductFormValues => ({
   sku: '',
   category: '',
   tagsInput: '',
-  stockInput: '',
+  in_stock: true,
   is_active: true,
 });
 
@@ -57,7 +57,7 @@ function productToValues(p: Product): ProductFormValues {
     sku: p.sku ?? '',
     category: p.category ?? '',
     tagsInput: p.tags.join(', '),
-    stockInput: p.stock_quantity != null ? String(p.stock_quantity) : '',
+    in_stock: p.in_stock !== false,
     is_active: p.is_active,
   };
 }
@@ -174,7 +174,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
     try {
       body = valuesToApiBody(parsed.data);
     } catch (e) {
-      setFieldErrors({ stockInput: (e as Error).message });
+      setGeneralError((e as Error).message);
       return;
     }
 
@@ -278,18 +278,21 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
               )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="pf-stock">Stock quantity</Label>
-              <Input
+              <Label htmlFor="pf-stock">Stock status</Label>
+              <select
                 id="pf-stock"
-                inputMode="numeric"
-                placeholder="Optional"
-                value={values.stockInput}
-                onChange={(e) => setField('stockInput', e.target.value)}
-                aria-invalid={!!fieldErrors.stockInput}
-                className="h-10"
-              />
-              {fieldErrors.stockInput && (
-                <p className="text-xs text-destructive">{fieldErrors.stockInput}</p>
+                className={cn(
+                  'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50',
+                )}
+                value={values.in_stock ? 'in' : 'out'}
+                onChange={(e) => setField('in_stock', e.target.value === 'in')}
+                aria-invalid={!!fieldErrors.in_stock}
+              >
+                <option value="in">In stock</option>
+                <option value="out">Out of stock</option>
+              </select>
+              {fieldErrors.in_stock && (
+                <p className="text-xs text-destructive">{fieldErrors.in_stock}</p>
               )}
             </div>
           </div>

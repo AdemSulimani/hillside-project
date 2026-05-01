@@ -25,7 +25,7 @@ export const productFormValuesSchema = z
     sku: z.string().max(100).optional().default(''),
     category: z.string().max(255).optional().default(''),
     tagsInput: z.string().optional().default(''),
-    stockInput: z.string().optional().default(''),
+    in_stock: z.boolean(),
     is_active: z.boolean(),
   })
   .refine(
@@ -54,15 +54,6 @@ export function parseTags(input: string): string[] {
 
 export function valuesToApiBody(values: ProductFormValues) {
   const price = parseFloat(values.priceInput.replace(/,/g, ''));
-  const stockRaw = values.stockInput.trim();
-  let stock_quantity: number | null = null;
-  if (stockRaw !== '') {
-    const n = parseInt(stockRaw, 10);
-    if (Number.isNaN(n) || n < 0) {
-      throw new Error('Stock must be a whole number ≥ 0');
-    }
-    stock_quantity = n;
-  }
 
   const discountedRaw = values.discountedPriceInput?.trim() ?? '';
   let discounted_price: number | null = null;
@@ -87,7 +78,7 @@ export function valuesToApiBody(values: ProductFormValues) {
     sku: values.sku.trim() || null,
     category: values.category.trim() || null,
     tags: parseTags(values.tagsInput),
-    stock_quantity,
+    in_stock: values.in_stock,
     is_active: values.is_active,
   };
 }
