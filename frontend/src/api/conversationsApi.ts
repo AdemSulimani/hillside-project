@@ -7,6 +7,7 @@ import type {
   ConversationThread,
   ConversationsListResult,
   InboxMessage,
+  MessageEditHistoryEntry,
   MessageReplyTo,
   OpenAIAlertSummary,
 } from '@/types/conversation';
@@ -73,6 +74,29 @@ export function normalizeConversationDetail(raw: Record<string, unknown>): Conve
   };
 }
 
+function normalizeEditHistory(raw: unknown): MessageEditHistoryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: MessageEditHistoryEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const editedAt = typeof o.edited_at === 'string' ? o.edited_at : null;
+    if (!editedAt) continue;
+    const num = o.num_edit;
+    out.push({
+      content: o.content != null ? String(o.content) : null,
+      attachment_urls: Array.isArray(o.attachment_urls)
+        ? (o.attachment_urls as unknown[])
+            .filter((u): u is string => typeof u === 'string' && u.length > 0)
+        : [],
+      edited_at: editedAt,
+      num_edit: typeof num === 'number' && Number.isFinite(num) ? num : null,
+      source: 'platform',
+    });
+  }
+  return out;
+}
+
 function normalizeMessageReplyTo(raw: unknown): MessageReplyTo | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const o = raw as Record<string, unknown>;
@@ -100,6 +124,13 @@ export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessag
     quality_score = Number.isFinite(n) ? n : null;
   }
   const replyTo = normalizeMessageReplyTo(raw.replyTo);
+  const editCountRaw = raw.edit_count;
+  const editCount =
+    typeof editCountRaw === 'number' && Number.isFinite(editCountRaw)
+      ? editCountRaw
+      : editCountRaw != null
+        ? Number(editCountRaw) || 0
+        : 0;
   return {
     id: String(raw.id),
     tenant_id: String(raw.tenant_id),
@@ -117,6 +148,10 @@ export function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessag
     flag_reason: raw.flag_reason != null && raw.flag_reason !== '' ? String(raw.flag_reason) : null,
     send_status: raw.send_status != null && raw.send_status !== '' ? String(raw.send_status) : null,
     send_error: raw.send_error != null && raw.send_error !== '' ? String(raw.send_error) : null,
+    edited_at: raw.edited_at != null && raw.edited_at !== '' ? String(raw.edited_at) : null,
+    edit_count: editCount,
+    original_content: raw.original_content != null ? String(raw.original_content) : null,
+    edit_history: normalizeEditHistory(raw.edit_history),
     ...(replyTo ? { replyTo } : {}),
   };
 }

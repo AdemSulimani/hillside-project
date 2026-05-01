@@ -915,28 +915,32 @@ function buildSystemPrompt(
     '- Treat stock_quantity as internal information. Mention an exact stock number only when the customer explicitly asks for stock or requests a quantity higher than available.',
     '- If the customer requests more units than available, clearly state the maximum currently available quantity for that product and offer that amount.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
-    '- Do not automatically end non-product/general conversation replies with a generic follow-up question.',
+    '- STRICT FOLLOW-UP / CLOSING POLICY (very important): only include a follow-up question, invitation, or closing prompt in EXACTLY two cases:',
+    '  (a) The very first product-related reply in this conversation (only when an order-closing question has not yet been asked in this conversation) may end with exactly ONE short order-oriented follow-up question — e.g., "A doni ta porosisni?".',
+    '  (b) When you are confirming that an order has been placed/confirmed, end with the exact order-confirmation follow-up sentence specified later in these rules.',
+    '- In ALL OTHER CASES — including product recommendations, product explanations, product comparisons, follow-up product replies after the first one, price answers, stock answers, post-recommendation messages, ambiguous short answers, and general chat — DO NOT include ANY follow-up question, invitation, "let me know" prompt, "tell me if you want more details" phrasing, or any closing prompt. End the reply naturally right after delivering the requested information.',
+    '- Forbidden trailing patterns when the strict policy applies (in any language; not exhaustive): "më tregoni", "më shkruani", "më kontaktoni", "doni më shumë informacion", "nëse dëshironi detaje më tregoni", "nëse dëshironi të porosisni më tregoni", "let me know", "feel free to ask", "anything else", "if you want more info just ask", or any equivalent. Do not produce them.',
     '- Strict anti-repetition rule: never repeat the same order-closing question in two consecutive assistant replies for the same product context.',
-    '- After you ask an order-closing question once in a conversation, do not ask another order-closing question again in later replies.',
+    '- After you ask an order-closing question once in a conversation, do not ask another order-closing question (or any other follow-up question or invitation) again in later replies.',
     orderClosingAlreadyAskedInConversation
-      ? '- An order-closing question has already been asked earlier in this conversation. Do not ask another order-closing question in this reply.'
-      : '- If the customer asks about any product (availability, details, comparison, or alternatives), end this first product reply with one short order-oriented follow-up question.',
+      ? '- An order-closing question has already been asked earlier in this conversation. For THIS reply, do NOT include any follow-up question, order-closing question, invitation, or "let me know" prompt of any kind. End the reply naturally with the answer only.'
+      : '- If the customer is asking about any product in this very first product turn (availability, details, comparison, or alternatives), end this reply with exactly ONE short order-oriented follow-up question. Do not add any other follow-up, invitation, or "let me know" prompt.',
     '- If the latest customer messages repeat or paraphrase the same question, combine them and answer once without repeating the same information.',
     '- Do not wrap product names in quotation marks when answering normally. Mention product names naturally in the sentence, or use a generic reference like "produkti" when the exact name is unnecessary.',
     '- Exception — when the customer asks for recommendations, which product to choose/compare, or product suggestions for a specific situation or need: suggest only 1-2 products from the catalog (never more than two).',
     '- For each of those products, add a very short description using only what appears in that product\'s catalog entry (one tight phrase or sentence per product; trim the catalog text if needed — do not invent details).',
-    '- You may end with one brief sentence that these options are a good fit for the customer\'s stated situation or need; keep the whole reply compact.',
+    '- For recommendation, explanation, or comparison replies: end with the recommendation itself; do NOT add a follow-up question, invitation, "let me know" prompt, or any closing prompt — the only exception is the single allowed order-oriented follow-up question on the very first product turn (at most one short sentence).',
     '- In these recommendation cases, explicitly mention the relevant product names clearly (still without quotation marks).',
     '- In customer-facing text, refer to items by product name only; do not include the brand name unless the customer explicitly asks for brand details.',
-    '- Avoid robotic closings like "anything else I can help with?" unless the conversation context clearly requires it.',
-    '- For non-product/general chat, end naturally when appropriate without forcing a question.',
+    '- Avoid robotic closings like "anything else I can help with?" — they violate the strict follow-up policy above.',
+    '- For non-product/general chat, end naturally without forcing a question.',
     orderClosingAlreadyAskedInConversation
-      ? '- For this turn, do not include any order-focused closing question, because it was already asked earlier in the conversation.'
-      : '- For this turn, include one order-focused follow-up (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni").',
+      ? '- For this turn, do not include any order-focused closing question, follow-up question, invitation, or "let me know" prompt, because the order closing was already asked earlier in the conversation.'
+      : '- For this turn (first product reply), include exactly one order-focused follow-up question at the end (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni"). Do not add any additional invitations.',
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
-    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in Albanian only: "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar."',
+    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in Albanian only (this is the ONLY follow-up allowed in an order-confirmation reply, and it must appear exactly once): "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t\u2019ju ndihmuar."',
     '- For ambiguous short customer replies (e.g., "po", "ok", "yes", "po ju lutem"), rely on conversation context and classifier signals to decide intent. Do not classify based only on keywords. If classifier/context indicates order affirmation, continue order flow; escalate only when classifier/context indicates a real post-purchase issue.',
     '- Draft/confirm order behavior must be triggered only when classifier + conversation context indicate explicit order affirmation. Product inquiries alone (price, stock, details, comparison, availability) are not order confirmation.',
     '- If the assistant has already asked to proceed with an order (or requested delivery details), and the customer then provides BOTH required details (phone number and full delivery address), treat that as valid order-confirmation context even without an explicit "yes" in the latest message.',
@@ -1393,13 +1397,65 @@ async function extractProductInfoFromImages(
   }
 }
 
-function formatCustomerMessageContentForPrompt(msg: Message): string {
+/**
+ * True when this customer message has been edited AFTER an outbound message landed in the same
+ * conversation history slice. In that case the AI/agent already replied to the original text,
+ * so we expose the diff to the model so it can correct itself; for never-replied edits we just
+ * use the new content directly because the original is irrelevant context.
+ */
+function customerMessageEditedAfterOutbound(msg: Message, history: Message[]): boolean {
+  if (msg.sent_by !== 'customer') return false;
+  if (msg.edit_count <= 0 || !msg.edited_at) return false;
+  const editedAtMs = msg.edited_at.getTime();
+  for (const other of history) {
+    if (other.id === msg.id) continue;
+    if (other.direction !== 'outbound') continue;
+    const created = other.created_at instanceof Date ? other.created_at : new Date(other.created_at);
+    const createdMs = created.getTime();
+    if (!Number.isFinite(createdMs)) continue;
+    // Outbound created strictly after the customer message AND before the most recent edit
+    // → the customer edited the original after we replied.
+    if (createdMs > new Date(msg.created_at).getTime() && createdMs < editedAtMs) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function truncateForEditHint(text: string, max = 280): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1).trimEnd()}…`;
+}
+
+function formatCustomerMessageContentForPrompt(
+  msg: Message,
+  context?: { editedAfterOutbound?: boolean },
+): string {
   const body = (msg.content ?? '').trim();
   const snap = msg.reply_to_content?.trim();
+  let core = body;
   if (msg.sent_by === 'customer' && snap) {
-    return `Customer replied to: '${snap}' — saying: '${body}'`;
+    core = `Customer replied to: '${snap}' — saying: '${body}'`;
   }
-  return body;
+  // Only surface the original text to the model when the AI/agent has already replied to it;
+  // otherwise the pre-edit version is noise and could confuse the model into using stale context.
+  if (
+    context?.editedAfterOutbound &&
+    msg.original_content != null &&
+    msg.original_content.trim() !== body
+  ) {
+    const original = truncateForEditHint(msg.original_content);
+    const updated = truncateForEditHint(body || '(empty)');
+    return [
+      '[The customer edited their earlier message after you replied to it.',
+      `Original: "${original}"`,
+      `Now reads: "${updated}"`,
+      'Treat the new text as the canonical request and gracefully correct any prior reply that no longer matches.]',
+      core,
+    ].join('\n');
+  }
+  return core;
 }
 
 function summarizeOlderConversationContext(messages: Message[]): string | null {
@@ -1417,7 +1473,13 @@ function summarizeOlderConversationContext(messages: Message[]): string | null {
   const lastPreview = lastText ? lastText.replace(/\s+/g, ' ').slice(0, 140) : null;
 
   const customerHighlights = customerMessages
-    .map((msg) => formatCustomerMessageContentForPrompt(msg).replace(/\s+/g, ' ').trim())
+    .map((msg) =>
+      formatCustomerMessageContentForPrompt(msg, {
+        editedAfterOutbound: customerMessageEditedAfterOutbound(msg, messages),
+      })
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
     .filter((txt) => txt.length > 0)
     .slice(-2)
     .map((txt) => `"${txt.slice(0, 120)}${txt.length > 120 ? '...' : ''}"`);
@@ -1463,7 +1525,11 @@ function buildMessagesArray(
     const role: 'user' | 'assistant' =
       msg.sent_by === 'customer' ? 'user' : 'assistant';
     const textContent =
-      role === 'user' ? formatCustomerMessageContentForPrompt(msg) : (msg.content ?? '').trim();
+      role === 'user'
+        ? formatCustomerMessageContentForPrompt(msg, {
+            editedAfterOutbound: customerMessageEditedAfterOutbound(msg, conversationHistory),
+          })
+        : (msg.content ?? '').trim();
     if (!textContent && histUrls.length === 0) continue;
 
     messages.push({ role, content: textContent });
@@ -1479,7 +1545,12 @@ function buildMessagesArray(
   const expectedLastUserFromHistory =
     lastCustomerInHistory &&
     (lastCustomerInHistory.content ?? '').trim() === inboundTrimmed
-      ? formatCustomerMessageContentForPrompt(lastCustomerInHistory).trim()
+      ? formatCustomerMessageContentForPrompt(lastCustomerInHistory, {
+          editedAfterOutbound: customerMessageEditedAfterOutbound(
+            lastCustomerInHistory,
+            conversationHistory,
+          ),
+        }).trim()
       : inboundTrimmed;
   const alreadyAppended =
     lastMsg?.role === 'user' &&

@@ -2,6 +2,8 @@ import type { ChannelType } from '../db/models/channel';
 import type { MessageType } from '../db/models/message';
 
 export interface InboundMessageDTO {
+  /** Discriminator. Optional for legacy callers; absence means a new inbound message. */
+  kind?: 'message';
   channelType: ChannelType;
   /**
    * Thread / quoted reply — external id of the referenced message:
@@ -23,6 +25,32 @@ export interface InboundMessageDTO {
   attachmentUrls: string[];
   rawPayload: Record<string, unknown>;
 }
+
+/**
+ * An edit notification from a Meta platform. Always references an existing message via
+ * `originalExternalMessageId`; if that id was never persisted (edit arrived for a message we
+ * dropped) the inbound processor will log and ignore.
+ */
+export interface InboundEditDTO {
+  kind: 'edit';
+  channelType: ChannelType;
+  /** Page / IG account / WABA phone-number id; same lookup key as the message case. */
+  channelExternalId: string;
+  /** Platform message id of the message being edited (Messenger `mid`, WhatsApp `wamid`). */
+  originalExternalMessageId: string;
+  /** New text content after the edit. May be null if the platform only edited media. */
+  newContent: string | null;
+  /** New attachment URLs after the edit. Undefined when the platform doesn't redeliver them. */
+  newAttachmentUrls?: string[];
+  /** Wall-clock time the edit was reported by the platform (or now() if missing). */
+  editedAt: Date;
+  /** Messenger only: how many times the customer has edited this message (max 5). */
+  numEdit?: number | null;
+  rawPayload: Record<string, unknown>;
+}
+
+/** Union returned by the normalizer for any single webhook delivery we care about. */
+export type InboundEvent = InboundMessageDTO | InboundEditDTO;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -873,7 +901,173 @@ function extractFacebookMessengerMessage(payload: Record<string, unknown>): Inbo
   };
 }
 
+/**
+ * Coerces a platform-supplied epoch timestamp (ms or seconds) into a Date. Falls back to NOW().
+ * Messenger sends ms, WhatsApp sends seconds — accept both.
+ */
+function coerceEditTimestamp(value: unknown): Date {
+  const fallback = new Date();
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    const ms = value > 1e12 ? value : value * 1000;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? fallback : d;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) {
+      const ms = n > 1e12 ? n : n * 1000;
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? fallback : d;
+    }
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return fallback;
+}
+
+/**
+ * Detects a Facebook Messenger / Instagram DM edit event:
+ * `entry[].messaging[].message_edit = { mid, text, num_edit }`.
+ *
+ * Both surfaces use the exact same shape — Meta exposes the field as `message_edits` (Messenger)
+ * or `message_edit` (Instagram), but the per-event payload is identical.
+ */
+function extractMessengerLikeEdit(
+  payload: Record<string, unknown>,
+  channelType: 'facebook' | 'instagram',
+): InboundEditDTO | null {
+  const entry = Array.isArray(payload.entry) ? asRecord(payload.entry[0]) : null;
+  if (!entry) return null;
+  const messagingItem = Array.isArray(entry.messaging) ? asRecord(entry.messaging[0]) : null;
+  if (!messagingItem) return null;
+  const messageEdit = asRecord(messagingItem.message_edit);
+  if (!messageEdit) return null;
+
+  const mid = strTrim(messageEdit.mid);
+  if (!mid) return null;
+
+  const sender = asRecord(messagingItem.sender);
+  const recipient = asRecord(messagingItem.recipient);
+  // Direction follows the same recipient/sender logic as new messages: when the customer edits,
+  // we look at the recipient (page/IG account) to find our channel.
+  const channelExternalId =
+    coercePositiveGraphId(entry.id) ??
+    coercePositiveGraphId(recipient?.id) ??
+    coercePositiveGraphId(sender?.id);
+  if (!channelExternalId) return null;
+
+  const newContentRaw = messageEdit.text;
+  const newContent =
+    typeof newContentRaw === 'string' ? newContentRaw : null;
+
+  const numEditRaw = messageEdit.num_edit;
+  let numEdit: number | null = null;
+  if (typeof numEditRaw === 'number' && Number.isFinite(numEditRaw)) {
+    numEdit = numEditRaw;
+  } else if (typeof numEditRaw === 'string' && numEditRaw.trim()) {
+    const n = Number(numEditRaw);
+    if (Number.isFinite(n)) numEdit = n;
+  }
+
+  return {
+    kind: 'edit',
+    channelType,
+    channelExternalId,
+    originalExternalMessageId: mid,
+    newContent,
+    editedAt: coerceEditTimestamp(messagingItem.timestamp),
+    ...(numEdit !== null ? { numEdit } : {}),
+    rawPayload: payload,
+  };
+}
+
+/**
+ * Detects a WhatsApp Cloud API edit event. Meta delivers edits as a separate `messages[]` entry
+ * where the message's `type` is `text` (or matching the original) AND the entry includes either:
+ *   • a `context.message_id` referencing the original wamid, plus an `edited` indicator, or
+ *   • a `messages[].edit` sub-object describing the new body.
+ *
+ * We accept both shapes defensively because the Cloud API edit payload is still evolving.
+ */
+function extractWhatsAppEdit(payload: Record<string, unknown>): InboundEditDTO | null {
+  const entry = Array.isArray(payload.entry) ? asRecord(payload.entry[0]) : null;
+  if (!entry) return null;
+  const changes = Array.isArray(entry.changes) ? asRecord(entry.changes[0]) : null;
+  const value = changes ? asRecord(changes.value) : null;
+  const metadata = value ? asRecord(value.metadata) : null;
+  const message = value && Array.isArray(value.messages) ? asRecord(value.messages[0]) : null;
+  if (!message) return null;
+
+  // Shape A: explicit `edit` sub-object on the message with the new body and original wamid.
+  const editObj = asRecord(message.edit);
+  // Shape B: top-level `edited: true` flag plus `context.message_id` pointing at the original.
+  const isFlaggedEdited = message.edited === true || message.is_edited === true;
+  const ctx = asRecord(message.context);
+  const ctxMid = strTrim(ctx?.message_id) || strTrim(ctx?.id);
+
+  let originalMid: string | null = null;
+  let newContent: string | null = null;
+  let timestampValue: unknown = message.timestamp;
+
+  if (editObj) {
+    originalMid =
+      strTrim(editObj.message_id) ||
+      strTrim(editObj.original_message_id) ||
+      strTrim(editObj.wamid) ||
+      ctxMid ||
+      null;
+    const editText = asRecord(editObj.text);
+    newContent =
+      (typeof editObj.body === 'string' ? editObj.body : null) ??
+      (typeof editText?.body === 'string' ? editText.body : null);
+    if (editObj.timestamp !== undefined) timestampValue = editObj.timestamp;
+  } else if (isFlaggedEdited && ctxMid) {
+    originalMid = ctxMid;
+    const textObj = asRecord(message.text);
+    newContent = typeof textObj?.body === 'string' ? textObj.body : null;
+  } else {
+    return null;
+  }
+
+  if (!originalMid) return null;
+
+  const phoneNumberId =
+    typeof metadata?.phone_number_id === 'string' ? metadata.phone_number_id.trim() : '';
+  const channelExternalId = phoneNumberId || (typeof entry.id === 'string' ? entry.id : '');
+  if (!channelExternalId) return null;
+
+  return {
+    kind: 'edit',
+    channelType: 'whatsapp',
+    channelExternalId,
+    originalExternalMessageId: originalMid,
+    newContent,
+    editedAt: coerceEditTimestamp(timestampValue),
+    rawPayload: payload,
+  };
+}
+
 export class WebhookNormalizerService {
+  /**
+   * Single-entry normalization that returns either an inbound message or an edit notification.
+   * Prefer this over the per-channel methods so callers don't need to know which shape arrived.
+   */
+  normalizeEvent(channelType: ChannelType, payload: Record<string, unknown>): InboundEvent {
+    if (channelType === 'facebook') {
+      const edit = extractMessengerLikeEdit(payload, 'facebook');
+      if (edit) return edit;
+      return this.normalizeFromFacebook(payload);
+    }
+    if (channelType === 'instagram') {
+      const edit = extractMessengerLikeEdit(payload, 'instagram');
+      if (edit) return edit;
+      return this.normalizeFromInstagram(payload);
+    }
+    const waEdit = extractWhatsAppEdit(payload);
+    if (waEdit) return waEdit;
+    return this.normalizeFromWhatsApp(payload);
+  }
+
   normalizeFromFacebook(payload: Record<string, unknown>): InboundMessageDTO {
     const fromMessenger = extractFacebookMessengerMessage(payload);
     if (fromMessenger) {

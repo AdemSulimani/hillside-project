@@ -9,7 +9,9 @@ import {
   markConversationHumanReplied,
 } from '../db/models/conversation';
 import {
+  applyMessageEdit,
   createMessage,
+  existsOutboundAfter,
   findMessageByExternalMessageIdForTenant,
   findMessageByIdForTenant,
   findMessageIdByExternalMessageId,
@@ -19,6 +21,8 @@ import {
 } from '../db/models/message';
 import {
   webhookNormalizerService,
+  type InboundEditDTO,
+  type InboundEvent,
   type InboundMessageDTO,
 } from '../services/webhookNormalizer';
 import {
@@ -69,10 +73,116 @@ async function resolveMetaMediaUrl(mediaId: string, accessToken: string): Promis
   return data.url;
 }
 
-function normalize(channelType: ChannelType, payload: Record<string, unknown>): InboundMessageDTO {
-  if (channelType === 'facebook') return webhookNormalizerService.normalizeFromFacebook(payload);
-  if (channelType === 'instagram') return webhookNormalizerService.normalizeFromInstagram(payload);
-  return webhookNormalizerService.normalizeFromWhatsApp(payload);
+function normalize(channelType: ChannelType, payload: Record<string, unknown>): InboundEvent {
+  return webhookNormalizerService.normalizeEvent(channelType, payload);
+}
+
+/**
+ * Applies a platform edit to a previously-stored message. Idempotent on duplicate webhook
+ * deliveries (same content => no-op). When an edit lands on a customer message that already has
+ * an outbound (AI/human) reply after it, we re-enqueue an AI job so the assistant can correct
+ * itself with the updated context.
+ */
+async function processInboundEdit(edit: InboundEditDTO): Promise<void> {
+  const channel = await findChannelByTypeAndExternalId(edit.channelType, edit.channelExternalId);
+  if (!channel) {
+    console.warn('[inbound] Edit ignored — channel not found for edited message', {
+      channelType: edit.channelType,
+      channelExternalId: edit.channelExternalId,
+      originalExternalMessageId: edit.originalExternalMessageId,
+    });
+    return;
+  }
+
+  const existing = await findMessageByExternalMessageIdForTenant(
+    channel.tenant_id,
+    edit.originalExternalMessageId,
+  );
+  if (!existing) {
+    // Edits can arrive for messages we never stored (e.g. webhook ordering, prior failure to
+    // ingest). Logging-only — there is nothing else to update.
+    console.info('[inbound] Edit ignored — original message not found', {
+      channelType: edit.channelType,
+      originalExternalMessageId: edit.originalExternalMessageId,
+    });
+    return;
+  }
+
+  // Edit notifications only update inbound (customer) rows. Outbound edits are not exposed by
+  // the platforms today, but guard against odd payloads regardless.
+  if (existing.direction !== 'inbound') {
+    console.info('[inbound] Edit ignored — target message is not inbound', {
+      messageId: existing.id,
+      direction: existing.direction,
+    });
+    return;
+  }
+
+  const result = await applyMessageEdit({
+    messageId: existing.id,
+    tenantId: channel.tenant_id,
+    newContent: edit.newContent,
+    newAttachmentUrls: edit.newAttachmentUrls,
+    editedAt: edit.editedAt,
+    numEdit: edit.numEdit ?? null,
+  });
+
+  if (!result) {
+    console.warn('[inbound] Edit could not be applied (row vanished)', {
+      messageId: existing.id,
+    });
+    return;
+  }
+
+  if (!result.changed) {
+    // Duplicate edit delivery (same content). Don't broadcast; nothing changed for the UI.
+    return;
+  }
+
+  socketService.emitMessageEdited(channel.tenant_id, result.message);
+  socketService.emitConversationUpdated(channel.tenant_id, existing.conversation_id);
+
+  void logEvent(channel.tenant_id, 'message_edited', {
+    conversation_id: existing.conversation_id,
+    channel_id: channel.id,
+    channel_type: channel.type,
+    message_id: existing.id,
+    num_edit: edit.numEdit ?? null,
+  });
+
+  // Case B from the design: the AI/agent has already replied based on the original. Trigger a
+  // follow-up reply so the assistant can correct itself. The AI job re-reads the (now-edited)
+  // history and the staleness guard at processAIReply.ts will ignore newer inbound traffic.
+  const hasOutboundAfter = await existsOutboundAfter(
+    existing.conversation_id,
+    channel.tenant_id,
+    existing.created_at,
+  );
+  if (!hasOutboundAfter) {
+    // Case A: no outbound followed, the original AI job will see the new content when it runs.
+    return;
+  }
+
+  const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
+  const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
+  const existingJob = pendingAiReplyJobs.find(
+    (job) => job.name === 'ai.reply' && job.data?.conversationId === existing.conversation_id,
+  );
+  if (existingJob) {
+    await existingJob.remove();
+  }
+  await aiQueue.add(
+    'ai.reply',
+    {
+      tenantId: channel.tenant_id,
+      channelId: channel.id,
+      conversationId: existing.conversation_id,
+      messageExternalId: existing.external_message_id,
+    },
+    {
+      delay: Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000,
+    },
+  );
 }
 
 function shouldIgnoreNormalizationError(channelType: ChannelType, err: unknown): boolean {
@@ -254,9 +364,9 @@ async function resolveFacebookContactProfile(
 }
 
 export async function processInboundMessage(data: InboundWebhookJobData): Promise<void> {
-  let normalized: InboundMessageDTO;
+  let event: InboundEvent;
   try {
-    normalized = normalize(data.channelType, data.payload);
+    event = normalize(data.channelType, data.payload);
   } catch (err) {
     if (shouldIgnoreNormalizationError(data.channelType, err)) {
       const keys = Object.keys(data.payload);
@@ -280,6 +390,12 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     }
     throw err;
   }
+
+  if (event.kind === 'edit') {
+    await processInboundEdit(event);
+    return;
+  }
+  const normalized: InboundMessageDTO = event;
 
   const existingId = await findMessageIdByExternalMessageId(normalized.externalMessageId);
   if (existingId) {

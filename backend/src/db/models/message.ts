@@ -11,6 +11,23 @@ export type MessageFlagReason =
   | 'misleading'
   | 'low_confidence';
 
+/**
+ * One stored snapshot of a message's prior content. Appended to `Message.edit_history` when an
+ * edit lands; never mutated afterwards, so the row preserves the full audit trail.
+ */
+export interface MessageEditHistoryEntry {
+  /** The content value as it stood before this edit replaced it. */
+  content: string | null;
+  /** The attachment URLs as they stood before this edit replaced them. */
+  attachment_urls: string[];
+  /** When the prior version was superseded (i.e. when the edit was applied). */
+  edited_at: string;
+  /** Edit counter delivered by the platform (Messenger `num_edit`); null when not provided. */
+  num_edit?: number | null;
+  /** Origin of the edit. Currently only Meta webhook deliveries. */
+  source: 'platform';
+}
+
 export interface Message {
   id: string;
   tenant_id: string;
@@ -31,7 +48,42 @@ export interface Message {
   reply_to_external_id: string | null;
   reply_to_content: string | null;
   reply_to_attachment_url: string | null;
+  edited_at: Date | null;
+  edit_count: number;
+  /** Snapshot of `content` before the very first edit was applied. */
+  original_content: string | null;
+  edit_history: MessageEditHistoryEntry[];
   created_at: Date;
+}
+
+function coerceEditHistory(raw: unknown): MessageEditHistoryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: MessageEditHistoryEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const editedAt = typeof o.edited_at === 'string' ? o.edited_at : null;
+    if (!editedAt) continue;
+    const content = typeof o.content === 'string' ? o.content : null;
+    const attachment_urls = Array.isArray(o.attachment_urls)
+      ? o.attachment_urls.filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : [];
+    const numEditRaw = o.num_edit;
+    const num_edit =
+      typeof numEditRaw === 'number' && Number.isFinite(numEditRaw)
+        ? numEditRaw
+        : numEditRaw == null
+          ? null
+          : null;
+    out.push({
+      content,
+      attachment_urls,
+      edited_at: editedAt,
+      num_edit,
+      source: 'platform',
+    });
+  }
+  return out;
 }
 
 export function mapMessageRow(row: Message): Message {
@@ -43,6 +95,10 @@ export function mapMessageRow(row: Message): Message {
     reply_to_external_id?: unknown;
     reply_to_content?: unknown;
     reply_to_attachment_url?: unknown;
+    edited_at?: unknown;
+    edit_count?: unknown;
+    original_content?: unknown;
+    edit_history?: unknown;
   };
   let quality_score: number | null = null;
   const rawQs = r.quality_score;
@@ -50,6 +106,20 @@ export function mapMessageRow(row: Message): Message {
     const n = Number(rawQs);
     quality_score = Number.isFinite(n) ? n : null;
   }
+  let edited_at: Date | null = null;
+  if (r.edited_at instanceof Date) {
+    edited_at = r.edited_at;
+  } else if (typeof r.edited_at === 'string' && r.edited_at) {
+    const d = new Date(r.edited_at);
+    edited_at = Number.isNaN(d.getTime()) ? null : d;
+  }
+  const editCountRaw = r.edit_count;
+  const edit_count =
+    typeof editCountRaw === 'number' && Number.isFinite(editCountRaw)
+      ? editCountRaw
+      : editCountRaw != null
+        ? Number(editCountRaw) || 0
+        : 0;
   return {
     ...row,
     quality_score,
@@ -67,6 +137,10 @@ export function mapMessageRow(row: Message): Message {
       r.reply_to_attachment_url != null && r.reply_to_attachment_url !== ''
         ? String(r.reply_to_attachment_url)
         : null,
+    edited_at,
+    edit_count,
+    original_content: typeof r.original_content === 'string' ? r.original_content : null,
+    edit_history: coerceEditHistory(r.edit_history),
   };
 }
 
@@ -311,6 +385,122 @@ export async function deleteMessageByIdForTenant(
     [messageId, tenantId],
   );
   return (rowCount ?? 0) > 0;
+}
+
+export interface ApplyMessageEditInput {
+  /** UUID of the row to edit. */
+  messageId: string;
+  /** Tenant scope; we never cross-tenant edit. */
+  tenantId: string;
+  /** New text content from the platform. */
+  newContent: string | null;
+  /** New attachment URLs from the platform; pass through unchanged when the platform doesn't redeliver. */
+  newAttachmentUrls?: string[];
+  /** Wall-clock time the edit was applied (defaults to NOW()). */
+  editedAt?: Date;
+  /** Optional platform-supplied edit counter (Messenger `num_edit`). */
+  numEdit?: number | null;
+}
+
+/**
+ * Applies a platform edit atomically:
+ * - Pushes the *current* (pre-edit) content + attachments onto `edit_history`.
+ * - Snapshots `original_content` on the very first edit so we never lose the original text.
+ * - Replaces `content`, `attachment_urls`, sets `edited_at = NOW()`, increments `edit_count`.
+ *
+ * Idempotency: if the new content equals the current content AND no new attachments,
+ * we skip the update so duplicate webhook deliveries don't pollute history.
+ */
+export async function applyMessageEdit(
+  input: ApplyMessageEditInput,
+): Promise<{ message: Message; changed: boolean } | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query<Message>(
+      'SELECT * FROM messages WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+      [input.messageId, input.tenantId],
+    );
+    const row = current.rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const mapped = mapMessageRow(row);
+
+    const currentContent = mapped.content ?? null;
+    const currentAttachments = Array.isArray(mapped.attachment_urls) ? mapped.attachment_urls : [];
+    const newAttachments = input.newAttachmentUrls ?? currentAttachments;
+    const sameContent = (currentContent ?? '') === (input.newContent ?? '');
+    const sameAttachments =
+      currentAttachments.length === newAttachments.length &&
+      currentAttachments.every((u, i) => u === newAttachments[i]);
+    if (sameContent && sameAttachments) {
+      await client.query('ROLLBACK');
+      return { message: mapped, changed: false };
+    }
+
+    const editedAt = input.editedAt ?? new Date();
+    const historyEntry: MessageEditHistoryEntry = {
+      content: currentContent,
+      attachment_urls: currentAttachments,
+      edited_at: editedAt.toISOString(),
+      num_edit: input.numEdit ?? null,
+      source: 'platform',
+    };
+
+    const { rows } = await client.query<Message>(
+      `UPDATE messages
+       SET content = $1,
+           attachment_urls = $2::jsonb,
+           edited_at = $3,
+           edit_count = edit_count + 1,
+           original_content = COALESCE(original_content, $4),
+           edit_history = COALESCE(edit_history, '[]'::jsonb) || $5::jsonb
+       WHERE id = $6 AND tenant_id = $7
+       RETURNING *`,
+      [
+        input.newContent,
+        JSON.stringify(newAttachments),
+        editedAt,
+        currentContent,
+        JSON.stringify([historyEntry]),
+        input.messageId,
+        input.tenantId,
+      ],
+    );
+    await client.query('COMMIT');
+    const updated = rows[0];
+    return updated ? { message: mapMessageRow(updated), changed: true } : null;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * True when there is at least one outbound message (AI or human) in the same conversation
+ * created strictly after the given timestamp. Used by the edit handler to decide whether the
+ * AI/agent has already responded to a now-stale customer message and therefore needs another pass.
+ */
+export async function existsOutboundAfter(
+  conversationId: string,
+  tenantId: string,
+  afterCreatedAt: Date,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM messages
+       WHERE conversation_id = $1
+         AND tenant_id = $2
+         AND direction = 'outbound'
+         AND created_at > $3
+     ) AS exists`,
+    [conversationId, tenantId, afterCreatedAt],
+  );
+  return rows[0]?.exists === true;
 }
 
 /** Most recent `limit` messages, oldest-first within the window (for transcripts). */

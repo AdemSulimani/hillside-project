@@ -43,6 +43,19 @@ export const socketService = {
     io.to(tenantRoom(tenantId)).emit('conversation_updated', { conversationId });
   },
 
+  /**
+   * Broadcasts an in-place edit on an existing message (Meta `message_edits` etc.). Clients
+   * should patch the matching row in the open thread without inserting a new bubble. Pass the
+   * fully-mapped `Message` row so the client receives the updated edit metadata.
+   */
+  emitMessageEdited(tenantId: string, message: Message): void {
+    if (!io) return;
+    io.to(tenantRoom(tenantId)).emit('message_edited', {
+      message,
+      conversationId: message.conversation_id,
+    });
+  },
+
   emitOrderCreated(tenantId: string, order: Order): void {
     if (!io) return;
     io.to(tenantRoom(tenantId)).emit('order_created', { order });

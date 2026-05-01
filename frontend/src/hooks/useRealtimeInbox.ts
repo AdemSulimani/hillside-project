@@ -33,6 +33,17 @@ function parseConversationUpdatedPayload(payload: unknown): string | null {
   return typeof id === 'string' ? id : null;
 }
 
+function parseMessageEditedPayload(payload: unknown): {
+  conversationId: string;
+  message: Record<string, unknown>;
+} | null {
+  if (!isRecord(payload)) return null;
+  const conversationId = payload.conversationId;
+  const message = payload.message;
+  if (typeof conversationId !== 'string' || !isRecord(message)) return null;
+  return { conversationId, message };
+}
+
 function parseMessageSendFailedPayload(payload: unknown): {
   messageId: string;
   conversationId: string;
@@ -170,6 +181,32 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
       void queryClient.invalidateQueries({ queryKey: ['conversations', conversationId, 'detail'] });
     };
 
+    const onMessageEdited = (payload: unknown) => {
+      const parsed = parseMessageEditedPayload(payload);
+      if (!parsed) return;
+      const { conversationId } = parsed;
+      const activeId = selectedRef.current;
+      if (conversationId !== activeId) return;
+
+      const inboxMessage = normalizeInboxMessage(parsed.message);
+      queryClient.setQueryData<ConversationThread>(
+        ['conversations', conversationId, 'detail'],
+        (old) => {
+          if (!old) return old;
+          const idx = old.messages.findIndex((m) => m.id === inboxMessage.id);
+          if (idx === -1) return old;
+          const next = old.messages.slice();
+          // Preserve replyTo if the broadcast omitted it (the edit emitter sends a plain Message
+          // row — clients keep whatever we already had hydrated from the thread fetch).
+          const prev = next[idx];
+          next[idx] = inboxMessage.replyTo
+            ? inboxMessage
+            : { ...inboxMessage, ...(prev.replyTo ? { replyTo: prev.replyTo } : {}) };
+          return { ...old, messages: next };
+        },
+      );
+    };
+
     const onMessageSendFailed = (payload: unknown) => {
       const parsed = parseMessageSendFailedPayload(payload);
       if (!parsed) return;
@@ -194,12 +231,14 @@ export function useRealtimeInbox(selectedConversationId: string | null): void {
     socket.on('connect_error', onConnectError);
     socket.on('new_message', onNewMessage);
     socket.on('conversation_updated', onConversationUpdated);
+    socket.on('message_edited', onMessageEdited);
     socket.on('message_send_failed', onMessageSendFailed);
 
     return () => {
       socket.off('connect_error', onConnectError);
       socket.off('new_message', onNewMessage);
       socket.off('conversation_updated', onConversationUpdated);
+      socket.off('message_edited', onMessageEdited);
       socket.off('message_send_failed', onMessageSendFailed);
     };
   }, [socket, queryClient]);
