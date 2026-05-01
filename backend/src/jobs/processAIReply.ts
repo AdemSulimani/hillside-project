@@ -271,6 +271,74 @@ function normalizeForIncludesCheck(value: string): string {
     .toLowerCase();
 }
 
+/** CRM-configured ETA line for order-confirmation replies (before the standard follow-up). */
+function buildOrderConfirmationDeliveryLine(deliveryTime: DeliveryTime): string {
+  const hours = DELIVERY_TIME_LABEL_HOURS[deliveryTime];
+  return `Produkti do të mbërrijë brenda ${hours} orëve.`;
+}
+
+function insertDeliveryLineBeforeOrderFollowUp(
+  text: string,
+  deliveryLine: string,
+  orderFollowUp: string,
+): string {
+  const fuNorm = normalizeForIncludesCheck(orderFollowUp);
+  const paragraphs = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const paraIdx = paragraphs.findIndex((p) => normalizeForIncludesCheck(p) === fuNorm);
+  if (paraIdx >= 0) {
+    return [...paragraphs.slice(0, paraIdx), deliveryLine, ...paragraphs.slice(paraIdx)].join('\n\n');
+  }
+
+  const needles = [
+    orderFollowUp.trim(),
+    orderFollowUp.trim().replace(/\u2019/g, "'"),
+    orderFollowUp.trim().replace(/'/g, '\u2019'),
+  ];
+  for (const needle of needles) {
+    const idx = text.lastIndexOf(needle);
+    if (idx !== -1) {
+      const before = text.slice(0, idx).trimEnd();
+      const fromFollowUp = text.slice(idx).trimStart();
+      return `${before}\n\n${deliveryLine}\n\n${fromFollowUp}`;
+    }
+  }
+
+  const marker = '\nNëse keni ndonjë pyetje tjetër';
+  const mIdx = text.lastIndexOf(marker);
+  if (mIdx >= 0) {
+    const before = text.slice(0, mIdx).trimEnd();
+    const fromFollowUp = text.slice(mIdx + 1).trimStart();
+    return `${before}\n\n${deliveryLine}\n\n${fromFollowUp}`;
+  }
+
+  return `${text.trim()}\n\n${deliveryLine}`;
+}
+
+function ensureOrderConfirmationDeliveryAndFollowUp(
+  replyText: string,
+  deliveryLine: string | null,
+  orderFollowUp: string,
+): string {
+  let text = replyText.trim();
+  const fuNorm = normalizeForIncludesCheck(orderFollowUp);
+  const hasFollowUp = normalizeForIncludesCheck(text).includes(fuNorm);
+
+  if (
+    deliveryLine &&
+    !normalizeForIncludesCheck(text).includes(normalizeForIncludesCheck(deliveryLine))
+  ) {
+    text = hasFollowUp
+      ? insertDeliveryLineBeforeOrderFollowUp(text, deliveryLine, orderFollowUp)
+      : `${text}\n\n${deliveryLine}`;
+  }
+
+  if (!normalizeForIncludesCheck(text).includes(fuNorm)) {
+    text = `${text.trim()}\n\n${orderFollowUp}`;
+  }
+
+  return text;
+}
+
 function messageLooksLikeOrderDetailsPayload(text: string): boolean {
   const raw = (text ?? '').trim();
   if (!raw) return false;
@@ -1226,14 +1294,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let isOrderConfirmationReply = false;
   if (!usageEscalated && inboundText && !isOosCannedReply) {
     isOrderConfirmationReply = await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText);
-    const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[inferHoldingMessageLocale(inboundText)];
-    if (
-      isOrderConfirmationReply &&
-      !normalizeForIncludesCheck(finalReplyText).includes(
-        normalizeForIncludesCheck(orderFollowUp),
-      )
-    ) {
-      finalReplyText = `${finalReplyText.trim()}\n\n${orderFollowUp}`;
+    if (isOrderConfirmationReply) {
+      const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[inferHoldingMessageLocale(inboundText)];
+      const tenantForOrderConfirmation = await findTenantById(tenantId);
+      const configuredDeliveryTime = tenantForOrderConfirmation?.delivery_time ?? null;
+      const deliveryLine = configuredDeliveryTime
+        ? buildOrderConfirmationDeliveryLine(configuredDeliveryTime)
+        : null;
+      finalReplyText = ensureOrderConfirmationDeliveryAndFollowUp(
+        finalReplyText,
+        deliveryLine,
+        orderFollowUp,
+      );
     }
   }
   if (inboundText) {
