@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link2, RefreshCw, ShoppingBag, ThumbsDown } from 'lucide-react';
+import { Link2, Pencil, RefreshCw, ShoppingBag, ThumbsDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import type { InboxMessage, MessageReplyTo } from '@/types/conversation';
@@ -62,6 +62,52 @@ function truncateReplyPreview(text: string, max = REPLY_PREVIEW_MAX): string {
   const t = text.trim();
   if (t.length <= max) return t;
   return `${t.slice(0, max)}...`;
+}
+
+const EDITED_TOOLTIP_MAX = 280;
+
+function buildEditedTooltip(message: InboxMessage): string {
+  const original = (message.original_content ?? '').trim();
+  if (!original) {
+    return message.edit_count > 1 ? `Edited ${message.edit_count} times` : 'Edited';
+  }
+  const truncated =
+    original.length > EDITED_TOOLTIP_MAX
+      ? `${original.slice(0, EDITED_TOOLTIP_MAX - 1).trimEnd()}…`
+      : original;
+  const timesLabel =
+    message.edit_count > 1 ? ` · edited ${message.edit_count} times` : '';
+  return `Original message${timesLabel}:\n${truncated}`;
+}
+
+/**
+ * Inline "edited" tag rendered alongside the timestamp on a bubble. Hover reveals the original
+ * pre-edit content via the native `title` attribute — sufficient as an audit cue without
+ * pulling in a popover dependency.
+ */
+function EditedIndicator({
+  message,
+  variant,
+}: {
+  message: InboxMessage;
+  variant: 'inbound' | 'outbound';
+}) {
+  if (message.edit_count <= 0) return null;
+  return (
+    <span
+      className={cn(
+        'inline-flex cursor-help items-center gap-0.5 text-[0.65rem]',
+        variant === 'inbound'
+          ? 'text-muted-foreground'
+          : 'text-muted-foreground',
+      )}
+      title={buildEditedTooltip(message)}
+      aria-label={buildEditedTooltip(message)}
+    >
+      <Pencil className="size-2.5" aria-hidden />
+      edited
+    </span>
+  );
 }
 
 function ReplyQuotePreview({
@@ -422,7 +468,12 @@ export function MessageBubble({
             ) : null}
           </div>
         </div>
-        {time ? <span className="px-1 text-[0.65rem] text-muted-foreground">{time}</span> : null}
+        {time || message.edit_count > 0 ? (
+          <div className="flex items-center gap-1.5 px-1">
+            {time ? <span className="text-[0.65rem] text-muted-foreground">{time}</span> : null}
+            <EditedIndicator message={message} variant="inbound" />
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -523,6 +574,7 @@ export function MessageBubble({
             {label}
           </span>
           {time ? <span className="text-[0.65rem] text-muted-foreground">{time}</span> : null}
+          <EditedIndicator message={message} variant="outbound" />
         </div>
         {isAi && feedbackOpen ? (
           <AiMessageFeedbackForm

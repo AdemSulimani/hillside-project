@@ -258,6 +258,12 @@ function normalizeForIncludesCheck(value: string): string {
   return value
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    // Strip apostrophe-like marks WITHOUT inserting whitespace so that
+    // variants like "tju", "t'ju", and "t\u2019ju" all collapse to the
+    // same token. Without this, the dedup check below would fail to
+    // detect that the AI already added the order-confirmation follow-up
+    // sentence, causing it to be appended a second time.
+    .replace(/[\u0027\u02BC\u2018\u2019`]/g, '')
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -373,6 +379,70 @@ async function stripRepeatedOrderClosingQuestion(
     )
     .replace(/\s*(do\s+you\s+want\s+to\s+order(?:\s+it)?\?)\s*$/iu, '')
     .trim();
+}
+
+// Generic follow-up invitations that are NOT explicit order-closing questions but still violate
+// the strict no-follow-up policy in non-first / non-order-confirmation product replies — for
+// example: "më tregoni", "më shkruani", "let me know", "feel free to ask".
+const FOLLOW_UP_INVITATION_PATTERNS: RegExp[] = [
+  // Albanian "më tregoni" (also catches "me tregoni" without diacritics).
+  /(^|\s)(me|m)\s+tregon[ij]?(\s|$|[.,!?])/u,
+  // Albanian "më shkruani" / "më shkruaj".
+  /(^|\s)(me|m)\s+shkrua(j|ni|jeni)?(\s|$|[.,!?])/u,
+  // Albanian "më kontaktoni" / "më kontakto".
+  /(^|\s)(me|m)\s+kontakto(n[ij]?|j)?(\s|$|[.,!?])/u,
+  // English variants.
+  /\blet me know\b/u,
+  /\bfeel free to (ask|reach|contact|message)\b/u,
+  /\b(is there )?anything else\b/u,
+  /\bif you (have|need|want).*(let me know|just ask|tell me)\b/u,
+];
+
+function sentenceContainsFollowUpInvitation(value: string): boolean {
+  const raw = (value ?? '').trim();
+  if (!raw) return false;
+  const normalized = normalizeForOrderPromptMatch(raw);
+  if (!normalized) return false;
+  return FOLLOW_UP_INVITATION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+/**
+ * When an order-closing question has already been asked earlier in the conversation and the
+ * current reply is NOT an order-confirmation reply, strip any trailing generic follow-up
+ * invitations the AI may have added (e.g., "Nëse dëshironi detaje më tregoni.").
+ *
+ * This is a safety net on top of the system-prompt rules in `aiService.buildSystemPrompt`.
+ */
+function stripGenericFollowUpInvitation(
+  replyText: string,
+  shouldStrip: boolean,
+): string {
+  const reply = (replyText ?? '').trim();
+  if (!reply) return reply;
+  if (!shouldStrip) return reply;
+  if (!sentenceContainsFollowUpInvitation(reply)) return reply;
+
+  const sentences = reply
+    .split(/(?<=[.!?])\s+/u)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+  if (sentences.length > 1) {
+    const cleaned = sentences.filter((chunk) => !sentenceContainsFollowUpInvitation(chunk));
+    if (cleaned.length > 0 && cleaned.length < sentences.length) {
+      return cleaned.join(' ').trim();
+    }
+  }
+
+  const cleanedLines = reply
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !sentenceContainsFollowUpInvitation(line));
+  if (cleanedLines.length > 0 && cleanedLines.length < reply.split(/\r?\n/).filter((l) => l.trim()).length) {
+    return cleanedLines.join('\n').trim();
+  }
+
+  return reply;
 }
 
 function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
@@ -1144,6 +1214,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     finalReplyText = await stripRepeatedOrderClosingQuestion(
       finalReplyText,
       orderClosingAlreadyAskedInConversation,
+    );
+    // Generic follow-up invitations ("më tregoni", "let me know", etc.) are only allowed in
+    // (a) the first product reply and (b) order-confirmation replies. If the order-closing
+    // was already asked and this is not an order-confirmation reply, strip them.
+    finalReplyText = stripGenericFollowUpInvitation(
+      finalReplyText,
+      orderClosingAlreadyAskedInConversation && !isOrderConfirmationReply,
     );
   }
 

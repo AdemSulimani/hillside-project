@@ -68,6 +68,15 @@ function normalizeInboxMessage(raw: Record<string, unknown>): InboxMessage {
     flag_reason: raw.flag_reason != null ? String(raw.flag_reason) : null,
     send_status: raw.send_status != null && raw.send_status !== '' ? String(raw.send_status) : null,
     send_error: raw.send_error != null && raw.send_error !== '' ? String(raw.send_error) : null,
+    edited_at: raw.edited_at != null && raw.edited_at !== '' ? String(raw.edited_at) : null,
+    edit_count:
+      typeof raw.edit_count === 'number' && Number.isFinite(raw.edit_count)
+        ? raw.edit_count
+        : raw.edit_count != null
+          ? Number(raw.edit_count) || 0
+          : 0,
+    original_content: raw.original_content != null ? String(raw.original_content) : null,
+    edit_history: [],
   };
 }
 

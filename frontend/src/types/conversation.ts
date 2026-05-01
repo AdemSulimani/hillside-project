@@ -59,6 +59,18 @@ export interface ConversationDetail {
   open_ai_alert: OpenAIAlertSummary | null;
 }
 
+/**
+ * One stored snapshot of a message's prior content. Mirrors the backend
+ * `MessageEditHistoryEntry`. Surfaced to the inbox so reviewers can audit edit chains.
+ */
+export interface MessageEditHistoryEntry {
+  content: string | null;
+  attachment_urls: string[];
+  edited_at: string;
+  num_edit?: number | null;
+  source: 'platform';
+}
+
 export interface InboxMessage {
   id: string;
   tenant_id: string;
@@ -76,6 +88,14 @@ export interface InboxMessage {
   flag_reason: string | null;
   send_status: string | null;
   send_error: string | null;
+  /** ISO timestamp of the most recent platform edit, or null when never edited. */
+  edited_at: string | null;
+  /** How many platform edits have been applied to this message. */
+  edit_count: number;
+  /** Snapshot of the very first content before any edits — null when never edited. */
+  original_content: string | null;
+  /** Append-only audit trail of prior content snapshots (oldest first). */
+  edit_history: MessageEditHistoryEntry[];
   replyTo?: MessageReplyTo;
 }
 

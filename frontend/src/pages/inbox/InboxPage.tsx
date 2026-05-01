@@ -206,6 +206,10 @@ export default function InboxPage() {
         flag_reason: null,
         send_status: null,
         send_error: null,
+        edited_at: null,
+        edit_count: 0,
+        original_content: null,
+        edit_history: [],
       };
 
       queryClient.setQueryData<ConversationThread>(['conversations', id, 'detail'], {
