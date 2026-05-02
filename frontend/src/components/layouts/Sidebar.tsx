@@ -40,6 +40,7 @@ const navItems = [
 export default function Sidebar() {
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen);
+  const ordersNavNewCount = useAppStore((s) => s.ordersNavNewCount);
 
   const { data: inboxUnread = 0 } = useQuery({
     queryKey: ['conversations', 'unread-count'],
@@ -115,6 +116,14 @@ export default function Sidebar() {
                   {to === '/ai-alerts' && aiAlertsUnread > 0 ? (
                     <span className="flex min-w-5 justify-center rounded-full bg-destructive px-1.5 py-0.5 text-[0.65rem] font-semibold leading-none text-destructive-foreground">
                       {aiAlertsUnread > 99 ? '99+' : aiAlertsUnread}
+                    </span>
+                  ) : null}
+                  {to === '/orders' && ordersNavNewCount > 0 ? (
+                    <span
+                      className="flex min-w-5 justify-center rounded-full bg-primary px-1.5 py-0.5 text-[0.65rem] font-semibold leading-none text-primary-foreground"
+                      title="Porosi të reja që nga vizita e fundit te faqja e porosive"
+                    >
+                      {ordersNavNewCount > 99 ? '99+' : ordersNavNewCount}
                     </span>
                   ) : null}
                 </NavLink>
