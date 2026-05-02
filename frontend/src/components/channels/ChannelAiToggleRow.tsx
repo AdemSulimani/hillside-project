@@ -32,12 +32,12 @@ export function ChannelAiToggleRow({
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Bot className="size-4 text-muted-foreground max-sm:hidden" aria-hidden />
-        <span className="text-sm text-muted-foreground max-md:hidden">AI</span>
+        <span className="text-sm text-muted-foreground max-md:hidden">IA</span>
         <Switch
           checked={channel.ai_enabled}
           onCheckedChange={() => onToggleAI(channel)}
           disabled={isTogglePending}
-          aria-label={`Toggle AI for ${channel.name}`}
+          aria-label={`Ndërro IA-në për ${channel.name}`}
         />
       </div>
     </div>

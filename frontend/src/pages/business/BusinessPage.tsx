@@ -13,22 +13,22 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Skeleton } from '@/components/ui/skeleton';
 import type { ApiResponse, DeliveryTime, Tenant } from '@/types';
 
-const NICHES = [
-  'E-commerce',
-  'Services',
-];
+const NICHE_OPTIONS = [
+  { value: 'E-commerce', label: 'E-tregti' },
+  { value: 'Services', label: 'Shërbime' },
+] as const;
 
-const DELIVERY_METHODS = [
-  'Home Delivery',
-  'Store Pickup',
-  'Courier',
-  'Digital',
-];
+const DELIVERY_OPTIONS = [
+  { value: 'Home Delivery', label: 'Dërgesë në shtëpi' },
+  { value: 'Store Pickup', label: 'Marrje në dyqan' },
+  { value: 'Courier', label: 'Kurier' },
+  { value: 'Digital', label: 'Dixhital' },
+] as const;
 
 const DELIVERY_TIME_OPTIONS: ReadonlyArray<{ value: DeliveryTime; label: string }> = [
-  { value: '24h', label: '24 hours' },
-  { value: '48h', label: '48 hours' },
-  { value: '72h', label: '72 hours' },
+  { value: '24h', label: '24 orë' },
+  { value: '48h', label: '48 orë' },
+  { value: '72h', label: '72 orë' },
 ];
 
 interface BusinessFieldErrors {
@@ -111,7 +111,7 @@ export default function BusinessPage() {
       setErrors({});
       setGeneralError('');
       queryClient.invalidateQueries({ queryKey: ['business'] });
-      toast.success('Business details updated successfully');
+      toast.success('Detajet e biznesit u përditësuan me sukses');
     },
     onError: (err) => {
       const fieldErrors = extractFieldErrors(err);
@@ -120,7 +120,7 @@ export default function BusinessPage() {
         setGeneralError('');
       } else {
         setErrors({});
-        setGeneralError(extractMessage(err, 'Failed to update business details'));
+        setGeneralError(extractMessage(err, 'Përditësimi i detajeve të biznesit dështoi'));
       }
     },
   });
@@ -139,10 +139,10 @@ export default function BusinessPage() {
     onSuccess: (logoUrl) => {
       setLogoPreview(assetUrl(logoUrl) ?? null);
       queryClient.invalidateQueries({ queryKey: ['business'] });
-      toast.success('Logo uploaded successfully');
+      toast.success('Logoja u ngarkua me sukses');
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Failed to upload logo'));
+      toast.error(extractMessage(err, 'Ngarkimi i logos dështoi'));
     },
   });
 
@@ -163,12 +163,12 @@ export default function BusinessPage() {
     if (!file) return;
 
     if (file.size > 2 * 1024 * 1024) {
-      toast.error('Logo must be under 2 MB');
+      toast.error('Logoja duhet të jetë nën 2 MB');
       return;
     }
 
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'].includes(file.type)) {
-      toast.error('Only JPEG, PNG, WebP, or SVG allowed');
+      toast.error('Lejohen vetëm JPEG, PNG, WebP ose SVG');
       return;
     }
 
@@ -211,9 +211,9 @@ export default function BusinessPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">My Business</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Biznesi im</h1>
         <p className="text-sm text-muted-foreground">
-          Manage your business details and branding.
+          Menaxhoni detajet dhe identitetin vizual të biznesit tuaj.
         </p>
       </div>
 
@@ -223,9 +223,9 @@ export default function BusinessPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <Building2 className="size-5 text-muted-foreground" />
-              <CardTitle>Business Details</CardTitle>
+              <CardTitle>Detajet e biznesit</CardTitle>
             </div>
-            <CardDescription>Update your business information.</CardDescription>
+            <CardDescription>Përditësoni informacionin e biznesit tuaj.</CardDescription>
           </CardHeader>
           <CardContent>
             {generalError && (
@@ -237,12 +237,12 @@ export default function BusinessPage() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="businessName">Business Name</Label>
+                  <Label htmlFor="businessName">Emri i biznesit</Label>
                   <Input
                     id="businessName"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Acme Corp"
+                    placeholder="Shembull Sh.p.k."
                     aria-invalid={!!errors.name}
                     className="h-10"
                   />
@@ -252,7 +252,7 @@ export default function BusinessPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="niche">Industry / Niche</Label>
+                  <Label htmlFor="niche">Industria / nishë</Label>
                   <select
                     id="niche"
                     value={niche}
@@ -260,9 +260,11 @@ export default function BusinessPage() {
                     aria-invalid={!!errors.niche}
                     className={selectClasses}
                   >
-                    <option value="" disabled>Select a niche</option>
-                    {NICHES.map((n) => (
-                      <option key={n} value={n}>{n}</option>
+                    <option value="" disabled>Zgjidhni një nishë</option>
+                    {NICHE_OPTIONS.map((n) => (
+                      <option key={n.value} value={n.value}>
+                        {n.label}
+                      </option>
                     ))}
                   </select>
                   {errors.niche?.map((msg) => (
@@ -273,19 +275,19 @@ export default function BusinessPage() {
 
               <div className="space-y-2">
                 <Label htmlFor="description">
-                  Description{' '}
-                  <span className="font-normal text-muted-foreground">(optional)</span>
+                  Përshkrimi{' '}
+                  <span className="font-normal text-muted-foreground">(opsional)</span>
                 </Label>
                 <textarea
                   id="description"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Tell us a bit about what your business does..."
+                  placeholder="Na tregoni pak çfarë bën biznesi juaj..."
                   rows={4}
                   className="w-full resize-none rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 />
                 <p className="text-xs text-muted-foreground">
-                  The AI assistant can use this text when customers ask about your business, including location or address, if you include it here.
+                  Asistenti IA përdorë këtë tekst kur klientët pyesin për biznesin tuaj, përfshi vendndodhjen ose adresën, nëse e përfshini këtu.
                 </p>
                 {errors.description?.map((msg) => (
                   <p key={msg} className="text-xs text-destructive">{msg}</p>
@@ -294,14 +296,14 @@ export default function BusinessPage() {
 
               <fieldset className="space-y-3">
                 <legend className="flex items-center gap-2 text-sm font-medium leading-none select-none">
-                  Delivery Methods
+                  Mënyrat e dërgimit
                 </legend>
                 <div className="grid grid-cols-2 gap-3">
-                  {DELIVERY_METHODS.map((method) => {
-                    const checked = deliveryMethods.includes(method);
+                  {DELIVERY_OPTIONS.map(({ value: methodValue, label: methodLabel }) => {
+                    const checked = deliveryMethods.includes(methodValue);
                     return (
                       <label
-                        key={method}
+                        key={methodValue}
                         className={cn(
                           'flex cursor-pointer items-center gap-3 rounded-lg border px-4 py-3 text-sm transition-colors',
                           checked
@@ -312,7 +314,7 @@ export default function BusinessPage() {
                         <input
                           type="checkbox"
                           checked={checked}
-                          onChange={() => handleDeliveryToggle(method)}
+                          onChange={() => handleDeliveryToggle(methodValue)}
                           className="sr-only"
                         />
                         <div
@@ -329,7 +331,7 @@ export default function BusinessPage() {
                             </svg>
                           )}
                         </div>
-                        {method}
+                        {methodLabel}
                       </label>
                     );
                   })}
@@ -341,8 +343,8 @@ export default function BusinessPage() {
 
               <div className="space-y-2">
                 <Label htmlFor="deliveryTime">
-                  Delivery Time Information{' '}
-                  <span className="font-normal text-muted-foreground">(optional)</span>
+                  Informacion kohe dërgimi{' '}
+                  <span className="font-normal text-muted-foreground">(opsional)</span>
                 </Label>
                 <select
                   id="deliveryTime"
@@ -351,13 +353,13 @@ export default function BusinessPage() {
                   aria-invalid={!!errors.delivery_time}
                   className={selectClasses}
                 >
-                  <option value="">Not configured</option>
+                  <option value="">I pakonfiguruar</option>
                   {DELIVERY_TIME_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>{opt.label}</option>
                   ))}
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  When set, the AI will reply to delivery ETA questions with this estimated time.
+                  Kur vendoset, IA-ja do të përgjigjet për kohën e dërgimit me këtë vlerësim.
                 </p>
                 {errors.delivery_time?.map((msg) => (
                   <p key={msg} className="text-xs text-destructive">{msg}</p>
@@ -367,7 +369,7 @@ export default function BusinessPage() {
               <div className="pt-2">
                 <Button type="submit" disabled={updateMutation.isPending}>
                   {updateMutation.isPending && <Loader2 className="animate-spin" />}
-                  {updateMutation.isPending ? 'Saving…' : 'Save Changes'}
+                  {updateMutation.isPending ? 'Duke ruajtur…' : 'Ruaj ndryshimet'}
                 </Button>
               </div>
             </form>
@@ -379,16 +381,16 @@ export default function BusinessPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <ImageIcon className="size-5 text-muted-foreground" />
-              <CardTitle>Logo</CardTitle>
+              <CardTitle>Logoja</CardTitle>
             </div>
-            <CardDescription>Upload your business logo.</CardDescription>
+            <CardDescription>Ngarkoni logon e biznesit tuaj.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {logoPreview ? (
               <div className="relative inline-block">
                 <img
                   src={logoPreview}
-                  alt="Business logo"
+                  alt="Logoja e biznesit"
                   className="size-32 rounded-lg border object-cover"
                   loading="lazy"
                   decoding="async"
@@ -396,7 +398,7 @@ export default function BusinessPage() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  aria-label="Change logo"
+                  aria-label="Ndrysho logon"
                   className="absolute -right-2 -top-2 flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-colors hover:bg-primary/80"
                 >
                   <Upload className="size-3" />
@@ -410,8 +412,8 @@ export default function BusinessPage() {
                 className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/30 px-6 py-8 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
               >
                 <Upload className="size-8 opacity-50" />
-                <span>Click to upload</span>
-                <span className="text-xs opacity-60">JPEG, PNG, WebP or SVG — max 2 MB</span>
+                <span>Kliko për të ngarkuar</span>
+                <span className="text-xs opacity-60">JPEG, PNG, WebP ose SVG — maks. 2 MB</span>
               </button>
             )}
 
@@ -426,7 +428,7 @@ export default function BusinessPage() {
             {logoMutation.isPending && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
-                Uploading…
+                Duke ngarkuar…
               </div>
             )}
 
@@ -438,7 +440,7 @@ export default function BusinessPage() {
                 disabled={logoMutation.isPending}
               >
                 <Upload className="size-4" />
-                Change Logo
+                Ndrysho logon
               </Button>
             )}
           </CardContent>

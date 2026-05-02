@@ -45,11 +45,11 @@ export class ErrorBoundary extends Component<Props, State> {
           </div>
           <div className="max-w-md space-y-2">
             <h1 className="text-xl font-semibold tracking-tight text-foreground">
-              Something went wrong
+              Diçka shkoi keq
             </h1>
             <p className="text-sm text-muted-foreground">
-              The app hit an unexpected error. You can try again or reload the page. If the problem
-              persists, contact support.
+              Aplikacioni hasi një gabim të papritur. Mund të provoni përsëri ose të rifreskoni faqen. Nëse problemi
+              vazhdon, kontaktoni mbështetjen.
             </p>
             {import.meta.env.DEV ? (
               <pre className="mt-4 max-h-40 overflow-auto rounded-lg border border-border bg-muted p-3 text-left text-xs text-muted-foreground">
@@ -59,10 +59,10 @@ export class ErrorBoundary extends Component<Props, State> {
           </div>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <Button type="button" onClick={this.handleRetry}>
-              Try again
+              Provo përsëri
             </Button>
             <Button type="button" variant="outline" onClick={this.handleReload}>
-              Reload page
+              Rifresko faqen
             </Button>
           </div>
         </div>

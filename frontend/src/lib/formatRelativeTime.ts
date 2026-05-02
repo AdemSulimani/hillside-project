@@ -5,14 +5,14 @@ export function formatRelativeShort(iso: string | null | undefined): string {
   if (Number.isNaN(t)) return '';
   const diffMs = Date.now() - t;
   const sec = Math.floor(diffMs / 1000);
-  if (sec < 45) return 'Just now';
+  if (sec < 45) return 'Tani';
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min}m`;
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h`;
   const day = Math.floor(hr / 24);
   if (day < 7) return `${day}d`;
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return new Date(iso).toLocaleDateString('sq-AL', { month: 'short', day: 'numeric' });
 }
 
 export function isWithinLastHours(iso: string, hours: number): boolean {

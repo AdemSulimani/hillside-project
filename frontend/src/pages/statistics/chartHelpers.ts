@@ -53,7 +53,7 @@ export function formatChannelLabel(channelType: string): string {
   if (c === 'whatsapp') return 'WhatsApp';
   if (c === 'facebook') return 'Facebook';
   if (c === 'instagram') return 'Instagram';
-  if (c === 'unknown') return 'Unknown';
+  if (c === 'unknown') return 'E panjohur';
   return channelType.charAt(0).toUpperCase() + channelType.slice(1);
 }
 

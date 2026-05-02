@@ -37,7 +37,7 @@ function linkLabelFromUrl(url: string): string {
   } catch {
     /* fall through */
   }
-  return 'Open attachment';
+  return 'Hap bashkëngjitjen';
 }
 
 export function MessageImageAttachments({ urls, align, className, serverMediaType }: MessageImageAttachmentsProps) {

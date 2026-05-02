@@ -3,16 +3,16 @@ import { fetchQueuesHealth } from '@/api/healthApi';
 import { cn } from '@/lib/utils';
 
 function buildTooltip(payload: Awaited<ReturnType<typeof fetchQueuesHealth>> | undefined, error: boolean): string {
-  if (error) return 'Could not load job queue status.';
-  if (!payload) return 'Loading job queue status…';
+  if (error) return 'Nuk u ngarkua statusi i radhës së punës.';
+  if (!payload) return 'Duke ngarkuar statusin e radhës së punës…';
 
   const lines = payload.queues.map(
     (q) =>
-      `${q.label}: depth ${q.depth} (threshold ${payload.depthWarningThreshold}), failed ${q.counts.failed}, worker ${q.worker.isRunning ? 'up' : 'down'}`,
+      `${q.label}: thellësia ${q.depth} (pragu ${payload.depthWarningThreshold}), dështuar ${q.counts.failed}, punëtori ${q.worker.isRunning ? 'aktiv' : 'joaktiv'}`,
   );
   const head = payload.overallHealthy
-    ? 'All queues within limits and workers running.'
-    : 'Attention: backlog or worker issue on one or more queues.';
+    ? 'Të gjitha radhët brenda kufijve dhe punëtorët aktivë.'
+    : 'Kujdes: mbipopullim ose problem punëtori në një ose më shumë radhë.';
   return [head, '', ...lines].join('\n');
 }
 
@@ -42,7 +42,7 @@ export default function SystemHealthIndicator() {
       aria-label={tooltip.replace(/\n/g, '. ')}
     >
       <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        System
+        Sistemi
       </span>
       <span
         className={cn(
@@ -53,7 +53,7 @@ export default function SystemHealthIndicator() {
           status === 'loading' && 'animate-pulse bg-muted-foreground/35',
         )}
       />
-      {isFetching && !isPending ? <span className="sr-only">Refreshing queue status</span> : null}
+      {isFetching && !isPending ? <span className="sr-only">Duke rifreskuar statusin e radhës</span> : null}
     </div>
   );
 }

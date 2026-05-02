@@ -54,8 +54,8 @@ function shouldShowReplyThumbnail(replyTo: MessageReplyTo): boolean {
 }
 
 function replyQuoteLabel(replyTo: MessageReplyTo, contactDisplayName: string): string {
-  if (replyTo.direction === 'outbound') return 'You';
-  return contactDisplayName.trim() || 'Customer';
+  if (replyTo.direction === 'outbound') return 'Ju';
+  return contactDisplayName.trim() || 'Klienti';
 }
 
 function truncateReplyPreview(text: string, max = REPLY_PREVIEW_MAX): string {
@@ -69,15 +69,15 @@ const EDITED_TOOLTIP_MAX = 280;
 function buildEditedTooltip(message: InboxMessage): string {
   const original = (message.original_content ?? '').trim();
   if (!original) {
-    return message.edit_count > 1 ? `Edited ${message.edit_count} times` : 'Edited';
+    return message.edit_count > 1 ? `E redaktuar ${message.edit_count} herë` : 'E redaktuar';
   }
   const truncated =
     original.length > EDITED_TOOLTIP_MAX
       ? `${original.slice(0, EDITED_TOOLTIP_MAX - 1).trimEnd()}…`
       : original;
   const timesLabel =
-    message.edit_count > 1 ? ` · edited ${message.edit_count} times` : '';
-  return `Original message${timesLabel}:\n${truncated}`;
+    message.edit_count > 1 ? ` · redaktuar ${message.edit_count} herë` : '';
+  return `Mesazhi origjinal${timesLabel}:\n${truncated}`;
 }
 
 /**
@@ -105,7 +105,7 @@ function EditedIndicator({
       aria-label={buildEditedTooltip(message)}
     >
       <Pencil className="size-2.5" aria-hidden />
-      edited
+      e redaktuar
     </span>
   );
 }
@@ -124,7 +124,7 @@ function ReplyQuotePreview({
   const label = replyQuoteLabel(replyTo, contactDisplayName);
   const sharedPost = isSharedPostReplyContent(replyTo.content);
   const showThumb = shouldShowReplyThumbnail(replyTo);
-  const previewText = sharedPost ? 'Shared post' : truncateReplyPreview(replyTo.content ?? '') || '…';
+  const previewText = sharedPost ? 'Post i ndarë' : truncateReplyPreview(replyTo.content ?? '') || '…';
 
   return (
     <div
@@ -247,10 +247,10 @@ function InstagramRichBody({
   ) {
     const label =
       parsed.kind === 'story_mention'
-        ? 'Story mention'
+        ? 'Përmendje historie'
         : parsed.kind === 'story_reply'
-          ? 'Story reply'
-          : 'Story shared';
+          ? 'Përgjigje historie'
+          : 'Histori e ndarë';
     const badgeClass = isIn
       ? 'bg-violet-500/15 text-violet-800 dark:bg-violet-400/20 dark:text-violet-100'
       : 'bg-primary-foreground/20 text-primary-foreground';
@@ -307,7 +307,7 @@ function InstagramRichBody({
               badgeClass,
             )}
           >
-            Shared content
+            Përmbajtje e ndarë
           </span>
           {parsed.previewUrl ? (
             <MessageImageAttachments
@@ -340,7 +340,7 @@ function InstagramRichBody({
               badgeClass,
             )}
           >
-            Reel shared
+            Reel i ndarë
           </span>
           {parsed.thumbnailUrl ? (
             <MessageImageAttachments
@@ -377,7 +377,7 @@ function InstagramRichBody({
               <ShoppingBag className={cn('size-4', isIn ? 'text-emerald-800 dark:text-emerald-200' : 'text-primary-foreground')} />
             </div>
             <div className="min-w-0 flex-1">
-              <p className={cn('text-[0.65rem] font-semibold uppercase tracking-wide', muted)}>Product</p>
+              <p className={cn('text-[0.65rem] font-semibold uppercase tracking-wide', muted)}>Produkti</p>
               <p className={cn('mt-0.5 text-sm font-semibold leading-snug', strong)}>{parsed.productName}</p>
               {parsed.subtitle ? (
                 <p className={cn('mt-1 whitespace-pre-wrap text-xs leading-relaxed', muted)}>{parsed.subtitle}</p>
@@ -464,7 +464,7 @@ export function MessageBubble({
               />
             ) : null}
             {!richParsed && !text && !hasGallery ? (
-              <p className="whitespace-pre-wrap break-words text-muted-foreground">[Empty message]</p>
+              <p className="whitespace-pre-wrap break-words text-muted-foreground">[Mesazh bosh]</p>
             ) : null}
           </div>
         </div>
@@ -479,7 +479,7 @@ export function MessageBubble({
   }
 
   const isAi = message.sent_by === 'ai';
-  const label = isAi ? 'AI' : agentDisplayName || 'You';
+  const label = isAi ? 'IA' : agentDisplayName || 'Ju';
 
   return (
     <div className="flex w-full flex-col items-end gap-1">
@@ -512,7 +512,7 @@ export function MessageBubble({
                 : 'text-primary-foreground/70 hover:bg-primary-foreground/15 hover:text-primary-foreground group-hover/bubble:opacity-100 focus-visible:opacity-100',
             )}
             aria-expanded={feedbackOpen}
-            aria-label={feedbackOpen ? 'Hide feedback form' : 'Flag incorrect AI response'}
+            aria-label={feedbackOpen ? 'Fshih formularin e komenteve' : 'Shëno përgjigjen e gabuar të IA-së'}
             onClick={() => setFeedbackOpen((open) => !open)}
           >
             <ThumbsDown className="size-3.5" />
@@ -547,7 +547,7 @@ export function MessageBubble({
               qualityFlagged ? 'text-muted-foreground' : 'text-primary-foreground/80',
             )}
           >
-            [Empty message]
+            [Mesazh bosh]
           </p>
         ) : null}
         </div>
@@ -558,7 +558,7 @@ export function MessageBubble({
           title={message.send_error ?? undefined}
         >
           <RefreshCw className="size-3.5 shrink-0 opacity-90" aria-hidden />
-          <span>Failed to send</span>
+          <span>Dërgimi dështoi</span>
         </div>
       ) : null}
       <div className="flex w-full max-w-[min(100%,28rem)] flex-col items-end gap-1">
@@ -597,13 +597,13 @@ export function CancellationRefundConversationBanner({
     <div className="border-b border-red-500/35 bg-red-500/10 px-4 py-3 dark:bg-red-950/35">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm font-medium text-foreground">
-          Customer requested a {requestType}. AI has been paused. Handle this from the Orders module.
+          Klienti kërkoi {requestType === 'cancellation' ? 'anulim' : 'rimbursim'}. IA-ja është ndalur. Trajtojeni nga moduli i porosive.
         </p>
         <a
           href="/orders?tab=action_required"
           className={cn(buttonVariants({ variant: 'destructive', size: 'sm' }), 'w-fit')}
         >
-          Open Action Required
+          Hap veprimin e nevojshëm
         </a>
       </div>
     </div>

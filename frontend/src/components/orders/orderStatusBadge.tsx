@@ -13,13 +13,13 @@ const styles: Record<OrderStatus, string> = {
 };
 
 const labels: Record<OrderStatus, string> = {
-  draft: 'Draft',
-  confirmed: 'Confirmed',
-  processing: 'Processing',
-  shipped: 'Shipped',
-  delivered: 'Delivered',
-  cancelled: 'Cancelled',
-  refunded: 'Refunded',
+  draft: 'Skicë',
+  confirmed: 'E konfirmuar',
+  processing: 'Në përpunim',
+  shipped: 'E dërguar',
+  delivered: 'E dorëzuar',
+  cancelled: 'E anuluar',
+  refunded: 'E rimbursuar',
 };
 
 export function OrderStatusBadge({ status }: { status: OrderStatus }) {

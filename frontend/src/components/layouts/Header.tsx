@@ -43,7 +43,7 @@ export default function Header() {
         type="button"
         onClick={toggleSidebar}
         className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
-        aria-label="Open navigation menu"
+        aria-label="Hap menunë e navigimit"
       >
         <Menu className="size-5" />
       </button>
@@ -63,7 +63,7 @@ export default function Header() {
             {tenant?.name?.[0]?.toUpperCase() ?? 'B'}
           </div>
         )}
-        <span className="truncate text-sm font-medium">{tenant?.name ?? 'My Business'}</span>
+        <span className="truncate text-sm font-medium">{tenant?.name ?? 'Biznesi im'}</span>
       </div>
 
       <div className="min-w-0 flex-1" />
@@ -74,7 +74,7 @@ export default function Header() {
       <button
         type="button"
         className="relative rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-        aria-label="Notifications"
+        aria-label="Njoftime"
       >
         <Bell className="size-5" />
       </button>
@@ -87,7 +87,7 @@ export default function Header() {
           className="flex items-center gap-2 rounded-lg p-1 pr-2 text-sm hover:bg-muted"
           aria-expanded={dropdownOpen}
           aria-haspopup="menu"
-          aria-label="Account menu"
+          aria-label="Menu e llogarisë"
         >
           <div className="flex size-7 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
             {initials}
@@ -112,7 +112,7 @@ export default function Header() {
               className="flex w-full items-center gap-2.5 px-3 py-2 text-sm hover:bg-muted"
             >
               <UserCircle className="size-4 text-muted-foreground" />
-              My Profile
+              Profili im
             </button>
             <button
               type="button"
@@ -123,7 +123,7 @@ export default function Header() {
               className="flex w-full items-center gap-2.5 px-3 py-2 text-sm hover:bg-muted"
             >
               <Building2 className="size-4 text-muted-foreground" />
-              My Business
+              Biznesi im
             </button>
             <div className="my-1 border-t border-border" />
             <button
@@ -135,7 +135,7 @@ export default function Header() {
               className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-destructive hover:bg-muted"
             >
               <LogOut className="size-4" />
-              Logout
+              Dil
             </button>
           </div>
         )}

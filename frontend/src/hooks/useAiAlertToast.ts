@@ -34,7 +34,7 @@ function parseAiAlertPayload(raw: unknown): AIAlertSocketPayload | null {
     raw.message_content === null || raw.message_content === undefined
       ? null
       : String(raw.message_content);
-  const contact_name = typeof raw.contact_name === 'string' ? raw.contact_name : 'Customer';
+  const contact_name = typeof raw.contact_name === 'string' ? raw.contact_name : 'Klienti';
   const channel_type =
     raw.channel_type === 'facebook' ||
     raw.channel_type === 'instagram' ||
@@ -65,15 +65,15 @@ const warningIcon = createElement(AlertTriangle, {
 
 function getAlertToastDescription(reason: string): string {
   if (reason === 'post_purchase_support_request') {
-    return 'Customer has a delivery or product issue. Please review and reply manually.';
+    return 'Klienti ka problem me dërgesën ose produktin. Ju lutemi shqyrtoni dhe përgjigjuni manualisht.';
   }
   if (reason === 'cancellation_request' || reason === 'refund_request') {
-    return 'Customer requested an order action. Open Orders > Action Required.';
+    return 'Klienti kërkoi një veprim për porosinë. Hapni Porositë > Veprim i nevojshëm.';
   }
   if (reason === 'usage_question_unanswered') {
-    return 'AI could not answer a product-usage question. Please step in manually.';
+    return 'IA nuk mundi të përgjigjej për përdorimin e produktit. Ju lutemi ndërhyjni manualisht.';
   }
-  return 'Review the thread and decide whether to take over or resume the chatbot.';
+  return 'Shqyrtoni bisedën dhe vendosni nëse merrni kontrollin ose rifilloni chatbot-in.';
 }
 
 /**
@@ -96,7 +96,7 @@ export function useAiAlertToast(): void {
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
 
       const channelLabel = payload.channel_name.trim() || payload.channel_type;
-      const title = `AI needs attention — ${payload.contact_name} conversation on ${channelLabel}`;
+      const title = `IA kërkon vëmendje — biseda me ${payload.contact_name} në ${channelLabel}`;
 
       const tid = toast.warning(title, {
         duration: Infinity,
@@ -105,7 +105,7 @@ export function useAiAlertToast(): void {
         icon: warningIcon,
         description: getAlertToastDescription(payload.reason),
         action: {
-          label: 'View Conversation',
+          label: 'Shiko bisedën',
           onClick: () => {
             if (payload.reason === 'cancellation_request' || payload.reason === 'refund_request') {
               navigate('/orders?tab=action_required');
@@ -116,7 +116,7 @@ export function useAiAlertToast(): void {
           },
         },
         cancel: {
-          label: 'Dismiss',
+          label: 'Mbyll',
           onClick: () => toast.dismiss(tid),
         },
       });

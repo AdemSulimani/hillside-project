@@ -136,15 +136,15 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (!f.type.startsWith('image/')) {
-          toast.error(`${f.name} is not an image`);
+          toast.error(`${f.name} nuk është imazh`);
           continue;
         }
         if (f.size > 5 * 1024 * 1024) {
-          toast.error(`${f.name} must be under 5 MB`);
+          toast.error(`${f.name} duhet të jetë nën 5 MB`);
           continue;
         }
         if (next.length >= MAX_NEW_IMAGES) {
-          toast.error(`You can add at most ${MAX_NEW_IMAGES} new images at once`);
+          toast.error(`Mund të shtoni së shumti ${MAX_NEW_IMAGES} imazhe të reja njëherësh`);
           break;
         }
         next.push(f);
@@ -186,13 +186,13 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
         for (let i = 0; i < pendingFiles.length; i += UPLOAD_CHUNK) {
           await uploadProductImages(id, pendingFiles.slice(i, i + UPLOAD_CHUNK));
         }
-        toast.success('Product created');
+        toast.success('Produkti u krijua');
       } else if (product) {
         await updateProduct(product.id, { ...body, image_urls: existingUrls });
         for (let i = 0; i < pendingFiles.length; i += UPLOAD_CHUNK) {
           await uploadProductImages(product.id, pendingFiles.slice(i, i + UPLOAD_CHUNK));
         }
-        toast.success('Product updated');
+        toast.success('Produkti u përditësua');
       }
       await queryClient.invalidateQueries({ queryKey: ['products'] });
       await queryClient.invalidateQueries({ queryKey: ['product-tags'] });
@@ -204,7 +204,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
       } else if (err instanceof AxiosError && err.response?.data?.message) {
         setGeneralError(String(err.response.data.message));
       } else {
-        setGeneralError('Something went wrong. Please try again.');
+        setGeneralError('Diçka shkoi keq. Ju lutemi provoni përsëri.');
       }
     } finally {
       setSaving(false);
@@ -215,11 +215,11 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-md">
         <SheetHeader className="border-b px-4 py-4">
-          <SheetTitle>{mode === 'create' ? 'New product' : 'Edit product'}</SheetTitle>
+          <SheetTitle>{mode === 'create' ? 'Produkt i ri' : 'Ndrysho produktin'}</SheetTitle>
           <SheetDescription>
             {mode === 'create'
-              ? 'Add details for a product in your catalog.'
-              : 'Update product details and images.'}
+              ? 'Shto detajet për një produkt në katalogun tënd.'
+              : 'Përditëso detajet dhe imazhet e produktit.'}
           </SheetDescription>
         </SheetHeader>
 
@@ -231,7 +231,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="pf-name">Name</Label>
+            <Label htmlFor="pf-name">Emri</Label>
             <Input
               id="pf-name"
               value={values.name}
@@ -245,17 +245,17 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="pf-brand">Brand</Label>
+            <Label htmlFor="pf-brand">Marka</Label>
             <Input
               id="pf-brand"
-              placeholder="Optional"
+              placeholder="Opsionale"
               value={values.brand}
               onChange={(e) => setField('brand', e.target.value)}
               aria-invalid={!!fieldErrors.brand}
               className="h-10"
             />
             <p className="text-xs text-muted-foreground">
-              Adding a brand name helps the AI correctly identify and match products when customers send product images.
+              Shtimi i markës ndihmon IA-në të identifikojë dhe përputhë produktet kur klientët dërgojnë foto produktesh.
             </p>
             {fieldErrors.brand && (
               <p className="text-xs text-destructive">{fieldErrors.brand}</p>
@@ -264,7 +264,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label htmlFor="pf-price">Price</Label>
+              <Label htmlFor="pf-price">Çmimi</Label>
               <Input
                 id="pf-price"
                 inputMode="decimal"
@@ -278,7 +278,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
               )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="pf-stock">Stock status</Label>
+              <Label htmlFor="pf-stock">Gjendja e stokut</Label>
               <select
                 id="pf-stock"
                 className={cn(
@@ -288,8 +288,8 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
                 onChange={(e) => setField('in_stock', e.target.value === 'in')}
                 aria-invalid={!!fieldErrors.in_stock}
               >
-                <option value="in">In stock</option>
-                <option value="out">Out of stock</option>
+                <option value="in">Në stok</option>
+                <option value="out">Jashtë stokut</option>
               </select>
               {fieldErrors.in_stock && (
                 <p className="text-xs text-destructive">{fieldErrors.in_stock}</p>
@@ -299,20 +299,20 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
 
           <div className="space-y-2">
             <Label htmlFor="pf-discounted-price">
-              Discounted price{' '}
-              <span className="font-normal text-muted-foreground">(optional)</span>
+              Çmimi i zbritur{' '}
+              <span className="font-normal text-muted-foreground">(opsional)</span>
             </Label>
             <Input
               id="pf-discounted-price"
               inputMode="decimal"
-              placeholder="Leave empty if no discount is available"
+              placeholder="Lëreni bosh nëse nuk ka zbritje"
               value={values.discountedPriceInput}
               onChange={(e) => setField('discountedPriceInput', e.target.value)}
               aria-invalid={!!fieldErrors.discountedPriceInput}
               className="h-10"
             />
             <p className="text-xs text-muted-foreground">
-              Maximum discount the AI can offer when a customer asks for a lower price. Must be lower than the regular price. Leave empty if no discount is available — the AI will reply that the current price is final.
+              Zbritja maksimale që IA-ja mund të ofrojë kur klienti kërkon çmim më të ulët. Duhet të jetë më e ulët se çmimi i rregullt. Lëreni bosh nëse nuk ka zbritje — IA-ja do të thotë se çmimi aktual është final.
             </p>
             {fieldErrors.discountedPriceInput && (
               <p className="text-xs text-destructive">{fieldErrors.discountedPriceInput}</p>
@@ -334,7 +334,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
               )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="pf-category">Category</Label>
+              <Label htmlFor="pf-category">Kategoria</Label>
               <Input
                 id="pf-category"
                 value={values.category}
@@ -349,7 +349,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="pf-desc">Description</Label>
+            <Label htmlFor="pf-desc">Përshkrimi</Label>
             <Textarea
               id="pf-desc"
               rows={4}
@@ -364,18 +364,18 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="pf-usage-description">Usage Instructions</Label>
+            <Label htmlFor="pf-usage-description">Udhëzime përdorimi</Label>
             <Textarea
               id="pf-usage-description"
               rows={5}
-              placeholder="Explain exactly how to use this product — dosage, application method, timing, warnings, etc. The AI will return this text exactly as written when customers ask about usage."
+              placeholder="Shpjegoni saktësisht si përdoret produkti — dozimi, metoda, koha, paralajmërimet etj. IA-ja do të kthejë këtë tekst saktësisht siç është shkruar kur klientët pyesin për përdorimin."
               value={values.usage_description}
               onChange={(e) => setField('usage_description', e.target.value)}
               aria-invalid={!!fieldErrors.usage_description}
               className="min-h-[120px] resize-none"
             />
             <p className="text-xs text-muted-foreground">
-              Write this carefully — the AI will copy this word for word when customers ask how to use the product.
+              Shkruajeni me kujdes — IA-ja do ta kopjojë fjalë për fjalë kur klientët pyesin si përdoret produkti.
             </p>
             {fieldErrors.usage_description && (
               <p className="text-xs text-destructive">{fieldErrors.usage_description}</p>
@@ -383,10 +383,10 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="pf-tags">Tags</Label>
+            <Label htmlFor="pf-tags">Etiketat</Label>
             <Input
               id="pf-tags"
-              placeholder="Comma-separated"
+              placeholder="Të ndara me presje"
               value={values.tagsInput}
               onChange={(e) => setField('tagsInput', e.target.value)}
               className="h-10"
@@ -398,8 +398,8 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
 
           <div className="flex items-center justify-between rounded-lg border px-3 py-2">
             <div>
-              <p className="text-sm font-medium">Active</p>
-              <p className="text-xs text-muted-foreground">Visible in your catalog</p>
+              <p className="text-sm font-medium">Aktiv</p>
+              <p className="text-xs text-muted-foreground">I dukshëm në katalogun tuaj</p>
             </div>
             <Switch
               checked={values.is_active}
@@ -408,9 +408,9 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
           </div>
 
           <div className="space-y-2">
-            <Label>Images</Label>
+            <Label>Imazhet</Label>
             <p className="text-xs text-muted-foreground">
-              Existing images can be removed. New images upload after you save.
+              Imazhet ekzistuese mund të hiqen. Imazhet e reja ngarkohen pasi të ruani.
             </p>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
               {existingUrls.map((url) => {
@@ -430,7 +430,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
                       type="button"
                       onClick={() => removeExisting(url)}
                       className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full bg-background/90 text-destructive shadow-sm opacity-0 transition-opacity group-hover:opacity-100"
-                      aria-label="Remove image"
+                      aria-label="Hiq imazhin"
                     >
                       <X className="size-3.5" />
                     </button>
@@ -453,7 +453,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
                     type="button"
                     onClick={() => removePending(i)}
                     className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full bg-background/90 text-destructive shadow-sm opacity-0 transition-opacity group-hover:opacity-100"
-                    aria-label="Remove pending image"
+                    aria-label="Hiq imazhin në pritje"
                   >
                     <X className="size-3.5" />
                   </button>
@@ -477,7 +477,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
               }}
             >
               <ImagePlus className="size-6 text-muted-foreground" />
-              <span>Drop images or click to add (max {MAX_NEW_IMAGES} new)</span>
+              <span>Hidhni imazhe ose klikoni për të shtuar (maks. {MAX_NEW_IMAGES} të reja)</span>
               <input
                 type="file"
                 accept="image/jpeg,image/png,image/webp,image/svg+xml"
@@ -495,11 +495,11 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
 
         <SheetFooter className="border-t bg-muted/30">
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            Cancel
+            Anulo
           </Button>
           <Button type="button" onClick={handleSubmit} disabled={saving}>
             {saving && <Loader2 className="animate-spin" />}
-            {saving ? 'Saving…' : mode === 'create' ? 'Create' : 'Save'}
+            {saving ? 'Duke ruajtur…' : mode === 'create' ? 'Krijo' : 'Ruaj'}
           </Button>
         </SheetFooter>
       </SheetContent>

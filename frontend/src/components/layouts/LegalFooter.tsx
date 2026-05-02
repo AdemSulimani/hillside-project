@@ -11,13 +11,13 @@ export default function LegalFooter({ className }: { className?: string }) {
     >
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
         <Link to="/privacy-policy" className="hover:text-foreground hover:underline">
-          Privacy Policy
+          Politika e privatësisë
         </Link>
         <Link to="/terms-of-service" className="hover:text-foreground hover:underline">
-          Terms of Service
+          Kushtet e shërbimit
         </Link>
         <Link to="/data-deletion" className="hover:text-foreground hover:underline">
-          Data deletion
+          Fshirja e të dhënave
         </Link>
       </div>
     </footer>

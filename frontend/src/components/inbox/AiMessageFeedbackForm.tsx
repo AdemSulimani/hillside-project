@@ -43,11 +43,11 @@ export function AiMessageFeedbackForm({ messageId, onCancel, onSubmitted }: AiMe
       setClientError(null);
       await queryClient.invalidateQueries({ queryKey: ['ai-config'] });
       await queryClient.invalidateQueries({ queryKey: ['feedback-logs'] });
-      toast.success('Thanks — your feedback was saved.');
+      toast.success('Faleminderit — komenti juaj u ruajt.');
       onSubmitted();
     },
     onError: (err: unknown) => {
-      toast.error(extractMessage(err, 'Could not submit feedback'));
+      toast.error(extractMessage(err, 'Nuk mund të dërgohet komenti'));
     },
   });
 
@@ -55,11 +55,11 @@ export function AiMessageFeedbackForm({ messageId, onCancel, onSubmitted }: AiMe
     e.preventDefault();
     const trimmed = corrected.trim();
     if (!trimmed) {
-      setClientError('Describe what the AI should have said instead.');
+      setClientError('Përshkruani çfarë duhet të kishte thënë IA-ja.');
       return;
     }
     if (trimmed.length > 16_000) {
-      setClientError('Please keep the corrected reply under 16,000 characters.');
+      setClientError('Ju lutemi mbajeni përgjigjen e korrigjuar nën 16.000 karaktere.');
       return;
     }
     setClientError(null);
@@ -79,7 +79,7 @@ export function AiMessageFeedbackForm({ messageId, onCancel, onSubmitted }: AiMe
       className="mt-1 w-full max-w-[min(100%,28rem)] space-y-3 rounded-lg border border-border bg-card p-3 text-left text-foreground shadow-sm"
     >
       <div className="space-y-2">
-        <Label htmlFor={`feedback-corrected-${messageId}`}>What should the AI have said instead?</Label>
+        <Label htmlFor={`feedback-corrected-${messageId}`}>Çfarë duhet të kishte thënë IA-ja?</Label>
         <Textarea
           id={`feedback-corrected-${messageId}`}
           value={corrected}
@@ -87,7 +87,7 @@ export function AiMessageFeedbackForm({ messageId, onCancel, onSubmitted }: AiMe
             setCorrected(e.target.value);
             if (clientError) setClientError(null);
           }}
-          placeholder="Write the ideal reply…"
+          placeholder="Shkruani përgjigjen ideale…"
           rows={4}
           maxLength={16_000}
           aria-invalid={!!clientError}
@@ -97,7 +97,7 @@ export function AiMessageFeedbackForm({ messageId, onCancel, onSubmitted }: AiMe
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor={`feedback-reason-${messageId}`}>Reason</Label>
+        <Label htmlFor={`feedback-reason-${messageId}`}>Arsyeja</Label>
         <select
           id={`feedback-reason-${messageId}`}
           value={reason}
@@ -114,16 +114,16 @@ export function AiMessageFeedbackForm({ messageId, onCancel, onSubmitted }: AiMe
 
       <div className="flex flex-wrap justify-end gap-2 pt-1">
         <Button type="button" variant="outline" size="sm" onClick={handleCancel} disabled={mutation.isPending}>
-          Cancel
+          Anulo
         </Button>
         <Button type="submit" size="sm" disabled={mutation.isPending}>
           {mutation.isPending ? (
             <>
               <Loader2 className="size-3.5 animate-spin" data-icon="inline-start" />
-              Submitting…
+              Duke dërguar…
             </>
           ) : (
-            'Submit'
+            'Dërgo'
           )}
         </Button>
       </div>

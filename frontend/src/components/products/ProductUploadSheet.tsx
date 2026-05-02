@@ -54,7 +54,7 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
 
   const handleSubmit = async () => {
     if (!file || !kind) {
-      setError('Choose a file to upload.');
+      setError('Zgjidhni një skedar për të ngarkuar.');
       return;
     }
     setError('');
@@ -63,14 +63,16 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
       if (kind === 'document') {
         const { products, count } = await uploadProductDocument(file, useAi);
         toast.success(
-          count === 1 ? 'Imported 1 product from document' : `Imported ${count} products from document`,
+          count === 1
+            ? 'U importua 1 produkt nga dokumenti'
+            : `U importuan ${count} produkte nga dokumenti`,
         );
         if (products.length === 1) {
-          toast.message(products[0].name, { description: 'You can edit details from the product card.' });
+          toast.message(products[0].name, { description: 'Mund të ndryshoni detajet nga karta e produktit.' });
         }
       } else {
         await uploadProductOcrImage(file, useAi);
-        toast.success('Product imported from image');
+        toast.success('Produkti u importua nga imazhi');
       }
       await queryClient.invalidateQueries({ queryKey: ['products'] });
       await queryClient.invalidateQueries({ queryKey: ['product-tags'] });
@@ -79,7 +81,7 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
       const msg =
         err instanceof AxiosError && err.response?.data?.message
           ? String(err.response.data.message)
-          : 'Upload failed. Check the file type and try again.';
+          : 'Ngarkimi dështoi. Kontrolloni llojin e skedarit dhe provoni përsëri.';
       setError(msg);
       toast.error(msg);
     } finally {
@@ -87,12 +89,13 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
     }
   };
 
-  const title = kind === 'document' ? 'Attach document' : kind === 'image' ? 'Attach image' : 'Upload';
+  const title =
+    kind === 'document' ? 'Bashkëngjit dokument' : kind === 'image' ? 'Bashkëngjit imazh' : 'Ngarko';
   const description =
     kind === 'document'
-      ? 'Upload a PDF or spreadsheet. We extract text and create product rows (optional AI structuring).'
+      ? 'Ngarkoni PDF ose fletëllogaritje. Nxjerrim tekstin dhe krijojmë rreshta produktesh (strukturim opsional me IA).'
       : kind === 'image'
-        ? 'Upload a product photo. We run OCR and create a draft product (optional AI cleanup).'
+        ? 'Ngarkoni një foto produkti. Kryejmë OCR dhe krijojmë një produkt skicë (pastrim opsional me IA).'
         : '';
 
   return (
@@ -117,16 +120,16 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
             onFileChange={setFile}
             hint={
               kind === 'image'
-                ? 'JPEG, PNG, WebP, or SVG — max 5 MB'
-                : 'PDF, Excel (.xlsx, .xls), or CSV — max 10 MB'
+                ? 'JPEG, PNG, WebP ose SVG — maks. 5 MB'
+                : 'PDF, Excel (.xlsx, .xls) ose CSV — maks. 10 MB'
             }
           />
 
           <div className="flex items-center justify-between rounded-lg border px-3 py-3">
             <div className="space-y-0.5">
-              <Label className="text-sm font-medium">Use AI (OpenAI)</Label>
+              <Label className="text-sm font-medium">Përdor IA (OpenAI)</Label>
               <p className="text-xs text-muted-foreground">
-                Improve structuring when a valid API key is configured on the server.
+                Përmirëson strukturimin kur në server është konfiguruar një çelës API i vlefshëm.
               </p>
             </div>
             <Switch checked={useAi} onCheckedChange={setUseAi} disabled={loading} />
@@ -135,11 +138,11 @@ export function ProductUploadSheet({ open, onOpenChange, kind }: ProductUploadSh
 
         <SheetFooter className="border-t bg-muted/30">
           <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={loading}>
-            Cancel
+            Anulo
           </Button>
           <Button type="button" onClick={handleSubmit} disabled={loading || !file}>
             {loading && <Loader2 className="animate-spin" />}
-            {loading ? 'Processing…' : 'Import'}
+            {loading ? 'Duke përpunuar…' : 'Importo'}
           </Button>
         </SheetFooter>
       </SheetContent>

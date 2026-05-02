@@ -23,8 +23,8 @@ export function useOrderCreatedToast(): void {
 
     const onOrderCreated = (payload: unknown) => {
       const name = parseOrderCreatedCustomerName(payload);
-      const label = name ?? 'a customer';
-      toast.success(`New draft order for ${label}`);
+      const label = name ?? 'një klient';
+      toast.success(`Porosi e re skicë për ${label}`);
       void queryClient.invalidateQueries({ queryKey: ['orders'] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'draft-for-conversation'] });
     };

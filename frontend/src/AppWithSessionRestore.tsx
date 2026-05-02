@@ -25,12 +25,12 @@ export default function AppWithSessionRestore() {
         role="status"
         aria-live="polite"
         aria-busy="true"
-        aria-label="Restoring session"
+        aria-label="Po rikthehet sesioni"
       >
         <Spinner className="size-10 text-primary" />
         <div className="text-center">
-          <p className="text-sm font-medium text-foreground">Restoring your session…</p>
-          <p className="mt-1 text-xs text-muted-foreground">Checking your account and workspace.</p>
+          <p className="text-sm font-medium text-foreground">Po rikthehet sesioni juaj…</p>
+          <p className="mt-1 text-xs text-muted-foreground">Duke kontrolluar llogarinë dhe hapësirën e punës.</p>
         </div>
       </div>
     );

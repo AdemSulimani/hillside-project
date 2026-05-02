@@ -32,7 +32,7 @@ export default function RegisterPage() {
     setGeneralError('');
 
     if (password !== confirmPassword) {
-      setErrors({ confirmPassword: 'Passwords do not match' });
+      setErrors({ confirmPassword: 'Fjalëkalimet nuk përputhen' });
       return;
     }
 
@@ -45,16 +45,16 @@ export default function RegisterPage() {
         const data = err.response.data;
 
         if (status === 409) {
-          setErrors({ email: ['This email is already registered'] });
+          setErrors({ email: ['Ky email është tashmë i regjistruar'] });
         } else if ((status === 400 || status === 422) && data?.error) {
           const fieldErrors =
             typeof data.error === 'object' ? data.error.body ?? data.error : {};
           setErrors(fieldErrors);
         } else {
-          setGeneralError(data?.message ?? 'Registration failed. Please try again.');
+          setGeneralError(data?.message ?? 'Regjistrimi dështoi. Ju lutemi provoni përsëri.');
         }
       } else {
-        setGeneralError('An unexpected error occurred.');
+        setGeneralError('Ndodhi një gabim i papritur.');
       }
     } finally {
       setLoading(false);
@@ -70,11 +70,11 @@ export default function RegisterPage() {
         </div>
         <div className="space-y-2">
           <p className="text-lg font-medium leading-snug">
-            "Getting started was incredibly easy. We were up and running in minutes."
+            &quot;Fillimi ishte jashtëzakonisht i lehtë. Ishim gati për punë për pak minuta.&quot;
           </p>
-          <p className="text-sm opacity-80">— Early adopter</p>
+          <p className="text-sm opacity-80">— Përdorues i hershëm</p>
         </div>
-        <p className="text-xs opacity-60">&copy; {new Date().getFullYear()} Hillside. All rights reserved.</p>
+        <p className="text-xs opacity-60">&copy; {new Date().getFullYear()} Hillside. Të gjitha të drejtat e rezervuara.</p>
       </div>
 
       {/* Right — Form */}
@@ -82,9 +82,9 @@ export default function RegisterPage() {
         <div className="w-full max-w-sm space-y-8">
           <div className="space-y-2 text-center">
             <h1 className="text-2xl font-semibold tracking-tight lg:hidden">Hillside</h1>
-            <h2 className="text-2xl font-semibold tracking-tight">Create an account</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Krijo llogari</h2>
             <p className="text-sm text-muted-foreground">
-              Enter your details to get started
+              Plotëso të dhënat për të filluar
             </p>
           </div>
 
@@ -96,12 +96,12 @@ export default function RegisterPage() {
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div className="space-y-2">
-              <Label htmlFor="name">Full name</Label>
+              <Label htmlFor="name">Emri i plotë</Label>
               <Input
                 id="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="John Doe"
+                placeholder="Emri Mbiemri"
                 aria-invalid={!!errors.name}
                 className="h-10"
                 required
@@ -118,7 +118,7 @@ export default function RegisterPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
+                placeholder="ju@shembull.com"
                 aria-invalid={!!errors.email}
                 className="h-10"
                 required
@@ -130,24 +130,24 @@ export default function RegisterPage() {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
+                <Label htmlFor="password">Fjalëkalimi</Label>
                 <PasswordInput
                   id="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="8+ characters"
+                  placeholder="8+ karaktere"
                   aria-invalid={!!errors.password}
                   required
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="confirmPassword">Confirm</Label>
+                <Label htmlFor="confirmPassword">Konfirmo</Label>
                 <PasswordInput
                   id="confirmPassword"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Repeat"
+                  placeholder="Përsërit"
                   aria-invalid={!!errors.confirmPassword}
                   required
                 />
@@ -167,37 +167,37 @@ export default function RegisterPage() {
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="size-4 rounded border-input accent-primary"
               />
-              Remember me for 30 days
+              Mbaj mend për 30 ditë
             </label>
 
             <Button type="submit" size="lg" className="w-full" disabled={loading}>
               {loading && <Loader2 className="animate-spin" />}
-              {loading ? 'Creating account…' : 'Create account'}
+              {loading ? 'Duke krijuar llogarinë…' : 'Krijo llogarinë'}
             </Button>
           </form>
 
           <p className="text-center text-sm text-muted-foreground">
-            Already have an account?{' '}
+            Keni tashmë llogari?{' '}
             <Link to="/login" className="font-medium text-primary hover:underline">
-              Sign in
+              Hyni
             </Link>
           </p>
 
           <p className="text-center text-xs text-muted-foreground">
-            By creating an account, you agree to our{' '}
+            Duke krijuar llogari, pranoni{' '}
             <Link to="/terms-of-service" className="hover:text-foreground hover:underline">
-              Terms of Service
+              Kushtet e shërbimit
             </Link>{' '}
-            and{' '}
+            dhe{' '}
             <Link to="/privacy-policy" className="hover:text-foreground hover:underline">
-              Privacy Policy
+              Politikën e privatësisë
             </Link>
             .
           </p>
 
           <p className="text-center text-xs text-muted-foreground">
             <Link to="/data-deletion" className="hover:text-foreground hover:underline">
-              Data deletion requests
+              Kërkesat për fshirje të dhënash
             </Link>
           </p>
         </div>
