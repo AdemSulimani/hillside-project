@@ -54,6 +54,19 @@ export interface ActionRequiredOrder extends OrderListItem {
   request_reason: string | null;
 }
 
+/** IA escalation row shown under Porositë → Veprim i nevojshëm (no order resolution form). */
+export interface ActionTabAlertTask {
+  id: string;
+  conversation_id: string;
+  reason: string;
+  status: string;
+  created_at: string;
+  contact_name: string;
+  channel_type: ChannelType;
+  channel_name: string;
+  message_content: string | null;
+}
+
 export interface OrderConversationSummary {
   id: string;
   tenant_id: string;

@@ -9,7 +9,7 @@ export const aiAlertIdParamsSchema = z.object({
 export const aiAlertListQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  status: z.enum(['unread', 'read', 'resolved']).optional(),
+  status: z.enum(['unread', 'read', 'resolved', 'open']).optional(),
 });
 
 export type AIAlertListQuery = z.infer<typeof aiAlertListQuerySchema>;

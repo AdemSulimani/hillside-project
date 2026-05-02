@@ -3,6 +3,7 @@ import type { PaginatedResponse } from '@/types';
 import type { ChannelType } from '@/types/conversation';
 import type {
   ActionRequiredOrder,
+  ActionTabAlertTask,
   OrderListItem,
   OrderResolutionStatus,
   OrderStatus,
@@ -210,12 +211,34 @@ export function normalizeActionRequiredOrder(raw: Record<string, unknown>): Acti
   };
 }
 
-export async function fetchActionRequiredOrders(): Promise<ActionRequiredOrder[]> {
-  const { data } = await api.get<{ success: boolean; data: { orders: Record<string, unknown>[] } }>(
-    '/orders/action-required',
-  );
-  const rows = data.data?.orders ?? [];
-  return rows.map((row) => normalizeActionRequiredOrder(row));
+function normalizeActionTabAlertTask(raw: Record<string, unknown>): ActionTabAlertTask {
+  return {
+    id: String(raw.id),
+    conversation_id: String(raw.conversation_id ?? ''),
+    reason: String(raw.reason ?? ''),
+    status: String(raw.status ?? 'unread'),
+    created_at: String(raw.created_at ?? ''),
+    contact_name: String(raw.contact_name ?? ''),
+    channel_type: (raw.channel_type as ActionTabAlertTask['channel_type']) ?? 'facebook',
+    channel_name: String(raw.channel_name ?? ''),
+    message_content: raw.message_content != null ? String(raw.message_content) : null,
+  };
+}
+
+export async function fetchActionRequiredOrders(): Promise<{
+  orders: ActionRequiredOrder[];
+  alert_tasks: ActionTabAlertTask[];
+}> {
+  const { data } = await api.get<{
+    success: boolean;
+    data: { orders: Record<string, unknown>[]; alert_tasks?: Record<string, unknown>[] };
+  }>('/orders/action-required');
+  const orderRows = data.data?.orders ?? [];
+  const alertRows = data.data?.alert_tasks ?? [];
+  return {
+    orders: orderRows.map((row) => normalizeActionRequiredOrder(row)),
+    alert_tasks: alertRows.map((row) => normalizeActionTabAlertTask(row)),
+  };
 }
 
 export async function resolveOrderAction(

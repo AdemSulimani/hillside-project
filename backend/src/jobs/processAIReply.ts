@@ -20,7 +20,7 @@ import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
 import {
   createOrder,
   findLatestActiveOrderForConversation,
-  findLatestConfirmedOrProcessingOrderForContact,
+  findLatestOpenOrderForContactForEscalation,
   markOrderCancellationRequested,
   markOrderRefundRequested,
 } from '../db/models/order';
@@ -51,7 +51,6 @@ import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
 import { logEvent } from '../services/analyticsService';
-import { openai } from '../services/openaiClient';
 
 export interface AIReplyJobData {
   tenantId: string;
@@ -662,6 +661,17 @@ function looksLikeOrderAffirmation(text: string): boolean {
   );
 }
 
+/** True when the customer message is only emoji / pictographs (no letters or digits). */
+function isEmojiOnlyText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  const withoutEmoji = t
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[\uFE0F\u200D]/g, '')
+    .replace(/\s+/g, '');
+  return withoutEmoji.length === 0;
+}
+
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId } = data;
 
@@ -791,6 +801,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     console.info('[ai.reply] Skipping automated reply for reaction-only inbound', { conversationId });
     return;
   }
+  if (inboundText && isEmojiOnlyText(inboundText) && mergedAttachmentUrls.length === 0) {
+    console.info('[ai.reply] Skipping automated reply for emoji-only inbound', { conversationId });
+    return;
+  }
   const attachmentUrls = mergedAttachmentUrls;
 
   if (!inboundText && attachmentUrls.length === 0) {
@@ -812,140 +826,114 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       const confidentCancelOrRefund = cancellationRefundIntent.confidence > 0.8;
 
       if (hasCancelOrRefundIntent && confidentCancelOrRefund) {
-        const candidateOrder = await findLatestConfirmedOrProcessingOrderForContact(
+        const candidateOrder = await findLatestOpenOrderForContactForEscalation(
           tenantId,
           conversation.contact_id,
         );
 
-        if (candidateOrder) {
-          const ackSystemPrompt = [
-            'You are a customer support assistant handling a sensitive order issue.',
-            'Write one short empathetic acknowledgment message in plain text.',
-            'Requirements:',
-            '- Acknowledge the customer request warmly and empathetically.',
-            '- Thank the customer for letting the business know.',
-            '- Ask for the reason only if not already provided.',
-            '- Assure them a team member will follow up shortly.',
-            '- Do NOT promise approvals, outcomes, or exact timelines.',
-            '- Keep it concise and suitable for chat.',
-          ].join('\n');
-          const askForReason = cancellationRefundIntent.reason ? 'no' : 'yes';
-          const ackCompletion = await openai.chat.completions.create({
-            model: 'gpt-4o',
-            messages: [
-              { role: 'system', content: ackSystemPrompt },
-              {
-                role: 'user',
-                content: [
-                  `Customer message: ${inboundText}`,
-                  `Intent cancellation: ${cancellationRefundIntent.is_cancellation ? 'yes' : 'no'}`,
-                  `Intent refund: ${cancellationRefundIntent.is_refund ? 'yes' : 'no'}`,
-                  `Customer already provided reason: ${askForReason === 'yes' ? 'no' : 'yes'}`,
-                ].join('\n'),
-              },
-            ],
-            temperature: 0.4,
-            max_tokens: 220,
-          });
-          const ackText =
-            ackCompletion.choices[0]?.message?.content?.trim() ||
-            'Thank you for letting us know. We are sorry to hear this and our team will review your request shortly.';
+        // Fixed copy (not model-generated): same line as post-purchase holding message.
+        const ackText = HOLDING_MESSAGES.sq.postPurchaseSupport;
 
-          const contactForSend = await findContactById(conversation.contact_id);
-          let sendResult:
-            | Awaited<ReturnType<typeof sendMessage>>
-            | null = null;
-          const ackPrecheck = await shouldStillSendAutomatedReply({
-            tenantId,
-            channelId,
+        const contactForSend = await findContactById(conversation.contact_id);
+        let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
+        const ackPrecheck = await shouldStillSendAutomatedReply({
+          tenantId,
+          channelId,
+          conversationId,
+          scheduledInboundExternalId: data.messageExternalId,
+        });
+        if (!ackPrecheck.ok) {
+          console.info('[ai.reply] Skipping cancellation/refund ack send', {
             conversationId,
-            scheduledInboundExternalId: data.messageExternalId,
+            scheduledFor: data.messageExternalId,
+            reason: ackPrecheck.reason,
+            ...ackPrecheck.logPayload,
           });
-          if (!ackPrecheck.ok) {
-            console.info('[ai.reply] Skipping cancellation/refund ack send', {
-              conversationId,
-              scheduledFor: data.messageExternalId,
-              reason: ackPrecheck.reason,
-              ...ackPrecheck.logPayload,
-            });
-            return;
-          }
-          if (contactForSend) {
-            sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
-          }
+          return;
+        }
+        if (contactForSend) {
+          sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
+        }
 
-          const outboundAck = await createMessage({
-            tenant_id: tenantId,
-            conversation_id: conversationId,
-            external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-            direction: 'outbound',
-            type: 'text',
-            content: ackText,
-            sent_by: 'ai',
-          });
+        const outboundAck = await createMessage({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+          direction: 'outbound',
+          type: 'text',
+          content: ackText,
+          sent_by: 'ai',
+        });
 
-          const alerts: AIAlert[] = [];
-          let escalatedOrder = candidateOrder;
-          if (cancellationRefundIntent.is_cancellation) {
-            const updatedOrder = await markOrderCancellationRequested(
-              candidateOrder.id,
-              tenantId,
-              cancellationRefundIntent.reason,
-            );
-            if (updatedOrder) escalatedOrder = updatedOrder;
-            const alert = await createAIAlert({
+        const alerts: AIAlert[] = [];
+        let escalatedOrder = candidateOrder;
+        if (candidateOrder && cancellationRefundIntent.is_cancellation) {
+          const updatedOrder = await markOrderCancellationRequested(
+            candidateOrder.id,
+            tenantId,
+            cancellationRefundIntent.reason,
+          );
+          if (updatedOrder) escalatedOrder = updatedOrder;
+        }
+        if (candidateOrder && cancellationRefundIntent.is_refund) {
+          const updatedOrder = await markOrderRefundRequested(
+            candidateOrder.id,
+            tenantId,
+            cancellationRefundIntent.reason,
+          );
+          if (updatedOrder) escalatedOrder = updatedOrder;
+        }
+        if (cancellationRefundIntent.is_cancellation) {
+          alerts.push(
+            await createAIAlert({
               tenant_id: tenantId,
               conversation_id: conversationId,
               message_id: lastInbound?.id ?? null,
               reason: 'cancellation_request',
-            });
-            alerts.push(alert);
-          }
-          if (cancellationRefundIntent.is_refund) {
-            const updatedOrder = await markOrderRefundRequested(
-              candidateOrder.id,
-              tenantId,
-              cancellationRefundIntent.reason,
-            );
-            if (updatedOrder) escalatedOrder = updatedOrder;
-            const alert = await createAIAlert({
+            }),
+          );
+        }
+        if (cancellationRefundIntent.is_refund) {
+          alerts.push(
+            await createAIAlert({
               tenant_id: tenantId,
               conversation_id: conversationId,
               message_id: lastInbound?.id ?? null,
               reason: 'refund_request',
-            });
-            alerts.push(alert);
-          }
+            }),
+          );
+        }
 
-          await setConversationAiPaused(conversationId, tenantId, true);
+        await setConversationAiPaused(conversationId, tenantId, true);
 
-          for (const alert of alerts) {
-            socketService.emitAIAlert(tenantId, {
-              ...alert,
-              message_content: inboundText || null,
-              contact_name: contactForSend?.name?.trim() || 'Customer',
-              channel_type: channel.type,
-              channel_name: channel.name,
-            });
-          }
+        for (const alert of alerts) {
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForSend?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+        }
+        if (candidateOrder && escalatedOrder) {
           socketService.emitOrderActionRequired(tenantId, {
             order: escalatedOrder,
             reason: cancellationRefundIntent.reason,
           });
-          socketService.emitNewMessage(tenantId, outboundAck);
-          socketService.emitConversationUpdated(tenantId, conversationId);
-
-          if (!sendResult?.success && sendResult) {
-            const errReason = sendResult.error ?? 'Failed to send acknowledgment';
-            await updateMessageSendFailure(outboundAck.id, tenantId, 'failed', errReason);
-            socketService.emitMessageSendFailed(tenantId, {
-              messageId: outboundAck.id,
-              conversationId,
-              error: errReason,
-            });
-          }
-          return;
         }
+        socketService.emitNewMessage(tenantId, outboundAck);
+        socketService.emitConversationUpdated(tenantId, conversationId);
+
+        if (!sendResult?.success && sendResult) {
+          const errReason = sendResult.error ?? 'Failed to send acknowledgment';
+          await updateMessageSendFailure(outboundAck.id, tenantId, 'failed', errReason);
+          socketService.emitMessageSendFailed(tenantId, {
+            messageId: outboundAck.id,
+            conversationId,
+            error: errReason,
+          });
+        }
+        return;
       }
 
       const isLikelyNewOrderSignal = await classifyNewOrderSignal(inboundText);
@@ -1074,6 +1062,22 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
 
       if (hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent) {
+        const postPurchasePrecheck = await shouldStillSendAutomatedReply({
+          tenantId,
+          channelId,
+          conversationId,
+          scheduledInboundExternalId: data.messageExternalId,
+        });
+        if (!postPurchasePrecheck.ok) {
+          console.info('[ai.reply] Skipping post-purchase holding message send', {
+            conversationId,
+            scheduledFor: data.messageExternalId,
+            reason: postPurchasePrecheck.reason,
+            ...postPurchasePrecheck.logPayload,
+          });
+          return;
+        }
+
         const locale = inferHoldingMessageLocale(inboundText);
         const postPurchaseHoldingMessage = HOLDING_MESSAGES[locale].postPurchaseSupport;
         const client = await pool.connect();
@@ -1107,21 +1111,6 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let sendResult:
           | Awaited<ReturnType<typeof sendMessage>>
           | null = null;
-        const postPurchasePrecheck = await shouldStillSendAutomatedReply({
-          tenantId,
-          channelId,
-          conversationId,
-          scheduledInboundExternalId: data.messageExternalId,
-        });
-        if (!postPurchasePrecheck.ok) {
-          console.info('[ai.reply] Skipping post-purchase holding message send', {
-            conversationId,
-            scheduledFor: data.messageExternalId,
-            reason: postPurchasePrecheck.reason,
-            ...postPurchasePrecheck.logPayload,
-          });
-          return;
-        }
         if (contactForSend) {
           sendResult = await sendMessage(
             channel,

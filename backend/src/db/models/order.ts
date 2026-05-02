@@ -337,7 +337,11 @@ export async function updateOrderStatusForTenant(
   return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
-export async function findLatestConfirmedOrProcessingOrderForContact(
+/**
+ * Latest order for a contact that may still need cancel/refund handling.
+ * Includes draft through delivered; excludes terminal cancelled/refunded rows.
+ */
+export async function findLatestOpenOrderForContactForEscalation(
   tenantId: string,
   contactId: string,
 ): Promise<Order | null> {
@@ -346,7 +350,7 @@ export async function findLatestConfirmedOrProcessingOrderForContact(
      FROM orders
      WHERE tenant_id = $1
        AND contact_id = $2
-       AND status IN ('confirmed', 'processing')
+       AND status NOT IN ('cancelled', 'refunded')
      ORDER BY created_at DESC
      LIMIT 1`,
     [tenantId, contactId],
@@ -410,7 +414,8 @@ export async function listActionRequiredOrdersForTenant(
      INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
      INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
      WHERE o.tenant_id = $1
-       AND o.resolution_status = 'pending'
+       AND (o.cancellation_requested_at IS NOT NULL OR o.refund_requested_at IS NOT NULL)
+       AND (o.resolution_status IS NULL OR o.resolution_status = 'pending')
      ORDER BY GREATEST(
        COALESCE(o.cancellation_requested_at, '-infinity'::timestamptz),
        COALESCE(o.refund_requested_at, '-infinity'::timestamptz)

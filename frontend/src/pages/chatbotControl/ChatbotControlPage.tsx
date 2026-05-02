@@ -223,7 +223,7 @@ export default function ChatbotControlPage() {
         <div>
           <h2 className="text-lg font-semibold tracking-tight">Biseda në pauzë</h2>
           <p className="text-sm text-muted-foreground">
-            Bisedat ku IA-ja u pezullua manualisht nga kutia e hyrjes ose nga kjo faqe.
+            Bisedat ku IA-ja u pezullua manualisht nga Mesazhet ose nga kjo faqe.
           </p>
         </div>
 
@@ -257,7 +257,7 @@ export default function ChatbotControlPage() {
                         to={`/inbox?c=${encodeURIComponent(row.id)}`}
                         className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
                       >
-                        Hape në kutinë e hyrjes
+                        Hape në Mesazhet
                       </Link>
                       <Button
                         type="button"

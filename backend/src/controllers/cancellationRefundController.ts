@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
+import { listEscalationAlertsForOrdersActionTab } from '../db/models/aiAlert';
 import {
   findOrderByIdForTenant,
   listActionRequiredOrdersForTenant,
@@ -21,7 +22,17 @@ export async function listActionRequired(req: Request, res: Response): Promise<v
   try {
     const tenantId = req.user!.tenantId!;
     const orders = await listActionRequiredOrdersForTenant(tenantId);
-    sendSuccess(res, { orders }, 'Action-required orders retrieved successfully');
+    const pendingConvoIds = new Set(
+      orders.map((o) => o.conversation_id).filter((id): id is string => Boolean(id)),
+    );
+    const alertRows = await listEscalationAlertsForOrdersActionTab(tenantId);
+    const alert_tasks = alertRows.filter((a) => {
+      if (a.reason === 'cancellation_request' || a.reason === 'refund_request') {
+        return !pendingConvoIds.has(a.conversation_id);
+      }
+      return true;
+    });
+    sendSuccess(res, { orders, alert_tasks }, 'Action-required orders retrieved successfully');
   } catch (err) {
     sendError(res, 'Failed to retrieve action-required orders', 500, err);
   }

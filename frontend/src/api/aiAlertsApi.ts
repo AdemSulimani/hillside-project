@@ -65,7 +65,8 @@ export async function fetchAIAlertsUnreadCount(): Promise<number> {
 export type AIAlertsListParams = {
   page?: number;
   limit?: number;
-  status?: AIAlertStatus;
+  /** `open` = all alerts that still need action (unread + read). */
+  status?: AIAlertStatus | 'open';
 };
 
 export async function fetchAIAlerts(params: AIAlertsListParams = {}): Promise<{

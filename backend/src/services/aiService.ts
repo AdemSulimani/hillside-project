@@ -31,6 +31,18 @@ function estimateTokens(text: string): number {
   return text.length / 4;
 }
 
+/** Parses `confidence` from structured JSON models (number or numeric string; 0–1 or 0–100). */
+function parseModelClassifierConfidence(raw: unknown): number {
+  let confidence = 0;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    confidence = raw > 1 ? raw / 100 : raw;
+  } else if (typeof raw === 'string') {
+    const n = parseFloat(raw.trim());
+    if (Number.isFinite(n)) confidence = n > 1 ? n / 100 : n;
+  }
+  return Math.min(1, Math.max(0, confidence));
+}
+
 /** Matches normalized inbound text from webhookNormalizer (Feature 22). */
 const SHARED_CONTENT_SYSTEM_APPEND =
   '\n\nKlienti ka ndare permbajtje me ju. Përdor kontekstin qe jepet per te dhene pergjigjen e pershtatshme dhe lidhe me produktet nga katalogu kur eshte relevante.';
@@ -1165,16 +1177,16 @@ Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | nu
     };
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
 
-    let confidence = 0;
-    const confRaw = parsed.confidence;
-    if (typeof confRaw === 'number' && Number.isFinite(confRaw)) {
-      confidence = confRaw > 1 ? confRaw / 100 : confRaw;
+    const is_cancellation = parsed.is_cancellation === true;
+    const is_refund = parsed.is_refund === true;
+    let confidence = parseModelClassifierConfidence(parsed.confidence);
+    if ((is_cancellation || is_refund) && confidence === 0) {
+      confidence = 0.9;
     }
-    confidence = Math.min(1, Math.max(0, confidence));
 
     return {
-      is_cancellation: parsed.is_cancellation === true,
-      is_refund: parsed.is_refund === true,
+      is_cancellation,
+      is_refund,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
       confidence,
     };
@@ -1262,19 +1274,26 @@ Return JSON exactly:
       reason?: string | null;
     };
 
-    let confidence = 0;
-    const confRaw = parsed.confidence;
-    if (typeof confRaw === 'number' && Number.isFinite(confRaw)) {
-      confidence = confRaw > 1 ? confRaw / 100 : confRaw;
+    const is_delivery_eta_query = parsed.is_delivery_eta_query === true;
+    const is_not_delivered_complaint = parsed.is_not_delivered_complaint === true;
+    const is_wrong_product_issue = parsed.is_wrong_product_issue === true;
+    const is_product_problem_issue = parsed.is_product_problem_issue === true;
+    let confidence = parseModelClassifierConfidence(parsed.confidence);
+    const anyIntent =
+      is_delivery_eta_query ||
+      is_not_delivered_complaint ||
+      is_wrong_product_issue ||
+      is_product_problem_issue;
+    if (anyIntent && confidence === 0) {
+      confidence = 0.9;
     }
-    confidence = Math.min(1, Math.max(0, confidence));
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
 
     return {
-      is_delivery_eta_query: parsed.is_delivery_eta_query === true,
-      is_not_delivered_complaint: parsed.is_not_delivered_complaint === true,
-      is_wrong_product_issue: parsed.is_wrong_product_issue === true,
-      is_product_problem_issue: parsed.is_product_problem_issue === true,
+      is_delivery_eta_query,
+      is_not_delivered_complaint,
+      is_wrong_product_issue,
+      is_product_problem_issue,
       confidence,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
     };

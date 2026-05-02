@@ -23,7 +23,7 @@ import {
 
 const navItems = [
   { to: '/dashboard', label: 'Paneli', icon: LayoutDashboard },
-  { to: '/inbox', label: 'Kutia e hyrjes', icon: Inbox },
+  { to: '/inbox', label: 'Mesazhet', icon: Inbox },
   { to: '/products', label: 'Produkte', icon: Package },
   { to: '/channels', label: 'Kanale', icon: Radio },
   { to: '/orders', label: 'Porositë', icon: ShoppingCart },

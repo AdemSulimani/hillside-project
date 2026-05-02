@@ -299,7 +299,7 @@ export default function ContactDetailPage() {
                       {lastMessagePreview(c.messages)}
                     </p>
                     <span className="mt-2 inline-block text-xs font-medium text-primary">
-                      Hape në kutinë e hyrjes →
+                      Hape në Mesazhet →
                     </span>
                   </Link>
                 </li>

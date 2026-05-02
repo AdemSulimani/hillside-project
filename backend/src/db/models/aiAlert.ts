@@ -50,12 +50,89 @@ interface AIAlertListQueryRow extends AIAlert {
   quality_score: unknown;
 }
 
+/** `open` = unread + read (not yet resolved). */
+export type AIAlertListStatusFilter = AIAlertStatus | 'open';
+
 export interface ListAIAlertsParams {
   tenantId: string;
-  status?: AIAlertStatus;
+  status?: AIAlertListStatusFilter;
   reason?: string;
   page: number;
   limit: number;
+}
+
+/** Open escalation alerts surfaced on Porositë → Veprim i nevojshëm (with order-based rows). */
+export const ORDERS_ACTION_TAB_ALERT_REASONS = [
+  'usage_question_unanswered',
+  'post_purchase_support_request',
+  'cancellation_request',
+  'refund_request',
+] as const;
+
+export type OrdersActionTabAlertReason = (typeof ORDERS_ACTION_TAB_ALERT_REASONS)[number];
+
+export interface OrdersActionTabAlertRow {
+  id: string;
+  conversation_id: string;
+  message_id: string | null;
+  reason: string;
+  status: AIAlertStatus;
+  created_at: Date;
+  contact_name: string;
+  channel_type: ChannelType;
+  channel_name: string;
+  message_content: string | null;
+}
+
+export async function listEscalationAlertsForOrdersActionTab(
+  tenantId: string,
+): Promise<OrdersActionTabAlertRow[]> {
+  const { rows } = await pool.query<AIAlertListQueryRow>(
+    `SELECT
+       a.id,
+       a.tenant_id,
+       a.conversation_id,
+       a.message_id,
+       a.reason,
+       a.status,
+       a.created_at,
+       COALESCE(ct.name, '—') AS contact_name,
+       COALESCE(ch.type, 'facebook') AS channel_type,
+       COALESCE(ch.name, '—') AS channel_name,
+       m.content AS message_content,
+       m.quality_score
+     FROM ai_alerts a
+     LEFT JOIN conversations c ON c.id = a.conversation_id AND c.tenant_id = a.tenant_id
+     LEFT JOIN contacts ct ON ct.id = c.contact_id AND ct.tenant_id = a.tenant_id
+     LEFT JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = a.tenant_id
+     LEFT JOIN messages m ON m.id = a.message_id AND m.tenant_id = a.tenant_id
+     WHERE a.tenant_id = $1
+       AND a.conversation_id IS NOT NULL
+       AND a.status IN ('unread', 'read')
+       AND a.reason IN (
+         'usage_question_unanswered',
+         'post_purchase_support_request',
+         'cancellation_request',
+         'refund_request'
+       )
+     ORDER BY a.created_at DESC`,
+    [tenantId],
+  );
+
+  return rows
+    .filter((row) => row.conversation_id != null)
+    .map((row) => ({
+      id: row.id,
+      conversation_id: row.conversation_id as string,
+      message_id: row.message_id,
+      reason: row.reason,
+      status: row.status,
+      created_at: row.created_at,
+      contact_name: row.contact_name,
+      channel_type: row.channel_type,
+      channel_name: row.channel_name,
+      message_content: row.message_content,
+    }));
 }
 
 function mapAlertListRow(row: AIAlertListQueryRow): AIAlertWithContext {
@@ -92,7 +169,9 @@ export async function listAIAlertsForTenant(
   const values: unknown[] = [tenantId];
   let paramIdx = 2;
 
-  if (status) {
+  if (status === 'open') {
+    conditions.push(`a.status IN ('unread', 'read')`);
+  } else if (status) {
     conditions.push(`a.status = $${paramIdx}`);
     values.push(status);
     paramIdx += 1;

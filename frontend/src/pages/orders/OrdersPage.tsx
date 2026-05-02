@@ -12,6 +12,7 @@ import {
   Search,
   ShoppingCart,
 } from 'lucide-react';
+import { resolveAIAlert } from '@/api/aiAlertsApi';
 import {
   fetchActionRequiredOrders,
   fetchOrders,
@@ -21,6 +22,7 @@ import {
 import { OrderDetailDrawer } from '@/components/orders/OrderDetailDrawer';
 import { orderChannelIcon } from '@/components/orders/orderChannelIcon';
 import { OrderStatusBadge } from '@/components/orders/orderStatusBadge';
+import { formatFlagReason } from '@/lib/aiAlertLabels';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -208,6 +210,19 @@ export default function OrdersPage() {
     refetchInterval: 30_000,
   });
 
+  const resolveAlertTaskMutation = useMutation({
+    mutationFn: (alertId: string) => resolveAIAlert(alertId, { resume_ai: false }),
+    onSuccess: () => {
+      toast.success('Alarmi u mbyll');
+      void queryClient.invalidateQueries({ queryKey: ['orders'] });
+      void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
+      void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+    },
+    onError: () => {
+      toast.error('Nuk u mbyll alarmi. Provoni nga faqja Alarmet IA.');
+    },
+  });
+
   const sendResolutionMutation = useMutation({
     mutationFn: async (payload: {
       orderId: string;
@@ -237,8 +252,9 @@ export default function OrdersPage() {
   });
 
   const orders = data?.orders ?? [];
-  const actionRequiredOrders = actionRequiredQuery.data ?? [];
-  const actionRequiredCount = actionRequiredOrders.length;
+  const actionRequiredOrders = actionRequiredQuery.data?.orders ?? [];
+  const actionAlertTasks = actionRequiredQuery.data?.alert_tasks ?? [];
+  const actionRequiredCount = actionRequiredOrders.length + actionAlertTasks.length;
   const pagination = data?.pagination;
 
   const handleSort = (col: OrderListSortColumn) => {
@@ -316,7 +332,7 @@ export default function OrdersPage() {
           to="/inbox"
           className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'inline-flex')}
         >
-          Hap kutinë e hyrjes
+          Hap Mesazhet
         </Link>
       </div>
 
@@ -424,10 +440,13 @@ export default function OrdersPage() {
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
             Nuk u ngarkuan porositë që kërkojnë veprim. Ju lutemi rifreskoni.
           </div>
-        ) : actionRequiredOrders.length === 0 ? (
+        ) : actionRequiredOrders.length === 0 && actionAlertTasks.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
             <CheckCircle2 className="size-10 text-muted-foreground opacity-50" />
-            <p className="text-sm text-muted-foreground">Nuk ka kërkesa anulimi ose rimbursimi në pritje.</p>
+            <p className="text-sm text-muted-foreground">
+              Nuk ka veprime në pritje: anulim, rimbursim, alarme IA për përdorim produkti ose problem
+              pasi-blerje.
+            </p>
           </div>
         ) : (
           <div className="space-y-4">
@@ -574,6 +593,67 @@ export default function OrdersPage() {
                 </div>
               );
             })}
+            {actionAlertTasks.map((task) => (
+              <div
+                key={task.id}
+                className="rounded-xl border border-amber-500/35 bg-card p-4 shadow-sm dark:border-amber-600/40"
+              >
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center justify-center rounded-md bg-muted p-1.5">
+                        {renderOrderChannelIcon(task.channel_type)}
+                      </span>
+                      <p className="truncate text-base font-semibold">{task.contact_name}</p>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {task.channel_name} · {formatRelativeShort(task.created_at)}
+                    </p>
+                  </div>
+                  <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10">
+                    {formatFlagReason(task.reason)}
+                  </Badge>
+                </div>
+                {task.message_content?.trim() ? (
+                  <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Mesazhi / konteksti
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm">{task.message_content}</p>
+                  </div>
+                ) : null}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={resolveAlertTaskMutation.isPending}
+                    onClick={() => resolveAlertTaskMutation.mutate(task.id)}
+                  >
+                    {resolveAlertTaskMutation.isPending &&
+                    resolveAlertTaskMutation.variables === task.id ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" aria-hidden />
+                        Duke mbyllur…
+                      </>
+                    ) : (
+                      'Mbyll alarmin'
+                    )}
+                  </Button>
+                  <Link
+                    to={`/inbox?c=${task.conversation_id}`}
+                    className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
+                  >
+                    Shiko bisedën
+                  </Link>
+                  <Link
+                    to="/ai-alerts"
+                    className={cn(buttonVariants({ variant: 'ghost', size: 'sm' }))}
+                  >
+                    Hap Alarmet IA
+                  </Link>
+                </div>
+              </div>
+            ))}
           </div>
         )
       ) : isLoading ? (
