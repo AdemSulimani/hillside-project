@@ -10,7 +10,8 @@ import {
 } from '@/lib/instagramRichMessageDisplay';
 import { AiMessageFeedbackForm } from '@/components/inbox/AiMessageFeedbackForm';
 import { MessageImageAttachments } from '@/components/inbox/MessageImageAttachments';
-import { Button, buttonVariants } from '@/components/ui/button';
+import { Button } from '@/components/ui/button';
+import { AI_ALERT_RESOLUTION_HINT } from '@/lib/aiAlertLabels';
 
 interface MessageBubbleProps {
   message: InboxMessage;
@@ -593,18 +594,12 @@ export function CancellationRefundConversationBanner({
 }: {
   requestType: 'cancellation' | 'refund';
 }) {
+  const requestWord = requestType === 'cancellation' ? 'anulim' : 'rimbursim';
   return (
     <div className="border-b border-red-500/35 bg-red-500/10 px-4 py-3 dark:bg-red-950/35">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-sm font-medium text-foreground">
-          Klienti kërkoi {requestType === 'cancellation' ? 'anulim' : 'rimbursim'}. IA-ja është ndalur. Trajtojeni nga moduli i porosive.
-        </p>
-        <a
-          href="/orders?tab=action_required"
-          className={cn(buttonVariants({ variant: 'destructive', size: 'sm' }), 'w-fit')}
-        >
-          Hap veprimin e nevojshëm
-        </a>
+      <div className="space-y-2">
+        <p className="text-sm font-medium text-foreground">Klienti kërkoi {requestWord}.</p>
+        <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
       </div>
     </div>
   );

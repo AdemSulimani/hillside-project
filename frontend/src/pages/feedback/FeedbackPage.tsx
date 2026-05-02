@@ -86,7 +86,7 @@ export default function FeedbackPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Komente për IA-në</h1>
         <p className="text-sm text-muted-foreground">
-          Shënoni përgjigjet e gabuara të IA-së në kutinë e hyrjes dhe ndiqni korrigjimet për trajnim të mëtejshëm.
+          Shënoni përgjigjet e gabuara të IA-së në Mesazhet dhe ndiqni korrigjimet për trajnim të mëtejshëm.
         </p>
       </div>
 
@@ -159,7 +159,7 @@ export default function FeedbackPage() {
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <MessageSquareHeart className="size-10 text-muted-foreground opacity-50" />
           <p className="text-sm text-muted-foreground">
-            Ende nuk ka komente. Përdorni butonin “thumb down” në një mesazh IA në kutinë e hyrjes.
+            Ende nuk ka komente. Përdorni butonin “thumb down” në një mesazh IA në Mesazhet.
           </p>
         </div>
       ) : (

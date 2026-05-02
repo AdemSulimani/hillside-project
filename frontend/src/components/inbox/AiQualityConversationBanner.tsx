@@ -1,5 +1,5 @@
 import { AlertTriangle } from 'lucide-react';
-import { formatFlagReason } from '@/lib/aiAlertLabels';
+import { AI_ALERT_RESOLUTION_HINT, formatFlagReason } from '@/lib/aiAlertLabels';
 import { Button } from '@/components/ui/button';
 import type { OpenAIAlertSummary } from '@/types/conversation';
 
@@ -23,12 +23,13 @@ export function AiQualityConversationBanner({
           <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/25 text-amber-800 dark:text-amber-200">
             <AlertTriangle className="size-5" aria-hidden />
           </div>
-          <div className="min-w-0 space-y-1">
+          <div className="min-w-0 space-y-2">
             <p className="font-semibold text-foreground">IA-ja u shënua në këtë bisedë</p>
             <p className="text-sm text-muted-foreground">
               Arsyeja: <span className="font-medium text-foreground">{formatFlagReason(openAlert.reason)}</span>.
               IA-ja është ndalur. Tani keni kontrollin ju.
             </p>
+            <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">

@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCrmSocket } from '@/contexts/CrmSocketContext';
+import { AI_ALERT_RESOLUTION_HINT } from '@/lib/aiAlertLabels';
 import type { AIAlertSocketPayload } from '@/types/aiAlert';
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -65,15 +66,15 @@ const warningIcon = createElement(AlertTriangle, {
 
 function getAlertToastDescription(reason: string): string {
   if (reason === 'post_purchase_support_request') {
-    return 'Klienti ka problem me dërgesën ose produktin. Ju lutemi shqyrtoni dhe përgjigjuni manualisht.';
+    return `Klienti ka problem me dërgesën ose produktin. ${AI_ALERT_RESOLUTION_HINT}`;
   }
   if (reason === 'cancellation_request' || reason === 'refund_request') {
-    return 'Klienti kërkoi një veprim për porosinë. Hapni Porositë > Veprim i nevojshëm.';
+    return `Klienti kërkoi anulim ose rimbursim. ${AI_ALERT_RESOLUTION_HINT}`;
   }
   if (reason === 'usage_question_unanswered') {
-    return 'IA nuk mundi të përgjigjej për përdorimin e produktit. Ju lutemi ndërhyjni manualisht.';
+    return `IA nuk mundi të përgjigjej për përdorimin e produktit. ${AI_ALERT_RESOLUTION_HINT}`;
   }
-  return 'Shqyrtoni bisedën dhe vendosni nëse merrni kontrollin ose rifilloni chatbot-in.';
+  return AI_ALERT_RESOLUTION_HINT;
 }
 
 /**
@@ -93,6 +94,7 @@ export function useAiAlertToast(): void {
 
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
+      void queryClient.invalidateQueries({ queryKey: ['orders', 'action-required'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
 
       const channelLabel = payload.channel_name.trim() || payload.channel_type;
@@ -107,10 +109,10 @@ export function useAiAlertToast(): void {
         action: {
           label: 'Shiko bisedën',
           onClick: () => {
-            if (payload.reason === 'cancellation_request' || payload.reason === 'refund_request') {
-              navigate('/orders?tab=action_required');
-            } else if (payload.conversation_id) {
+            if (payload.conversation_id) {
               navigate(`/inbox?c=${payload.conversation_id}`);
+            } else {
+              navigate('/ai-alerts');
             }
             toast.dismiss(tid);
           },

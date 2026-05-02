@@ -13,7 +13,7 @@ export interface InboundMessageDTO {
   replyToExternalId?: string;
   /** True when Meta delivers a message echo (e.g. native Instagram app reply). */
   isEcho?: boolean;
-  /** Inbound stored but AI reply job is skipped (reactions; Facebook stickers). */
+  /** Inbound stored but AI reply job is skipped (reactions; stickers; emoji-only is filtered in the AI job). */
   skipAiReply?: boolean;
   channelExternalId: string;
   externalMessageId: string;
@@ -421,7 +421,7 @@ interface MessengerRichExtract {
 
 /**
  * Rich attachment handling for Page Messenger (Facebook) and Instagram DM.
- * Stories / reels / product tags are Instagram-only; stickers skip AI on Facebook only.
+ * Stories / reels / product tags are Instagram-only; stickers skip AI on all Messenger surfaces.
  */
 function extractMessengerRichContent(
   message: Record<string, unknown> | null,
@@ -464,9 +464,7 @@ function extractMessengerRichContent(
       if (url) attachmentRefs.push(url);
       const attId = strTrim(payload.sticker_id ?? payload.attachment_id);
       if (attId) attachmentRefs.push(attId);
-      if (channel === 'facebook') {
-        skipAiReply = true;
-      }
+      skipAiReply = true;
       if (!messageType) messageType = 'image';
       continue;
     }
@@ -743,6 +741,7 @@ function pickMessageType(message: Record<string, unknown>): MessageType {
     const rawType = message.type.toLowerCase();
     if (rawType === 'text') return 'text';
     if (rawType === 'image') return 'image';
+    if (rawType === 'sticker') return 'image';
     if (rawType === 'audio') return 'audio';
     if (rawType === 'video') return 'video';
     if (rawType === 'document') return 'document';
@@ -799,6 +798,27 @@ function extractMetaMessage(
 
   if (!channelExternalId || !externalMessageId || !contactExternalId) {
     throw new Error('Invalid webhook payload: required message identifiers are missing');
+  }
+
+  const messageTypeRaw =
+    message && typeof message.type === 'string' ? message.type.toLowerCase() : '';
+  const stickerObject = asRecord(message?.sticker);
+  if (messageTypeRaw === 'sticker') {
+    const stickerId = typeof stickerObject?.id === 'string' ? stickerObject.id : null;
+    const replyToSticker = whatsAppReplyToExternalId(message, externalMessageId);
+    return {
+      channelExternalId,
+      externalMessageId,
+      contactExternalId,
+      contactName,
+      contactAvatarUrl: null,
+      messageType: 'image',
+      content: null,
+      attachmentUrls: stickerId ? [stickerId] : [],
+      skipAiReply: true,
+      rawPayload: payload,
+      ...(replyToSticker ? { replyToExternalId: replyToSticker } : {}),
+    };
   }
 
   const replyToExternalId = whatsAppReplyToExternalId(message, externalMessageId);

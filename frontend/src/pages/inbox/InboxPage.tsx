@@ -38,6 +38,7 @@ import { ReplyBox } from '@/components/inbox/ReplyBox';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { AI_ALERT_RESOLUTION_HINT } from '@/lib/aiAlertLabels';
 import { cn } from '@/lib/utils';
 import { useIntersectionObserver } from '@/hooks/useIntersectionObserver';
 import { useRealtimeInbox } from '@/hooks/useRealtimeInbox';
@@ -431,7 +432,7 @@ export default function InboxPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="mb-4">
-        <h1 className="text-xl font-semibold tracking-tight">Kutia e hyrjes</h1>
+        <h1 className="text-xl font-semibold tracking-tight">Mesazhet</h1>
         <p className="text-sm text-muted-foreground">
           Lexoni dhe përgjigjuni bisedave në të gjitha kanalet e lidhura.
         </p>
@@ -589,10 +590,13 @@ export default function InboxPage() {
 
               {openQualityAlert?.reason === 'usage_question_unanswered' ? (
                 <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
-                  <p className="text-sm font-medium text-foreground">
-                    Klienti bëri një pyetje përdorimi që nuk mundëm ta përgjigjemi. IA-ja është ndalur. Ju lutemi
-                    përgjigjuni manualisht ose përditësoni udhëzimet e përdorimit të produktit.
-                  </p>
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-foreground">
+                      Klienti bëri një pyetje përdorimi që nuk mundëm ta përgjigjemi. IA-ja është ndalur. Ju lutemi
+                      përgjigjuni manualisht ose përditësoni udhëzimet e përdorimit të produktit.
+                    </p>
+                    <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
+                  </div>
                 </div>
               ) : null}
 
@@ -602,10 +606,13 @@ export default function InboxPage() {
 
               {hasPostPurchaseSupportAlert ? (
                 <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
-                  <p className="text-sm font-medium text-foreground">
-                    Klienti ka problem me dërgesën/produktin. IA-ja është ndalur dhe klienti mori një mesazh
-                    pritjeje. Ju lutemi vazhdoni manualisht.
-                  </p>
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-foreground">
+                      Klienti ka problem me dërgesën/produktin. IA-ja është ndalur dhe klienti mori një mesazh
+                      pritjeje. Ju lutemi vazhdoni manualisht.
+                    </p>
+                    <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
+                  </div>
                 </div>
               ) : null}
 

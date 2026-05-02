@@ -1,3 +1,7 @@
+/** Same copy as alert toasts and Alarmet IA guidance: manual reply, then close / resume from Alarmet IA. */
+export const AI_ALERT_RESOLUTION_HINT =
+  'Së pari, përgjigjuni manualisht në bisedë. Pasi të keni zgjedhur problemin, klikoni te faqja Alarmet IA (anash ne sidebar) → Opsione → Mbyll dhe rifillo IA-në për bisedën (ose Mbyll alarmin nëse IA-ja duhet të mbetet e ndalur).';
+
 const LABELS: Record<string, string> = {
   off_topic: 'Jashtë temës',
   unclear: 'E paqartë',

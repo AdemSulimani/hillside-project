@@ -2,43 +2,51 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { Bell, Globe, Image, Loader2, MessageCircleMore, type LucideIcon } from 'lucide-react';
+import { Bell, Globe, Image, Loader2, MessageCircleMore, MoreHorizontal, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   fetchAIAlerts,
-  fetchUsageEscalations,
   fetchAIAlertsUnreadCount,
   markAIAlertRead,
   markAllAIAlertsRead,
   resolveAIAlert,
 } from '@/api/aiAlertsApi';
 import type { ChannelType } from '@/types/conversation';
-
-const ALERT_CHANNEL_ICONS: Record<ChannelType, LucideIcon> = {
-  facebook: Globe,
-  instagram: Image,
-  whatsapp: MessageCircleMore,
-};
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Switch } from '@/components/ui/switch';
 import { formatFlagReason } from '@/lib/aiAlertLabels';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { useAuthStore } from '@/store/authStore';
 import type { AIAlertRow, AIAlertStatus } from '@/types/aiAlert';
 
 const PAGE_SIZE = 20;
+
+const ALERT_CHANNEL_ICONS: Record<ChannelType, LucideIcon> = {
+  facebook: Globe,
+  instagram: Image,
+  whatsapp: MessageCircleMore,
+};
+
+type AlertsTab = 'open' | 'resolved';
 
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError && err.response?.data?.message) {
@@ -55,37 +63,35 @@ function statusBadgeVariant(
   return 'outline';
 }
 
+function statusShortLabel(status: AIAlertStatus): string {
+  if (status === 'unread') return 'E re';
+  if (status === 'read') return 'E hapur';
+  return 'E mbyllur';
+}
+
 function isCancellationOrRefundReason(reason: string): boolean {
   return reason === 'cancellation_request' || reason === 'refund_request';
 }
 
-function alertTabLabel(key: AIAlertStatus | 'usage_escalations'): string {
-  if (key === 'usage_escalations') return 'Eskalime përdorimi';
-  if (key === 'unread') return 'Të palexuara';
-  if (key === 'read') return 'Të lexuara';
-  return 'Të zgjidhura';
-}
-
-function alertStatusLabelUi(status: AIAlertStatus): string {
-  if (status === 'unread') return 'E palexuar';
-  if (status === 'read') return 'E lexuar';
-  return 'E zgjidhur';
+function isUsageEscalationReason(reason: string): boolean {
+  return reason === 'usage_question_unanswered';
 }
 
 export default function AIAlertsPage() {
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<AIAlertStatus | 'usage_escalations'>('unread');
+  const [tab, setTab] = useState<AlertsTab>('open');
   const [page, setPage] = useState(1);
-  const [resolveTarget, setResolveTarget] = useState<AIAlertRow | null>(null);
-  const [resumeAiOnResolve, setResumeAiOnResolve] = useState(false);
+  const [resumeConfirmTarget, setResumeConfirmTarget] = useState<AIAlertRow | null>(null);
 
   const listQuery = useQuery({
     queryKey: ['ai-alerts', 'list', tab, page],
     queryFn: () =>
-      tab === 'usage_escalations'
-        ? fetchUsageEscalations({ page, limit: PAGE_SIZE })
-        : fetchAIAlerts({ page, limit: PAGE_SIZE, status: tab }),
+      fetchAIAlerts({
+        page,
+        limit: PAGE_SIZE,
+        status: tab === 'open' ? 'open' : 'resolved',
+      }),
     enabled: Boolean(tenantId),
   });
 
@@ -96,12 +102,18 @@ export default function AIAlertsPage() {
     refetchInterval: 120_000,
   });
 
+  const invalidateAlertQueries = () => {
+    void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
+    void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
+    void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+    void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    void queryClient.invalidateQueries({ queryKey: ['orders', 'action-required'] });
+  };
+
   const markReadMutation = useMutation({
     mutationFn: markAIAlertRead,
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
-      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
-      void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+      invalidateAlertQueries();
     },
     onError: (err) => toast.error(extractMessage(err, 'Nuk u përditësua alarmi')),
   });
@@ -110,11 +122,11 @@ export default function AIAlertsPage() {
     mutationFn: markAllAIAlertsRead,
     onSuccess: (count) => {
       toast.success(
-        count > 0 ? `U shënuan ${count} alarm(e) si të lexuara` : 'Nuk ka alarme të palexuara për të përditësuar',
+        count > 0
+          ? `U shënuan ${count} alarm(e) si të lexuara (ende aktive derisa t’i mbyllni).`
+          : 'Nuk ka alarme të reja për të shënuar.',
       );
-      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
-      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
-      void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
+      invalidateAlertQueries();
     },
     onError: (err) => toast.error(extractMessage(err, 'Nuk mund të shënohen të gjitha si të lexuara')),
   });
@@ -122,21 +134,26 @@ export default function AIAlertsPage() {
   const resolveMutation = useMutation({
     mutationFn: ({ id, resume_ai }: { id: string; resume_ai: boolean }) =>
       resolveAIAlert(id, { resume_ai }),
-    onSuccess: () => {
-      toast.success('Alarmi u zgjidh');
-      setResolveTarget(null);
-      setResumeAiOnResolve(false);
-      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
-      void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
-      void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
-      void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    onSuccess: (_, variables) => {
+      toast.success(
+        variables.resume_ai
+          ? 'Alarmi u mbyll dhe IA-ja u rifillua për këtë bisedë.'
+          : 'Alarmi u mbyll.',
+      );
+      setResumeConfirmTarget(null);
+      invalidateAlertQueries();
     },
-    onError: (err) => toast.error(extractMessage(err, 'Nuk mund të zgjidhet alarmi')),
+    onError: (err) => toast.error(extractMessage(err, 'Nuk mund të mbyllet alarmi')),
   });
 
   const alerts = listQuery.data?.alerts ?? [];
   const pagination = listQuery.data?.pagination;
   const totalPages = pagination?.totalPages ?? 1;
+  const openTotal = tab === 'open' ? pagination?.total : null;
+  const resolvingId =
+    resolveMutation.isPending && resolveMutation.variables
+      ? resolveMutation.variables.id
+      : null;
 
   return (
     <div className="space-y-6 pb-10">
@@ -144,50 +161,67 @@ export default function AIAlertsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Alarmet IA</h1>
           <p className="text-sm text-muted-foreground">
-            Kur asistenti del jashtë temës ose përgjigjet me besim të ulët, njoftoheni këtu që të mund të merrni
-            kontrollin e bisedës.
+            Së pari përgjigjuni manualisht në bisedë. Kur të jetë zgjidhur çështja, kthehuni këtu:{' '}
+            <strong>Mbyll alarmin</strong> ose, nëse doni që IA-ja të vazhdojë,{' '}
+            <strong>Opsione</strong> → <strong>Mbyll dhe rifillo IA-në për bisedën</strong>.
           </p>
         </div>
-        {tab === 'unread' ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={markAllMutation.isPending || (unreadCountQuery.data ?? 0) === 0}
-            onClick={() => markAllMutation.mutate()}
-          >
-            {markAllMutation.isPending ? (
-              <>
-                <Loader2 className="size-4 animate-spin" aria-hidden />
-                Duke shënuar…
-              </>
-            ) : (
-              'Shëno të gjitha si të lexuara'
-            )}
-          </Button>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {typeof unreadCountQuery.data === 'number' && unreadCountQuery.data > 0 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button type="button" variant="outline" size="sm" className="gap-1">
+                    Më shumë veprime
+                    <MoreHorizontal className="size-4 opacity-70" aria-hidden />
+                  </Button>
+                }
+              />
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={markAllMutation.isPending}
+                  onClick={() => markAllMutation.mutate()}
+                >
+                  Shëno të gjitha &quot;të reja&quot; si të lexuara
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1">
-        {(['unread', 'read', 'resolved', 'usage_escalations'] as const).map((key) => (
-          <Button
-            key={key}
-            type="button"
-            size="sm"
-            variant={tab === key ? 'default' : 'outline'}
-            onClick={() => {
-              setTab(key);
-              setPage(1);
-            }}
-          >
-            {key === 'unread' && typeof unreadCountQuery.data === 'number' && unreadCountQuery.data > 0 ? (
-              <span className="mr-1.5 inline-flex min-w-5 justify-center rounded-full bg-primary-foreground/20 px-1 text-[0.65rem] font-semibold tabular-nums">
-                {unreadCountQuery.data > 99 ? '99+' : unreadCountQuery.data}
-              </span>
-            ) : null}
-            {alertTabLabel(key)}
-          </Button>
-        ))}
+        <Button
+          type="button"
+          size="sm"
+          variant={tab === 'open' ? 'default' : 'outline'}
+          onClick={() => {
+            setTab('open');
+            setPage(1);
+          }}
+        >
+          {typeof openTotal === 'number' && openTotal > 0 ? (
+            <span className="mr-1.5 inline-flex min-w-5 justify-center rounded-full bg-primary-foreground/20 px-1 text-[0.65rem] font-semibold tabular-nums">
+              {openTotal > 99 ? '99+' : openTotal}
+            </span>
+          ) : typeof unreadCountQuery.data === 'number' && unreadCountQuery.data > 0 ? (
+            <span className="mr-1.5 inline-flex min-w-5 justify-center rounded-full bg-primary-foreground/20 px-1 text-[0.65rem] font-semibold tabular-nums">
+              {unreadCountQuery.data > 99 ? '99+' : unreadCountQuery.data}
+            </span>
+          ) : null}
+          Në pritje
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={tab === 'resolved' ? 'default' : 'outline'}
+          onClick={() => {
+            setTab('resolved');
+            setPage(1);
+          }}
+        >
+          Histori
+        </Button>
       </div>
 
       <div className="space-y-4">
@@ -204,8 +238,14 @@ export default function AIAlertsPage() {
         ) : alerts.length === 0 ? (
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Nuk ka alarme</CardTitle>
-              <CardDescription>Ende nuk ka asgjë në këtë skedë.</CardDescription>
+              <CardTitle className="text-base">
+                {tab === 'open' ? 'Nuk ka alarme në pritje' : 'Nuk ka alarme të mbyllura'}
+              </CardTitle>
+              <CardDescription>
+                {tab === 'open'
+                  ? 'Kur ndodh diçka që kërkon vëmendje, do të shfaqet këtu.'
+                  : 'Alarmet që keni mbyllur shfaqen këtu për referencë.'}
+              </CardDescription>
             </CardHeader>
           </Card>
         ) : (
@@ -213,6 +253,7 @@ export default function AIAlertsPage() {
             {alerts.map((alert) => {
               const ChannelIcon =
                 ALERT_CHANNEL_ICONS[alert.channel_type] ?? MessageCircleMore;
+              const showUsageDetails = isUsageEscalationReason(alert.reason);
               return (
                 <li key={alert.id}>
                   <Card className={isCancellationOrRefundReason(alert.reason) ? 'border-red-500/40' : undefined}>
@@ -232,7 +273,7 @@ export default function AIAlertsPage() {
                             </CardDescription>
                           </div>
                         </div>
-                        <Badge variant={statusBadgeVariant(alert.status)}>{alertStatusLabelUi(alert.status)}</Badge>
+                        <Badge variant={statusBadgeVariant(alert.status)}>{statusShortLabel(alert.status)}</Badge>
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">
@@ -251,7 +292,7 @@ export default function AIAlertsPage() {
                           <span className="text-muted-foreground">(Pa tekst mesazhi)</span>
                         )}
                       </blockquote>
-                      {tab === 'usage_escalations' ? (
+                      {showUsageDetails ? (
                         <div className="space-y-2">
                           <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -269,7 +310,7 @@ export default function AIAlertsPage() {
                           </div>
                           <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              Përshkrimi aktual i përdorimit
+                              Udhëzimet aktuale të përdorimit
                             </p>
                             <p className="mt-1 whitespace-pre-wrap break-words text-sm">
                               {alert.usage_description?.trim() || 'Ende nuk janë vendosur udhëzime përdorimi.'}
@@ -277,72 +318,83 @@ export default function AIAlertsPage() {
                           </div>
                         </div>
                       ) : null}
-                      <div className="flex flex-wrap gap-2">
-                        {isCancellationOrRefundReason(alert.reason) ? (
-                          <Link
-                            to="/orders?tab=action_required"
-                            className={cn(buttonVariants({ variant: 'destructive', size: 'sm' }))}
-                          >
-                            Shko te porositë
-                          </Link>
-                        ) : (
-                          alert.conversation_id ? (
+                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                        {tab === 'open' ? (
+                          <>
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="w-full sm:w-auto"
+                              disabled={resolveMutation.isPending}
+                              onClick={() =>
+                                resolveMutation.mutate({ id: alert.id, resume_ai: false })
+                              }
+                            >
+                              {resolvingId === alert.id ? (
+                                <>
+                                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                                  Duke mbyllur…
+                                </>
+                              ) : (
+                                'Mbyll alarmin'
+                              )}
+                            </Button>
+                            {alert.conversation_id ? (
+                              <Link
+                                to={`/inbox?c=${alert.conversation_id}`}
+                                className={cn(
+                                  buttonVariants({ variant: 'secondary', size: 'sm' }),
+                                  'inline-flex w-full justify-center sm:w-auto',
+                                )}
+                              >
+                                Shiko bisedën
+                              </Link>
+                            ) : null}
+                            {alert.conversation_id ? (
+                              <DropdownMenu>
+                                <DropdownMenuTrigger
+                                  render={
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="w-full gap-1 sm:w-auto"
+                                      disabled={resolveMutation.isPending}
+                                    >
+                                      Opsione
+                                      <MoreHorizontal className="size-4 opacity-70" aria-hidden />
+                                    </Button>
+                                  }
+                                />
+                                <DropdownMenuContent align="start">
+                                  <DropdownMenuItem
+                                    onClick={() => setResumeConfirmTarget(alert)}
+                                    disabled={resolveMutation.isPending}
+                                  >
+                                    Mbyll dhe rifillo IA-në për bisedën
+                                  </DropdownMenuItem>
+                                  {alert.status === 'unread' ? (
+                                    <DropdownMenuItem
+                                      onClick={() => markReadMutation.mutate(alert.id)}
+                                      disabled={markReadMutation.isPending}
+                                    >
+                                      Shëno si të lexuar (pa e mbyllur)
+                                    </DropdownMenuItem>
+                                  ) : null}
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            ) : null}
+                          </>
+                        ) : null}
+                        {tab === 'resolved' && alert.conversation_id ? (
+                          <div className="flex flex-wrap gap-2 sm:ml-auto">
                             <Link
                               to={`/inbox?c=${alert.conversation_id}`}
-                              className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }))}
+                              className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }), 'inline-flex')}
                             >
                               Shiko bisedën
                             </Link>
-                          ) : (
-                            <Button type="button" size="sm" variant="outline" disabled>
-                              Shiko bisedën
-                            </Button>
-                          )
-                        )}
-                        {tab === 'usage_escalations' ? (
-                          alert.product_id ? (
-                            <Link
-                              to={`/products?edit=${encodeURIComponent(alert.product_id)}`}
-                              className={cn(buttonVariants({ variant: 'default', size: 'sm' }))}
-                            >
-                              Përditëso udhëzimet e përdorimit
-                            </Link>
-                          ) : alert.product_name?.trim() ? (
-                            <Link
-                              to={`/products?editName=${encodeURIComponent(alert.product_name.trim())}`}
-                              className={cn(buttonVariants({ variant: 'default', size: 'sm' }))}
-                            >
-                              Përditëso udhëzimet e përdorimit
-                            </Link>
-                          ) : (
-                            <Button type="button" size="sm" variant="outline" disabled>
-                              Përditëso udhëzimet e përdorimit
-                            </Button>
-                          )
-                        ) : null}
-                        {alert.status === 'unread' ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={markReadMutation.isPending}
-                            onClick={() => markReadMutation.mutate(alert.id)}
-                          >
-                            Shëno si të lexuar
-                          </Button>
-                        ) : null}
-                        {alert.status !== 'resolved' ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={resolveMutation.isPending}
-                            onClick={() => {
-                              setResumeAiOnResolve(false);
-                              setResolveTarget(alert);
-                            }}
-                          >
-                            Zgjidh
-                          </Button>
+                          </div>
                         ) : null}
                       </div>
                     </CardContent>
@@ -380,63 +432,50 @@ export default function AIAlertsPage() {
         ) : null}
       </div>
 
-      <Dialog
-        open={resolveTarget !== null}
+      <AlertDialog
+        open={resumeConfirmTarget !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            setResolveTarget(null);
-            setResumeAiOnResolve(false);
-          }
+          if (!open) setResumeConfirmTarget(null);
         }}
       >
-        <DialogContent showCloseButton={!resolveMutation.isPending}>
-          <DialogHeader>
-            <DialogTitle>Zgjidh alarmi</DialogTitle>
-            <DialogDescription>
-              Shënoni këtë alarm si të zgjidhur. Opsionalisht mund të aktivizoni përsëri chatbot-in për këtë bisedë.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-2">
-            <span className="text-sm font-medium">Rifillo IA-në pas zgjidhjes</span>
-            <Switch checked={resumeAiOnResolve} onCheckedChange={setResumeAiOnResolve} />
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={resolveMutation.isPending}
-              onClick={() => setResolveTarget(null)}
-            >
-              Anulo
-            </Button>
-            <Button
-              type="button"
-              disabled={resolveMutation.isPending || !resolveTarget}
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rifilloni IA-në?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Alarmi do të mbyllet dhe asistenti do të mund të përgjigjet përsëri automatikisht në këtë bisedë.
+              Përdoreni vetëm nëse jeni gati që IA-ja të vazhdojë pa ndërhyrje njerëzore.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resolveMutation.isPending}>Anulo</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={resolveMutation.isPending || !resumeConfirmTarget}
               onClick={() => {
-                if (!resolveTarget) return;
+                if (!resumeConfirmTarget) return;
                 resolveMutation.mutate({
-                  id: resolveTarget.id,
-                  resume_ai: resumeAiOnResolve,
+                  id: resumeConfirmTarget.id,
+                  resume_ai: true,
                 });
               }}
             >
               {resolveMutation.isPending ? (
                 <>
                   <Loader2 className="size-4 animate-spin" aria-hidden />
-                  Duke zgjidhur…
+                  Duke u përditësuar…
                 </>
               ) : (
-                'Konfirmo'
+                'Po, mbyll dhe rifillo IA-në'
               )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {alerts.length === 0 && !listQuery.isLoading ? null : (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <Bell className="size-3.5 shrink-0" aria-hidden />
-          Shenja e alarmeve të palexuara në shiritin anësor përditësohet në kohë reale kur vijnë alarme të reja.
+          Numri në shiritin anësor tregon alarmet e palexuara; skeda &quot;Në pritje&quot; përfshin të gjitha që nuk janë
+          mbyllur ende.
         </p>
       )}
     </div>
