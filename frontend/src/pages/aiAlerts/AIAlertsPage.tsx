@@ -59,6 +59,19 @@ function isCancellationOrRefundReason(reason: string): boolean {
   return reason === 'cancellation_request' || reason === 'refund_request';
 }
 
+function alertTabLabel(key: AIAlertStatus | 'usage_escalations'): string {
+  if (key === 'usage_escalations') return 'Eskalime përdorimi';
+  if (key === 'unread') return 'Të palexuara';
+  if (key === 'read') return 'Të lexuara';
+  return 'Të zgjidhura';
+}
+
+function alertStatusLabelUi(status: AIAlertStatus): string {
+  if (status === 'unread') return 'E palexuar';
+  if (status === 'read') return 'E lexuar';
+  return 'E zgjidhur';
+}
+
 export default function AIAlertsPage() {
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
   const queryClient = useQueryClient();
@@ -90,25 +103,27 @@ export default function AIAlertsPage() {
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
     },
-    onError: (err) => toast.error(extractMessage(err, 'Could not update alert')),
+    onError: (err) => toast.error(extractMessage(err, 'Nuk u përditësua alarmi')),
   });
 
   const markAllMutation = useMutation({
     mutationFn: markAllAIAlertsRead,
     onSuccess: (count) => {
-      toast.success(count > 0 ? `Marked ${count} alert(s) as read` : 'No unread alerts to update');
+      toast.success(
+        count > 0 ? `U shënuan ${count} alarm(e) si të lexuara` : 'Nuk ka alarme të palexuara për të përditësuar',
+      );
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'unread-count'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
     },
-    onError: (err) => toast.error(extractMessage(err, 'Could not mark all as read')),
+    onError: (err) => toast.error(extractMessage(err, 'Nuk mund të shënohen të gjitha si të lexuara')),
   });
 
   const resolveMutation = useMutation({
     mutationFn: ({ id, resume_ai }: { id: string; resume_ai: boolean }) =>
       resolveAIAlert(id, { resume_ai }),
     onSuccess: () => {
-      toast.success('Alert resolved');
+      toast.success('Alarmi u zgjidh');
       setResolveTarget(null);
       setResumeAiOnResolve(false);
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
@@ -116,7 +131,7 @@ export default function AIAlertsPage() {
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
-    onError: (err) => toast.error(extractMessage(err, 'Could not resolve alert')),
+    onError: (err) => toast.error(extractMessage(err, 'Nuk mund të zgjidhet alarmi')),
   });
 
   const alerts = listQuery.data?.alerts ?? [];
@@ -127,10 +142,10 @@ export default function AIAlertsPage() {
     <div className="space-y-6 pb-10">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">AI Alerts</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Alarmet IA</h1>
           <p className="text-sm text-muted-foreground">
-            When the assistant goes off-topic or replies with low confidence, you are notified here
-            so you can take over the conversation.
+            Kur asistenti del jashtë temës ose përgjigjet me besim të ulët, njoftoheni këtu që të mund të merrni
+            kontrollin e bisedës.
           </p>
         </div>
         {tab === 'unread' ? (
@@ -144,10 +159,10 @@ export default function AIAlertsPage() {
             {markAllMutation.isPending ? (
               <>
                 <Loader2 className="size-4 animate-spin" aria-hidden />
-                Marking…
+                Duke shënuar…
               </>
             ) : (
-              'Mark all as read'
+              'Shëno të gjitha si të lexuara'
             )}
           </Button>
         ) : null}
@@ -164,14 +179,13 @@ export default function AIAlertsPage() {
               setTab(key);
               setPage(1);
             }}
-            className="capitalize"
           >
             {key === 'unread' && typeof unreadCountQuery.data === 'number' && unreadCountQuery.data > 0 ? (
               <span className="mr-1.5 inline-flex min-w-5 justify-center rounded-full bg-primary-foreground/20 px-1 text-[0.65rem] font-semibold tabular-nums">
                 {unreadCountQuery.data > 99 ? '99+' : unreadCountQuery.data}
               </span>
             ) : null}
-            {key === 'usage_escalations' ? 'Usage Escalations' : key}
+            {alertTabLabel(key)}
           </Button>
         ))}
       </div>
@@ -185,13 +199,13 @@ export default function AIAlertsPage() {
           </div>
         ) : listQuery.isError ? (
           <p className="text-sm text-destructive">
-            {extractMessage(listQuery.error, 'Could not load alerts.')}
+            {extractMessage(listQuery.error, 'Nuk u ngarkuan alarmet.')}
           </p>
         ) : alerts.length === 0 ? (
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">No alerts</CardTitle>
-              <CardDescription>Nothing in this tab yet.</CardDescription>
+              <CardTitle className="text-base">Nuk ka alarme</CardTitle>
+              <CardDescription>Ende nuk ka asgjë në këtë skedë.</CardDescription>
             </CardHeader>
           </Card>
         ) : (
@@ -218,7 +232,7 @@ export default function AIAlertsPage() {
                             </CardDescription>
                           </div>
                         </div>
-                        <Badge variant={statusBadgeVariant(alert.status)}>{alert.status}</Badge>
+                        <Badge variant={statusBadgeVariant(alert.status)}>{alertStatusLabelUi(alert.status)}</Badge>
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">
@@ -226,7 +240,7 @@ export default function AIAlertsPage() {
                         <Badge variant="outline">{formatFlagReason(alert.reason)}</Badge>
                         {alert.quality_score != null ? (
                           <span className="text-xs text-muted-foreground tabular-nums">
-                            Quality score: {alert.quality_score.toFixed(2)}
+                            Cilësia: {alert.quality_score.toFixed(2)}
                           </span>
                         ) : null}
                       </div>
@@ -234,14 +248,14 @@ export default function AIAlertsPage() {
                         {alert.message_content?.trim() ? (
                           <p className="whitespace-pre-wrap break-words">{alert.message_content}</p>
                         ) : (
-                          <span className="text-muted-foreground">(No message text)</span>
+                          <span className="text-muted-foreground">(Pa tekst mesazhi)</span>
                         )}
                       </blockquote>
                       {tab === 'usage_escalations' ? (
                         <div className="space-y-2">
                           <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              Customer Question
+                              Pyetja e klientit
                             </p>
                             <p className="mt-1 whitespace-pre-wrap break-words text-sm">
                               {alert.customer_question?.trim() || alert.message_content?.trim() || '—'}
@@ -249,16 +263,16 @@ export default function AIAlertsPage() {
                           </div>
                           <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              Product
+                              Produkti
                             </p>
-                            <p className="mt-1 text-sm">{alert.product_name?.trim() || 'Unknown product'}</p>
+                            <p className="mt-1 text-sm">{alert.product_name?.trim() || 'Produkt i panjohur'}</p>
                           </div>
                           <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              Current Usage Description
+                              Përshkrimi aktual i përdorimit
                             </p>
                             <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-                              {alert.usage_description?.trim() || 'No usage instructions currently set.'}
+                              {alert.usage_description?.trim() || 'Ende nuk janë vendosur udhëzime përdorimi.'}
                             </p>
                           </div>
                         </div>
@@ -269,7 +283,7 @@ export default function AIAlertsPage() {
                             to="/orders?tab=action_required"
                             className={cn(buttonVariants({ variant: 'destructive', size: 'sm' }))}
                           >
-                            Go to Orders
+                            Shko te porositë
                           </Link>
                         ) : (
                           alert.conversation_id ? (
@@ -277,11 +291,11 @@ export default function AIAlertsPage() {
                               to={`/inbox?c=${alert.conversation_id}`}
                               className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }))}
                             >
-                              View Conversation
+                              Shiko bisedën
                             </Link>
                           ) : (
                             <Button type="button" size="sm" variant="outline" disabled>
-                              View Conversation
+                              Shiko bisedën
                             </Button>
                           )
                         )}
@@ -291,18 +305,18 @@ export default function AIAlertsPage() {
                               to={`/products?edit=${encodeURIComponent(alert.product_id)}`}
                               className={cn(buttonVariants({ variant: 'default', size: 'sm' }))}
                             >
-                              Update Usage Instructions
+                              Përditëso udhëzimet e përdorimit
                             </Link>
                           ) : alert.product_name?.trim() ? (
                             <Link
                               to={`/products?editName=${encodeURIComponent(alert.product_name.trim())}`}
                               className={cn(buttonVariants({ variant: 'default', size: 'sm' }))}
                             >
-                              Update Usage Instructions
+                              Përditëso udhëzimet e përdorimit
                             </Link>
                           ) : (
                             <Button type="button" size="sm" variant="outline" disabled>
-                              Update Usage Instructions
+                              Përditëso udhëzimet e përdorimit
                             </Button>
                           )
                         ) : null}
@@ -314,7 +328,7 @@ export default function AIAlertsPage() {
                             disabled={markReadMutation.isPending}
                             onClick={() => markReadMutation.mutate(alert.id)}
                           >
-                            Mark read
+                            Shëno si të lexuar
                           </Button>
                         ) : null}
                         {alert.status !== 'resolved' ? (
@@ -327,7 +341,7 @@ export default function AIAlertsPage() {
                               setResolveTarget(alert);
                             }}
                           >
-                            Resolve
+                            Zgjidh
                           </Button>
                         ) : null}
                       </div>
@@ -348,10 +362,10 @@ export default function AIAlertsPage() {
               disabled={page <= 1 || listQuery.isFetching}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
             >
-              Previous
+              E mëparshmja
             </Button>
             <span className="text-sm text-muted-foreground tabular-nums">
-              Page {page} of {totalPages}
+              Faqja {page} nga {totalPages}
             </span>
             <Button
               type="button"
@@ -360,7 +374,7 @@ export default function AIAlertsPage() {
               disabled={page >= totalPages || listQuery.isFetching}
               onClick={() => setPage((p) => p + 1)}
             >
-              Next
+              Tjetra
             </Button>
           </div>
         ) : null}
@@ -377,13 +391,13 @@ export default function AIAlertsPage() {
       >
         <DialogContent showCloseButton={!resolveMutation.isPending}>
           <DialogHeader>
-            <DialogTitle>Resolve alert</DialogTitle>
+            <DialogTitle>Zgjidh alarmi</DialogTitle>
             <DialogDescription>
-              Mark this alert resolved. You can optionally turn the chatbot back on for this thread.
+              Shënoni këtë alarm si të zgjidhur. Opsionalisht mund të aktivizoni përsëri chatbot-in për këtë bisedë.
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-2">
-            <span className="text-sm font-medium">Resume AI after resolve</span>
+            <span className="text-sm font-medium">Rifillo IA-në pas zgjidhjes</span>
             <Switch checked={resumeAiOnResolve} onCheckedChange={setResumeAiOnResolve} />
           </div>
           <DialogFooter>
@@ -393,7 +407,7 @@ export default function AIAlertsPage() {
               disabled={resolveMutation.isPending}
               onClick={() => setResolveTarget(null)}
             >
-              Cancel
+              Anulo
             </Button>
             <Button
               type="button"
@@ -409,10 +423,10 @@ export default function AIAlertsPage() {
               {resolveMutation.isPending ? (
                 <>
                   <Loader2 className="size-4 animate-spin" aria-hidden />
-                  Resolving…
+                  Duke zgjidhur…
                 </>
               ) : (
-                'Confirm'
+                'Konfirmo'
               )}
             </Button>
           </DialogFooter>
@@ -422,7 +436,7 @@ export default function AIAlertsPage() {
       {alerts.length === 0 && !listQuery.isLoading ? null : (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <Bell className="size-3.5 shrink-0" aria-hidden />
-          Unread badge in the sidebar updates in real time when new alerts arrive.
+          Shenja e alarmeve të palexuara në shiritin anësor përditësohet në kohë reale kur vijnë alarme të reja.
         </p>
       )}
     </div>

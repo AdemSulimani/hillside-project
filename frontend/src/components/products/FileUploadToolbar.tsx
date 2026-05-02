@@ -88,7 +88,7 @@ export const FileUploadToolbar = forwardRef<FileUploadToolbarHandle, FileUploadT
             <FileUp className="size-8 text-muted-foreground" />
           )}
           <span className="font-medium text-foreground">
-            {file ? file.name : 'Drop a file here or click to browse'}
+            {file ? file.name : 'Hidhni skedarin këtu ose klikoni për të zgjedhur'}
           </span>
           <span className="text-xs text-muted-foreground">{hint}</span>
         </button>

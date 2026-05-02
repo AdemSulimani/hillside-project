@@ -45,23 +45,23 @@ const PAGE_SIZE = 20;
 type OrdersTabKey = 'all' | OrderStatus | 'action_required';
 
 const STATUS_TABS: { key: OrdersTabKey; label: string; filter?: OrderStatus }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'draft', label: 'Draft', filter: 'draft' },
-  { key: 'confirmed', label: 'Confirmed', filter: 'confirmed' },
-  { key: 'processing', label: 'Processing', filter: 'processing' },
-  { key: 'shipped', label: 'Shipped', filter: 'shipped' },
-  { key: 'delivered', label: 'Delivered', filter: 'delivered' },
-  { key: 'cancelled', label: 'Cancelled', filter: 'cancelled' },
-  { key: 'refunded', label: 'Refunded', filter: 'refunded' },
-  { key: 'action_required', label: 'Action Required' },
+  { key: 'all', label: 'Të gjitha' },
+  { key: 'draft', label: 'Skicë', filter: 'draft' },
+  { key: 'confirmed', label: 'E konfirmuar', filter: 'confirmed' },
+  { key: 'processing', label: 'Në përpunim', filter: 'processing' },
+  { key: 'shipped', label: 'E dërguar', filter: 'shipped' },
+  { key: 'delivered', label: 'E dorëzuar', filter: 'delivered' },
+  { key: 'cancelled', label: 'E anuluar', filter: 'cancelled' },
+  { key: 'refunded', label: 'E rimbursuar', filter: 'refunded' },
+  { key: 'action_required', label: 'Veprim i nevojshëm' },
 ];
 
 type ResolutionChoice = Exclude<OrderResolutionStatus, 'pending'>;
 
 const RESOLUTION_OPTIONS: { value: ResolutionChoice; label: string }[] = [
-  { value: 'approved', label: 'Approve' },
-  { value: 'rejected', label: 'Reject' },
-  { value: 'store_credit_offered', label: 'Offer Store Credit' },
+  { value: 'approved', label: 'Aprovo' },
+  { value: 'rejected', label: 'Refuzo' },
+  { value: 'store_credit_offered', label: 'Ofro kredit dyqani' },
 ];
 
 interface ActionFormState {
@@ -226,13 +226,13 @@ export default function OrdersPage() {
       });
     },
     onSuccess: () => {
-      toast.success('Resolution sent to customer');
+      toast.success('Zgjidhja u dërgua te klienti');
       void queryClient.invalidateQueries({ queryKey: ['orders'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations'] });
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
     },
     onError: () => {
-      toast.error('Failed to send resolution. Please try again.');
+      toast.error('Dërgimi i zgjidhjes dështoi. Ju lutemi provoni përsëri.');
     },
   });
 
@@ -307,16 +307,16 @@ export default function OrdersPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Orders</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Porositë</h1>
           <p className="text-sm text-muted-foreground">
-            Review AI-detected drafts, confirm with customers, and track fulfillment.
+            Shqyrtoni skicët e zbuluara nga IA-ja, konfirmoni me klientët dhe ndiqni përmbushjen.
           </p>
         </div>
         <Link
           to="/inbox"
           className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'inline-flex')}
         >
-          Open inbox
+          Hap kutinë e hyrjes
         </Link>
       </div>
 
@@ -359,9 +359,9 @@ export default function OrdersPage() {
               setSearchInput(e.target.value);
               setPage(1);
             }}
-            placeholder="Search by customer name…"
+            placeholder="Kërko sipas emrit të klientit…"
             className="h-10 pl-9"
-            aria-label="Search orders by customer"
+            aria-label="Kërko porositë sipas klientit"
           />
           {isFetching && debouncedSearch ? (
             <Loader2 className="absolute right-2.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
@@ -370,7 +370,7 @@ export default function OrdersPage() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex flex-col gap-1">
             <label htmlFor="orders-from" className="text-xs text-muted-foreground">
-              From
+              Nga
             </label>
             <Input
               id="orders-from"
@@ -385,7 +385,7 @@ export default function OrdersPage() {
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="orders-to" className="text-xs text-muted-foreground">
-              To
+              Deri
             </label>
             <Input
               id="orders-to"
@@ -410,7 +410,7 @@ export default function OrdersPage() {
                 setPage(1);
               }}
             >
-              Clear dates
+              Pastro datat
             </Button>
           )}
         </div>
@@ -422,12 +422,12 @@ export default function OrdersPage() {
           <Skeleton className="h-64 w-full rounded-xl" />
         ) : actionRequiredQuery.isError ? (
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-            Could not load action-required orders. Please refresh.
+            Nuk u ngarkuan porositë që kërkojnë veprim. Ju lutemi rifreskoni.
           </div>
         ) : actionRequiredOrders.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
             <CheckCircle2 className="size-10 text-muted-foreground opacity-50" />
-            <p className="text-sm text-muted-foreground">No pending cancellation or refund requests.</p>
+            <p className="text-sm text-muted-foreground">Nuk ka kërkesa anulimi ose rimbursimi në pritje.</p>
           </div>
         ) : (
           <div className="space-y-4">
@@ -446,7 +446,7 @@ export default function OrdersPage() {
                         <p className="truncate text-base font-semibold">{order.customer_name}</p>
                       </div>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {order.product_name} · Qty {order.quantity} · ${order.total_price.toFixed(2)} ·{' '}
+                        {order.product_name} · Sasia {order.quantity} · ${order.total_price.toFixed(2)} ·{' '}
                         {formatRelativeShort(order.created_at)}
                       </p>
                     </div>
@@ -458,33 +458,33 @@ export default function OrdersPage() {
                           : 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-200'
                       }
                     >
-                      {requestType === 'cancellation' ? 'Cancellation Request' : 'Refund Request'}
+                      {requestType === 'cancellation' ? 'Kërkesë anulimi' : 'Kërkesë rimbursimi'}
                     </Badge>
                   </div>
 
                   <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Reason</p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Arsyeja</p>
                     <p className="mt-1 whitespace-pre-wrap text-sm">
-                      {order.request_reason?.trim() || 'No reason provided yet'}
+                      {order.request_reason?.trim() || 'Ende pa arsye'}
                     </p>
                   </div>
 
                   <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs text-muted-foreground">
-                      Requested {requestAt ? formatRelativeShort(requestAt) : 'recently'}
+                      Kërkuar {requestAt ? formatRelativeShort(requestAt) : 'së fundmi'}
                     </p>
                     <Link
                       to={`/inbox?c=${order.conversation_id}`}
                       className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
                     >
-                      View Conversation
+                      Shiko bisedën
                     </Link>
                   </div>
 
                   <div className="mt-4 space-y-3 rounded-lg border border-border p-3">
                     <div className="grid gap-2 sm:grid-cols-2">
                       <div className="space-y-1">
-                        <label className="text-xs font-medium text-muted-foreground">Resolution</label>
+                        <label className="text-xs font-medium text-muted-foreground">Zgjidhja</label>
                         <DropdownMenu>
                           <DropdownMenuTrigger
                             render={
@@ -507,7 +507,7 @@ export default function OrdersPage() {
                         </DropdownMenu>
                       </div>
                       <div className="flex items-end justify-between rounded-md border border-border px-3 py-2">
-                        <span className="text-sm">Resume AI after sending</span>
+                        <span className="text-sm">Rifillo IA-në pas dërgimit</span>
                         <Switch
                           checked={form.resume_ai}
                           onCheckedChange={(checked) => patchForm(order.id, { resume_ai: checked })}
@@ -517,24 +517,24 @@ export default function OrdersPage() {
 
                     <div className="space-y-1">
                       <label className="text-xs font-medium text-muted-foreground">
-                        Resolution notes (internal)
+                        Shënime zgjidhjeje (të brendshme)
                       </label>
                       <Textarea
                         value={form.resolution_notes}
                         onChange={(e) => patchForm(order.id, { resolution_notes: e.target.value })}
-                        placeholder="Add internal notes for this decision"
+                        placeholder="Shtoni shënime të brendshme për këtë vendim"
                         rows={3}
                       />
                     </div>
 
                     <div className="space-y-1">
                       <label className="text-xs font-medium text-muted-foreground">
-                        Message to customer
+                        Mesazh për klientin
                       </label>
                       <Textarea
                         value={form.customer_message}
                         onChange={(e) => patchForm(order.id, { customer_message: e.target.value })}
-                        placeholder="Type the message to send to the customer"
+                        placeholder="Shkruani mesazhin për t’ia dërguar klientit"
                         rows={4}
                       />
                     </div>
@@ -560,12 +560,12 @@ export default function OrdersPage() {
                         {sendResolutionMutation.isPending ? (
                           <>
                             <Loader2 className="size-4 animate-spin" />
-                            Sending…
+                            Duke dërguar…
                           </>
                         ) : (
                           <>
                             <ShieldAlert className="size-4" />
-                            Send Resolution
+                            Dërgo zgjidhjen
                           </>
                         )}
                       </Button>
@@ -580,12 +580,12 @@ export default function OrdersPage() {
         <Skeleton className="h-96 w-full rounded-xl" />
       ) : isError ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-          Could not load orders. Please refresh.
+          Nuk u ngarkuan porositë. Ju lutemi rifreskoni.
         </div>
       ) : orders.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <ShoppingCart className="size-10 text-muted-foreground opacity-50" />
-          <p className="text-sm text-muted-foreground">No orders match your filters.</p>
+          <p className="text-sm text-muted-foreground">Asnjë porosi nuk përputhet me filtrat.</p>
         </div>
       ) : (
         <>
@@ -595,17 +595,17 @@ export default function OrdersPage() {
                 <tr>
                   <th className="px-3 py-3">
                     <SortHeader
-                      label="Customer"
+                      label="Klienti"
                       column="customer_name"
                       activeColumn={sortColumn}
                       direction={sortDir}
                       onSort={handleSort}
                     />
                   </th>
-                  <th className="px-3 py-3">Product</th>
+                  <th className="px-3 py-3">Produkti</th>
                   <th className="px-3 py-3">
                     <SortHeader
-                      label="Qty"
+                      label="Sasia"
                       column="quantity"
                       activeColumn={sortColumn}
                       direction={sortDir}
@@ -614,17 +614,17 @@ export default function OrdersPage() {
                   </th>
                   <th className="px-3 py-3 text-right">
                     <SortHeader
-                      label="Total"
+                      label="Totali"
                       column="total_price"
                       activeColumn={sortColumn}
                       direction={sortDir}
                       onSort={handleSort}
                     />
                   </th>
-                  <th className="px-3 py-3 text-center">Channel</th>
+                  <th className="px-3 py-3 text-center">Kanali</th>
                   <th className="px-3 py-3">
                     <SortHeader
-                      label="Date"
+                      label="Data"
                       column="created_at"
                       activeColumn={sortColumn}
                       direction={sortDir}
@@ -633,14 +633,14 @@ export default function OrdersPage() {
                   </th>
                   <th className="px-3 py-3">
                     <SortHeader
-                      label="Status"
+                      label="Statusi"
                       column="status"
                       activeColumn={sortColumn}
                       direction={sortDir}
                       onSort={handleSort}
                     />
                   </th>
-                  <th className="px-3 py-3 text-right">Actions</th>
+                  <th className="px-3 py-3 text-right">Veprimet</th>
                 </tr>
               </thead>
               <tbody>
@@ -673,19 +673,19 @@ export default function OrdersPage() {
                         <DropdownMenu>
                           <DropdownMenuTrigger
                             render={
-                              <Button variant="ghost" size="icon-sm" aria-label="Row actions">
+                              <Button variant="ghost" size="icon-sm" aria-label="Veprimet e rreshtit">
                                 <MoreHorizontal className="size-4" />
                               </Button>
                             }
                           />
                           <DropdownMenuContent align="end">
                             <DropdownMenuItem onClick={() => openDrawer(row.id)}>
-                              View / edit
+                              Shiko / ndrysho
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               onClick={() => navigate(`/inbox?c=${row.conversation_id}`)}
                             >
-                              Open conversation
+                              Hap bisedën
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -706,10 +706,10 @@ export default function OrdersPage() {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                Previous
+                E mëparshmja
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Page {pagination.page} of {pagination.totalPages}
+                Faqja {pagination.page} nga {pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -718,7 +718,7 @@ export default function OrdersPage() {
                 disabled={page >= pagination.totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >
-                Next
+                Tjetra
               </Button>
             </div>
           ) : null}

@@ -63,7 +63,7 @@ export default function ProfilePage() {
       setUser(updatedUser);
       setProfileErrors({});
       setProfileGeneralError('');
-      toast.success('Profile updated successfully');
+      toast.success('Profili u përditësua me sukses');
     },
     onError: (err) => {
       const fieldErrors = extractFieldErrors<ProfileFieldErrors>(err);
@@ -72,7 +72,7 @@ export default function ProfilePage() {
         setProfileGeneralError('');
       } else {
         setProfileErrors({});
-        setProfileGeneralError(extractMessage(err, 'Failed to update profile'));
+        setProfileGeneralError(extractMessage(err, 'Përditësimi i profilit dështoi'));
       }
     },
   });
@@ -91,7 +91,7 @@ export default function ProfilePage() {
       setConfirmPassword('');
       setPasswordErrors({});
       setPasswordGeneralError('');
-      toast.success('Password updated successfully');
+      toast.success('Fjalëkalimi u përditësua me sukses');
     },
     onError: (err) => {
       const fieldErrors = extractFieldErrors<PasswordFieldErrors>(err);
@@ -100,7 +100,7 @@ export default function ProfilePage() {
         setPasswordGeneralError('');
       } else {
         setPasswordErrors({});
-        setPasswordGeneralError(extractMessage(err, 'Failed to update password'));
+        setPasswordGeneralError(extractMessage(err, 'Përditësimi i fjalëkalimit dështoi'));
       }
     },
   });
@@ -122,9 +122,9 @@ export default function ProfilePage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">My Profile</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Profili im</h1>
         <p className="text-sm text-muted-foreground">
-          Manage your personal account information.
+          Menaxhoni të dhënat e llogarisë tuaj personale.
         </p>
       </div>
 
@@ -134,9 +134,9 @@ export default function ProfilePage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <UserCircle className="size-5 text-muted-foreground" />
-              <CardTitle>Personal Information</CardTitle>
+              <CardTitle>Të dhëna personale</CardTitle>
             </div>
-            <CardDescription>Update your name and email address.</CardDescription>
+            <CardDescription>Përditësoni emrin dhe adresën e email-it.</CardDescription>
           </CardHeader>
           <CardContent>
             {profileGeneralError && (
@@ -147,12 +147,12 @@ export default function ProfilePage() {
 
             <form onSubmit={handleProfileSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="name">Name</Label>
+                <Label htmlFor="name">Emri</Label>
                 <Input
                   id="name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Your full name"
+                  placeholder="Emri juaj i plotë"
                   aria-invalid={!!profileErrors.name}
                   className="h-10"
                   required
@@ -181,7 +181,7 @@ export default function ProfilePage() {
 
               <Button type="submit" disabled={profileMutation.isPending}>
                 {profileMutation.isPending && <Loader2 className="animate-spin" />}
-                {profileMutation.isPending ? 'Saving…' : 'Save Changes'}
+                {profileMutation.isPending ? 'Duke ruajtur…' : 'Ruaj ndryshimet'}
               </Button>
             </form>
           </CardContent>
@@ -192,9 +192,9 @@ export default function ProfilePage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <Lock className="size-5 text-muted-foreground" />
-              <CardTitle>Change Password</CardTitle>
+              <CardTitle>Ndrysho fjalëkalimin</CardTitle>
             </div>
-            <CardDescription>Update your password to keep your account secure.</CardDescription>
+            <CardDescription>Përditësoni fjalëkalimin për ta mbajtur llogarinë të sigurt.</CardDescription>
           </CardHeader>
           <CardContent>
             {passwordGeneralError && (
@@ -205,13 +205,13 @@ export default function ProfilePage() {
 
             <form onSubmit={handlePasswordSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="currentPassword">Current Password</Label>
+                <Label htmlFor="currentPassword">Fjalëkalimi aktual</Label>
                 <Input
                   id="currentPassword"
                   type="password"
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
-                  placeholder="Enter current password"
+                  placeholder="Shkruani fjalëkalimin aktual"
                   aria-invalid={!!passwordErrors.currentPassword}
                   className="h-10"
                   required
@@ -222,13 +222,13 @@ export default function ProfilePage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="newPassword">New Password</Label>
+                <Label htmlFor="newPassword">Fjalëkalim i ri</Label>
                 <Input
                   id="newPassword"
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="At least 8 characters"
+                  placeholder="Të paktën 8 karaktere"
                   aria-invalid={!!passwordErrors.newPassword}
                   className="h-10"
                   required
@@ -239,13 +239,13 @@ export default function ProfilePage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="confirmPassword">Confirm New Password</Label>
+                <Label htmlFor="confirmPassword">Konfirmo fjalëkalimin e ri</Label>
                 <Input
                   id="confirmPassword"
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Repeat new password"
+                  placeholder="Përsëriteni fjalëkalimin e ri"
                   aria-invalid={!!passwordErrors.confirmPassword}
                   className="h-10"
                   required
@@ -257,7 +257,7 @@ export default function ProfilePage() {
 
               <Button type="submit" disabled={passwordMutation.isPending}>
                 {passwordMutation.isPending && <Loader2 className="animate-spin" />}
-                {passwordMutation.isPending ? 'Updating…' : 'Update Password'}
+                {passwordMutation.isPending ? 'Duke përditësuar…' : 'Përditëso fjalëkalimin'}
               </Button>
             </form>
           </CardContent>

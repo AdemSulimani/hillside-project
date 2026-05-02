@@ -52,7 +52,7 @@ export default function ChannelsPage() {
       window.location.assign(url);
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Failed to start Facebook OAuth flow'));
+      toast.error(extractMessage(err, 'Nuk u nis lidhja OAuth për Facebook'));
     },
   });
 
@@ -62,7 +62,7 @@ export default function ChannelsPage() {
       window.location.assign(url);
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Failed to start Instagram OAuth flow'));
+      toast.error(extractMessage(err, 'Nuk u nis lidhja OAuth për Instagram'));
     },
   });
 
@@ -74,10 +74,10 @@ export default function ChannelsPage() {
       setAccessToken('');
       setDisplayName('');
       queryClient.invalidateQueries({ queryKey: ['channels'] });
-      toast.success('WhatsApp channel connected');
+      toast.success('Kanali WhatsApp u lidh');
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Failed to connect WhatsApp channel'));
+      toast.error(extractMessage(err, 'Lidhja e kanalit WhatsApp dështoi'));
     },
   });
 
@@ -85,10 +85,10 @@ export default function ChannelsPage() {
     mutationFn: (id: string) => deleteChannel(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
-      toast.success('Channel disconnected');
+      toast.success('Kanali u shkëput');
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Failed to disconnect channel'));
+      toast.error(extractMessage(err, 'Shkëputja e kanalit dështoi'));
     },
   });
 
@@ -98,14 +98,14 @@ export default function ChannelsPage() {
 
     if (status === 'connected' && type) {
       const label = type === 'instagram' ? 'Instagram' : type === 'whatsapp' ? 'WhatsApp' : 'Facebook';
-      toast.success(`${label} connected successfully`);
+      toast.success(`${label} u lidh me sukses`);
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       navigate('/channels', { replace: true });
       return;
     }
 
     if (status === 'error') {
-      toast.error('Channel connection failed');
+      toast.error('Lidhja e kanalit dështoi');
       navigate('/channels', { replace: true });
     }
   }, [navigate, queryClient, searchParams]);
@@ -120,7 +120,7 @@ export default function ChannelsPage() {
     const token = accessToken.trim();
 
     if (!phone || !token) {
-      toast.error('Phone Number ID and Access Token are required');
+      toast.error('Kërkohen ID e numrit të telefonit dhe token-i i aksesit');
       return;
     }
 
@@ -135,14 +135,14 @@ export default function ChannelsPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Channels</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Kanalet</h1>
           <p className="text-sm text-muted-foreground">
-            Connect your social channels. Manage AI per channel in{' '}
+            Lidhni kanalet tuaja sociale. Menaxhoni IA-në për çdo kanal te{' '}
             <Link
               to="/chatbot-control"
               className="font-medium text-foreground underline-offset-4 hover:underline"
             >
-              Chatbot Control
+              Kontrolli i chatbot-it
             </Link>
             .
           </p>
@@ -156,7 +156,7 @@ export default function ChannelsPage() {
           >
             {connectFacebookMutation.isPending && <Loader2 className="animate-spin" />}
             <Plus className="size-4" />
-            Connect Facebook
+            Lidh Facebook
           </Button>
           <Button
             type="button"
@@ -166,11 +166,11 @@ export default function ChannelsPage() {
           >
             {connectInstagramMutation.isPending && <Loader2 className="animate-spin" />}
             <Plus className="size-4" />
-            Connect Instagram
+            Lidh Instagram
           </Button>
           <Button type="button" onClick={() => setWhatsAppOpen(true)}>
             <Plus className="size-4" />
-            Connect WhatsApp
+            Lidh WhatsApp
           </Button>
         </div>
       </div>
@@ -183,12 +183,12 @@ export default function ChannelsPage() {
         </div>
       ) : isError ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-          Could not load channels. Please refresh.
+          Kanalet nuk u ngarkuan. Ju lutemi rifreskoni faqen.
         </div>
       ) : channels.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <Radio className="size-10 text-muted-foreground opacity-50" />
-          <p className="text-sm text-muted-foreground">No channels connected yet.</p>
+          <p className="text-sm text-muted-foreground">Ende nuk është lidhur asnjë kanal.</p>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -206,44 +206,44 @@ export default function ChannelsPage() {
       <Dialog open={whatsAppOpen} onOpenChange={setWhatsAppOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Connect WhatsApp Cloud API</DialogTitle>
+            <DialogTitle>Lidh WhatsApp Cloud API</DialogTitle>
             <DialogDescription>
-              Paste your WhatsApp Cloud API credentials to verify and connect this channel.
+              Ngjisni kredencialet e WhatsApp Cloud API për të verifikuar dhe lidhur këtë kanal.
             </DialogDescription>
           </DialogHeader>
           <div className="mt-4 space-y-3">
             <div className="space-y-2">
-              <Label htmlFor="whatsapp-phone-id">Phone Number ID</Label>
+              <Label htmlFor="whatsapp-phone-id">ID e numrit të telefonit</Label>
               <Input
                 id="whatsapp-phone-id"
                 value={phoneNumberId}
                 onChange={(e) => setPhoneNumberId(e.target.value)}
-                placeholder="e.g. 123456789012345"
+                placeholder="p.sh. 123456789012345"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="whatsapp-access-token">Access Token</Label>
+              <Label htmlFor="whatsapp-access-token">Token aksesi</Label>
               <Input
                 id="whatsapp-access-token"
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
-                placeholder="Paste your permanent token"
+                placeholder="Ngjisni token-in tuaj të përhershëm"
                 type="password"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="whatsapp-display-name">Channel Name (optional)</Label>
+              <Label htmlFor="whatsapp-display-name">Emri i kanalit (opsional)</Label>
               <Input
                 id="whatsapp-display-name"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Support WhatsApp"
+                placeholder="WhatsApp i mbështetjes"
               />
             </div>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setWhatsAppOpen(false)}>
-              Cancel
+              Anulo
             </Button>
             <Button
               type="button"
@@ -251,7 +251,7 @@ export default function ChannelsPage() {
               disabled={connectWhatsAppMutation.isPending}
             >
               {connectWhatsAppMutation.isPending && <Loader2 className="animate-spin" />}
-              {connectWhatsAppMutation.isPending ? 'Connecting…' : 'Connect'}
+              {connectWhatsAppMutation.isPending ? 'Duke lidhur…' : 'Lidh'}
             </Button>
           </DialogFooter>
         </DialogContent>

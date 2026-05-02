@@ -88,7 +88,7 @@ export default function ContactsPage() {
             onClick={column.getToggleSortingHandler()}
             className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary"
           >
-            Contact
+            Kontakti
             {column.getIsSorted() === 'desc' ? (
               <ArrowDown className="size-3.5 opacity-70" />
             ) : column.getIsSorted() === 'asc' ? (
@@ -112,7 +112,7 @@ export default function ContactsPage() {
       {
         id: 'channel',
         enableSorting: false,
-        header: 'Channel',
+        header: 'Kanali',
         cell: ({ row }) => {
           const ch = channelById.get(row.original.channel_id);
           const type = ch?.type ?? 'whatsapp';
@@ -128,7 +128,7 @@ export default function ContactsPage() {
             onClick={column.getToggleSortingHandler()}
             className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary"
           >
-            Messages
+            Mesazhet
             {column.getIsSorted() === 'desc' ? (
               <ArrowDown className="size-3.5 opacity-70" />
             ) : column.getIsSorted() === 'asc' ? (
@@ -151,7 +151,7 @@ export default function ContactsPage() {
             onClick={column.getToggleSortingHandler()}
             className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary"
           >
-            Orders
+            Porositë
             {column.getIsSorted() === 'desc' ? (
               <ArrowDown className="size-3.5 opacity-70" />
             ) : column.getIsSorted() === 'asc' ? (
@@ -174,7 +174,7 @@ export default function ContactsPage() {
             onClick={column.getToggleSortingHandler()}
             className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary"
           >
-            Last seen
+            Parë së fundmi
             {column.getIsSorted() === 'desc' ? (
               <ArrowDown className="size-3.5 opacity-70" />
             ) : column.getIsSorted() === 'asc' ? (
@@ -237,20 +237,20 @@ export default function ContactsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Contacts</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Kontakte</h1>
         <p className="text-sm text-muted-foreground">
-          Everyone who has messaged your business, with activity and order counts.
+          Të gjithë që kanë shkruar biznesit tuaj, me aktivitet dhe numër porosish.
         </p>
       </div>
 
       <div className="relative max-w-md">
         <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
-          placeholder="Search by name…"
+          placeholder="Kërko sipas emrit…"
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
           className="h-10 pl-9"
-          aria-label="Search contacts"
+          aria-label="Kërko kontakte"
         />
       </div>
 
@@ -258,15 +258,15 @@ export default function ContactsPage() {
         <Skeleton className="h-96 w-full rounded-xl" />
       ) : listQuery.isError ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-          Could not load contacts. Please refresh.
+          Nuk u ngarkuan kontaktet. Ju lutemi rifreskoni.
         </div>
       ) : contacts.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <Users className="size-10 text-muted-foreground opacity-50" />
           <p className="text-sm text-muted-foreground">
             {debouncedSearch.trim()
-              ? 'No contacts match your search.'
-              : 'No contacts yet. They appear when customers message your channels.'}
+              ? 'Asnjë kontakt nuk përputhet me kërkimin.'
+              : 'Ende nuk ka kontakte. Shfaqen kur klientët shkruajnë në kanalet tuaja.'}
           </p>
         </div>
       ) : (
@@ -292,7 +292,7 @@ export default function ContactsPage() {
                     key={row.id}
                     role="link"
                     tabIndex={0}
-                    aria-label={`Open contact ${row.original.name}`}
+                    aria-label={`Hap kontaktin ${row.original.name}`}
                     className={cn(
                       'border-b border-border last:border-0 hover:bg-muted/30',
                       'cursor-pointer outline-none focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
@@ -319,7 +319,7 @@ export default function ContactsPage() {
           {listQuery.isFetching ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              Updating…
+              Duke përditësuar…
             </div>
           ) : null}
 
@@ -332,10 +332,10 @@ export default function ContactsPage() {
                 disabled={page <= 1}
                 onClick={() => table.previousPage()}
               >
-                Previous
+                E mëparshmja
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Page {pagination.page} of {pagination.totalPages}
+                Faqja {pagination.page} nga {pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -344,7 +344,7 @@ export default function ContactsPage() {
                 disabled={page >= pagination.totalPages}
                 onClick={() => table.nextPage()}
               >
-                Next
+                Tjetra
               </Button>
             </div>
           ) : null}

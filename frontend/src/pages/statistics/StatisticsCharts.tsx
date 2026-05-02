@@ -89,8 +89,8 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
     <div className="grid gap-6 lg:grid-cols-2">
       <Card className="lg:col-span-2">
         <CardHeader>
-          <CardTitle>Messages per day</CardTitle>
-          <CardDescription>Total message activity (inbound, AI, and human replies) by UTC day.</CardDescription>
+          <CardTitle>Mesazhe në ditë</CardTitle>
+          <CardDescription>Aktiviteti total i mesazheve (hyrëse, IA dhe përgjigje njerëzore) sipas ditës UTC.</CardDescription>
         </CardHeader>
         <CardContent className="pl-0">
           <ChartShell>
@@ -114,7 +114,7 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
               <Line
                 type="monotone"
                 dataKey="total"
-                name="Messages"
+                name="Mesazhe"
                 stroke="var(--primary)"
                 strokeWidth={2}
                 dot={false}
@@ -128,8 +128,8 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
 
       <Card>
         <CardHeader>
-          <CardTitle>Orders per day</CardTitle>
-          <CardDescription>Draft orders created vs orders confirmed (UTC day).</CardDescription>
+          <CardTitle>Porosi në ditë</CardTitle>
+          <CardDescription>Porosi skicë të krijuara krahasuar me porosi të konfirmuara (ditë UTC).</CardDescription>
         </CardHeader>
         <CardContent className="pl-0">
           <ChartShell>
@@ -151,8 +151,8 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
               <YAxis tick={{ fill: AXIS_TICK, fontSize: 11 }} allowDecimals={false} width={36} />
               <Tooltip content={(props) => <ChartTooltip {...props} />} />
               <Legend />
-              <Bar dataKey="ordersCreated" name="Created" fill="var(--chart-2)" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="ordersConfirmed" name="Confirmed" fill="var(--chart-4)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="ordersCreated" name="Të krijuara" fill="var(--chart-2)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="ordersConfirmed" name="Të konfirmuara" fill="var(--chart-4)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </ChartShell>
@@ -161,15 +161,15 @@ export function StatisticsCharts({ loading, messageRows, orderRows, pieRows }: S
 
       <Card>
         <CardHeader>
-          <CardTitle>Inbound messages by channel</CardTitle>
-          <CardDescription>Share of customer messages (message_received events) per channel.</CardDescription>
+          <CardTitle>Mesazhe hyrëse sipas kanalit</CardTitle>
+          <CardDescription>Pjesëmarrja e mesazheve të klientëve (ngjarje message_received) për kanal.</CardDescription>
         </CardHeader>
         <CardContent>
           {pieTotal === 0 ? (
             <div className="flex h-72 min-h-[18rem] items-center justify-center">
               <p className="text-center text-sm text-muted-foreground">
-                No channel data in this range yet. Inbound messages will appear here once analytics events
-                accumulate.
+                Ende nuk ka të dhëna kanali për këtë interval. Mesazhet hyrëse do të shfaqen këtu sapo të
+                grumbullohen ngjarjet analitike.
               </p>
             </div>
           ) : (

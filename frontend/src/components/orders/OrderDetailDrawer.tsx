@@ -55,11 +55,11 @@ function extractMessage(err: unknown, fallback: string): string {
 const draftFormSchema = z.object({
   quantityInput: z
     .string()
-    .min(1, 'Required')
+    .min(1, 'E detyrueshme')
     .refine((s) => {
       const n = parseInt(s, 10);
       return Number.isFinite(n) && n >= 1 && n <= 999_999;
-    }, 'Enter a whole number ≥ 1'),
+    }, 'Vendosni një numër të plotë ≥ 1'),
   delivery_address: z.string().max(8000),
   notes: z.string().max(10000),
 });
@@ -122,39 +122,39 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
       });
     },
     onSuccess: () => {
-      toast.success('Order updated');
+      toast.success('Porosia u përditësua');
       void queryClient.invalidateQueries({ queryKey: ['orders', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'detail', orderId] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'draft-for-conversation'] });
     },
     onError: (err) => {
       if (err instanceof Error && err.message === 'Validation failed') return;
-      toast.error(extractMessage(err, 'Could not save order'));
+      toast.error(extractMessage(err, 'Porosia nuk u ruajt'));
     },
   });
 
   const confirmMutation = useMutation({
     mutationFn: () => confirmOrder(orderId!),
     onSuccess: () => {
-      toast.success('Order confirmed');
+      toast.success('Porosia u konfirmua');
       setConfirmOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['orders', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'detail', orderId] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'draft-for-conversation'] });
     },
-    onError: (err) => toast.error(extractMessage(err, 'Could not confirm order')),
+    onError: (err) => toast.error(extractMessage(err, 'Konfirmimi i porosisë dështoi')),
   });
 
   const cancelMutation = useMutation({
     mutationFn: () => cancelOrder(orderId!),
     onSuccess: () => {
-      toast.success('Order cancelled');
+      toast.success('Porosia u anulua');
       setCancelOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['orders', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'detail', orderId] });
       void queryClient.invalidateQueries({ queryKey: ['orders', 'draft-for-conversation'] });
     },
-    onError: (err) => toast.error(extractMessage(err, 'Could not cancel order')),
+    onError: (err) => toast.error(extractMessage(err, 'Anulimi i porosisë dështoi')),
   });
 
   const isDraft = order?.status === 'draft';
@@ -173,9 +173,9 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
           className="flex h-full w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-lg"
         >
           <SheetHeader className="shrink-0 space-y-1.5 border-b border-border p-0 px-5 pt-5 pb-4 pr-14 text-left sm:px-6">
-            <SheetTitle>Order details</SheetTitle>
+            <SheetTitle>Detajet e porosisë</SheetTitle>
             <SheetDescription>
-              Review line items, delivery, and status. Draft orders can be edited here.
+              Rishikoni artikujt, dërgesën dhe statusin. Porositë skicë mund të përpunohen këtu.
             </SheetDescription>
           </SheetHeader>
 
@@ -185,12 +185,12 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                 <Loader2 className="size-8 animate-spin text-muted-foreground" />
               </div>
             ) : detailQuery.isError || !order ? (
-              <p className="text-sm text-destructive">Could not load this order.</p>
+              <p className="text-sm text-destructive">Kjo porosi nuk u ngarkua.</p>
             ) : (
               <>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <p className="text-sm text-muted-foreground">Customer</p>
+                    <p className="text-sm text-muted-foreground">Klienti</p>
                     <p className="text-lg font-semibold">{order.customer_name}</p>
                     {order.customer_phone ? (
                       <p className="text-sm text-muted-foreground">{order.customer_phone}</p>
@@ -210,28 +210,29 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
 
                 <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
                   <div className="flex justify-between gap-2">
-                    <span className="text-muted-foreground">Product</span>
+                    <span className="text-muted-foreground">Produkti</span>
                     <span className="text-right font-medium">{order.product_name}</span>
                   </div>
                   <div className="mt-2 flex justify-between gap-2">
-                    <span className="text-muted-foreground">Unit price</span>
+                    <span className="text-muted-foreground">Çmimi për njësi</span>
                     <span className="tabular-nums">${order.unit_price.toFixed(2)}</span>
                   </div>
                   <div className="mt-2 flex justify-between gap-2">
-                    <span className="text-muted-foreground">Line total</span>
+                    <span className="text-muted-foreground">Totali i rreshtit</span>
                     <span className="font-semibold tabular-nums">
                       ${order.total_price.toFixed(2)}
                     </span>
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Detected by {order.detected_by === 'ai' ? 'AI' : order.detected_by}
+                    Zbuluar nga{' '}
+                    {order.detected_by === 'ai' ? 'IA' : order.detected_by === 'human' ? 'njeriu' : order.detected_by}
                   </p>
                 </div>
 
                 {isDraft ? (
                   <div className="space-y-4">
                     <div className="space-y-2">
-                      <Label htmlFor="order-qty">Quantity</Label>
+                      <Label htmlFor="order-qty">Sasia</Label>
                       <Input
                         id="order-qty"
                         inputMode="numeric"
@@ -245,21 +246,21 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                       ) : null}
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="order-address">Delivery address</Label>
+                      <Label htmlFor="order-address">Adresa e dërgesës</Label>
                       <Textarea
                         id="order-address"
                         rows={3}
                         value={deliveryAddress}
                         onChange={(e) => setDeliveryAddress(e.target.value)}
                         className={cn(fieldErrors.delivery_address && 'border-destructive')}
-                        placeholder="Street, city, postal code…"
+                        placeholder="Rruga, qyteti, kodi postar…"
                       />
                       {fieldErrors.delivery_address ? (
                         <p className="text-xs text-destructive">{fieldErrors.delivery_address}</p>
                       ) : null}
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="order-notes">Internal notes</Label>
+                      <Label htmlFor="order-notes">Shënime të brendshme</Label>
                       <Textarea
                         id="order-notes"
                         rows={3}
@@ -279,28 +280,28 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                       {saveMutation.isPending ? (
                         <>
                           <Loader2 className="size-4 animate-spin" />
-                          Saving…
+                          Duke ruajtur…
                         </>
                       ) : (
-                        'Save changes'
+                        'Ruaj ndryshimet'
                       )}
                     </Button>
                   </div>
                 ) : (
                   <div className="space-y-5 text-sm">
                     <div className="flex justify-between gap-4">
-                      <span className="text-muted-foreground">Quantity</span>
+                      <span className="text-muted-foreground">Sasia</span>
                       <span className="tabular-nums font-medium text-foreground">{order.quantity}</span>
                     </div>
                     {order.delivery_address ? (
                       <div className="space-y-1.5">
-                        <p className="text-muted-foreground">Delivery address</p>
+                        <p className="text-muted-foreground">Adresa e dërgesës</p>
                         <p className="whitespace-pre-wrap text-foreground">{order.delivery_address}</p>
                       </div>
                     ) : null}
                     {order.notes ? (
                       <div className="space-y-1.5">
-                        <p className="text-muted-foreground">Notes</p>
+                        <p className="text-muted-foreground">Shënime</p>
                         <p className="whitespace-pre-wrap text-foreground">{order.notes}</p>
                       </div>
                     ) : null}
@@ -310,7 +311,7 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                 <Separator />
 
                 <div>
-                  <p className="mb-4 text-sm font-medium text-foreground">Status timeline</p>
+                  <p className="mb-4 text-sm font-medium text-foreground">Kronologjia e statusit</p>
                   <ul className="space-y-0">
                     {timeline.map((entry, index) => (
                       <li key={entry.key} className="flex gap-3 pb-5 last:pb-0">
@@ -350,7 +351,7 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                   onClick={() => onOpenChange(false)}
                 >
                   <ExternalLink className="size-4" />
-                  Open conversation
+                  Hape bisedën
                 </Link>
 
                 <div className="flex flex-col gap-2 sm:flex-row">
@@ -360,7 +361,7 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                     disabled={!isDraft || confirmMutation.isPending}
                     onClick={() => setConfirmOpen(true)}
                   >
-                    Confirm order
+                    Konfirmo porosinë
                   </Button>
                   <Button
                     type="button"
@@ -369,7 +370,7 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                     disabled={order.status === 'cancelled' || cancelMutation.isPending}
                     onClick={() => setCancelOpen(true)}
                   >
-                    Cancel order
+                    Anulo porosinë
                   </Button>
                 </div>
               </>
@@ -381,18 +382,18 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Confirm this order?</AlertDialogTitle>
+            <AlertDialogTitle>Konfirmoni këtë porosi?</AlertDialogTitle>
             <AlertDialogDescription>
-              The customer will be considered committed. You can still cancel later if needed.
+              Klienti do të konsiderohet i angazhuar. Mund ta anuloni më vonë nëse duhet.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Back</AlertDialogCancel>
+            <AlertDialogCancel>Prapa</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => orderId && confirmMutation.mutate()}
               disabled={confirmMutation.isPending}
             >
-              {confirmMutation.isPending ? 'Confirming…' : 'Confirm'}
+              {confirmMutation.isPending ? 'Duke konfirmuar…' : 'Konfirmo'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -401,19 +402,19 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
       <AlertDialog open={cancelOpen} onOpenChange={setCancelOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Cancel this order?</AlertDialogTitle>
+            <AlertDialogTitle>Anuloni këtë porosi?</AlertDialogTitle>
             <AlertDialogDescription>
-              This marks the order as cancelled. It will no longer appear as active in your pipeline.
+              Kjo e shënon porosinë si të anuluar. Nuk do të duket më aktive në rrjedhën tuaj të punës.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Back</AlertDialogCancel>
+            <AlertDialogCancel>Prapa</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive/10 text-destructive hover:bg-destructive/20"
               onClick={() => orderId && cancelMutation.mutate()}
               disabled={cancelMutation.isPending}
             >
-              {cancelMutation.isPending ? 'Cancelling…' : 'Cancel order'}
+              {cancelMutation.isPending ? 'Duke anuluar…' : 'Anulo porosinë'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

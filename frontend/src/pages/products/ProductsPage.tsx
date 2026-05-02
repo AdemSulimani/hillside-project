@@ -92,7 +92,7 @@ function ProductsPageInner() {
         openEdit(product);
       } catch {
         if (!cancelled) {
-          toast.error('Could not open that product for editing');
+          toast.error('Nuk mund të hapet ai produkt për redaktim');
         }
       } finally {
         if (!cancelled) {
@@ -174,11 +174,11 @@ function ProductsPageInner() {
       const msg =
         err instanceof AxiosError && err.response?.data?.message
           ? String(err.response.data.message)
-          : 'Could not delete product';
+          : 'Nuk u fshi produkti';
       toast.error(msg);
     },
     onSuccess: () => {
-      toast.success('Product removed');
+      toast.success('Produkti u hoq');
     },
     onSettled: () => {
       if (tenantId) {
@@ -208,24 +208,24 @@ function ProductsPageInner() {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Products</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Produkte</h1>
           <p className="text-sm text-muted-foreground">
-            Manage your catalog — search, filter by tag, or import from files.
+            Menaxhoni katalogun — kërkoni, filtroni sipas etiketës ose importoni nga skedarët.
           </p>
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger
             render={
               <Button className="gap-1 self-start sm:self-auto">
-                New product
+                Produkt i ri
                 <ChevronDown className="size-4 opacity-70" />
               </Button>
             }
           />
           <DropdownMenuContent align="end" className="min-w-48">
-            <DropdownMenuItem onClick={openManualCreate}>Fill manually</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openUpload('document')}>Attach document</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openUpload('image')}>Attach image</DropdownMenuItem>
+            <DropdownMenuItem onClick={openManualCreate}>Plotëso manualisht</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openUpload('document')}>Bashkëngjit dokument</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openUpload('image')}>Bashkëngjit imazh</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -239,9 +239,9 @@ function ProductsPageInner() {
               setSearchInput(e.target.value);
               setPage(1);
             }}
-            placeholder="Search name, brand, description, SKU, category…"
+            placeholder="Kërko emër, markë, përshkrim, SKU, kategori…"
             className="h-10 pl-9"
-            aria-label="Search products"
+            aria-label="Kërko produkte"
           />
           {isFetching && searchInput && (
             <Loader2 className="absolute right-2.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
@@ -249,7 +249,7 @@ function ProductsPageInner() {
         </div>
         <div className="flex items-center gap-2 sm:w-56">
           <label htmlFor="tag-filter" className="sr-only">
-            Filter by tag
+            Filtro sipas etiketës
           </label>
           <select
             id="tag-filter"
@@ -263,7 +263,7 @@ function ProductsPageInner() {
               'focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
             )}
           >
-            <option value="">All tags</option>
+            <option value="">Të gjitha etiketat</option>
             {tagOptions.map((t) => (
               <option key={t} value={t}>
                 {t}
@@ -281,14 +281,14 @@ function ProductsPageInner() {
         </div>
       ) : isError ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-          Could not load products. Please refresh.
+          Nuk u ngarkuan produktet. Ju lutemi rifreskoni.
         </div>
       ) : products.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <Package className="size-10 text-muted-foreground opacity-50" />
-          <p className="text-sm text-muted-foreground">No products match your filters.</p>
+          <p className="text-sm text-muted-foreground">Asnjë produkt nuk përputhet me filtrat.</p>
           <Button type="button" variant="outline" size="sm" onClick={openManualCreate}>
-            Create your first product
+            Krijo produktin e parë
           </Button>
         </div>
       ) : (
@@ -313,10 +313,10 @@ function ProductsPageInner() {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                Previous
+                E mëparshmja
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Page {pagination.page} of {pagination.totalPages}
+                Faqja {pagination.page} nga {pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -325,7 +325,7 @@ function ProductsPageInner() {
                 disabled={page >= pagination.totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >
-                Next
+                Tjetra
               </Button>
             </div>
           )}
@@ -352,20 +352,20 @@ function ProductsPageInner() {
       <AlertDialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete product?</AlertDialogTitle>
+            <AlertDialogTitle>Fshi produktin?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes “{deleteTarget?.name}” from your catalog. You can restore from the database if
-              needed; the app hides soft-deleted items.
+              Kjo heq “{deleteTarget?.name}” nga katalogu juaj. Mund ta restauroni nga baza e të dhënave nëse
+              nevojitet; aplikacioni fsheh elementet e fshira butësisht.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>Anulo</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive/10 text-destructive hover:bg-destructive/20"
               onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
               disabled={deleteMutation.isPending}
             >
-              {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+              {deleteMutation.isPending ? 'Duke fshirë…' : 'Fshi'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

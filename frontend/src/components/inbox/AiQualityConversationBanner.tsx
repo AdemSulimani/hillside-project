@@ -24,10 +24,10 @@ export function AiQualityConversationBanner({
             <AlertTriangle className="size-5" aria-hidden />
           </div>
           <div className="min-w-0 space-y-1">
-            <p className="font-semibold text-foreground">AI was flagged in this conversation</p>
+            <p className="font-semibold text-foreground">IA-ja u shënua në këtë bisedë</p>
             <p className="text-sm text-muted-foreground">
-              Reason: <span className="font-medium text-foreground">{formatFlagReason(openAlert.reason)}</span>.
-              AI has been paused. You are now in control.
+              Arsyeja: <span className="font-medium text-foreground">{formatFlagReason(openAlert.reason)}</span>.
+              IA-ja është ndalur. Tani keni kontrollin ju.
             </p>
           </div>
         </div>
@@ -39,10 +39,10 @@ export function AiQualityConversationBanner({
             disabled={resolvePending}
             onClick={onKeepManual}
           >
-            Keep Manual
+            Mbaj manualisht
           </Button>
           <Button type="button" size="sm" disabled={resolvePending} onClick={onResumeAi}>
-            Resume AI
+            Rifillo IA-në
           </Button>
         </div>
       </div>

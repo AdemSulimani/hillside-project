@@ -22,7 +22,7 @@ export function PasswordInput({
         type="button"
         onClick={() => setVisible((v) => !v)}
         className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        aria-label={visible ? 'Hide password' : 'Show password'}
+        aria-label={visible ? 'Fshih fjalëkalimin' : 'Shfaq fjalëkalimin'}
         tabIndex={-1}
       >
         {visible ? <EyeOff className="size-4" aria-hidden /> : <Eye className="size-4" aria-hidden />}

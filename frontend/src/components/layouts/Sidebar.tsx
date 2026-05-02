@@ -22,19 +22,19 @@ import {
 } from 'lucide-react';
 
 const navItems = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/inbox', label: 'Inbox', icon: Inbox },
-  { to: '/products', label: 'Products', icon: Package },
-  { to: '/channels', label: 'Channels', icon: Radio },
-  { to: '/orders', label: 'Orders', icon: ShoppingCart },
-  { to: '/contacts', label: 'Contacts', icon: Users },
-  { to: '/ai-config', label: 'AI Config', icon: BrainCircuit },
-  { to: '/chatbot-control', label: 'Chatbot Control', icon: Bot },
-  { to: '/statistics', label: 'Statistics', icon: BarChart3 },
-  { to: '/feedback', label: 'Feedback', icon: MessageSquareHeart },
-  { to: '/ai-alerts', label: 'AI Alerts', icon: ShieldAlert },
-  { to: '/business', label: 'My Business', icon: Building2 },
-  { to: '/profile', label: 'My Profile', icon: UserCircle },
+  { to: '/dashboard', label: 'Paneli', icon: LayoutDashboard },
+  { to: '/inbox', label: 'Kutia e hyrjes', icon: Inbox },
+  { to: '/products', label: 'Produkte', icon: Package },
+  { to: '/channels', label: 'Kanale', icon: Radio },
+  { to: '/orders', label: 'Porositë', icon: ShoppingCart },
+  { to: '/contacts', label: 'Kontakte', icon: Users },
+  { to: '/ai-config', label: 'Konfigurimi IA', icon: BrainCircuit },
+  { to: '/chatbot-control', label: 'Kontrolli i chatbot-it', icon: Bot },
+  { to: '/statistics', label: 'Statistika', icon: BarChart3 },
+  { to: '/feedback', label: 'Komente', icon: MessageSquareHeart },
+  { to: '/ai-alerts', label: 'Alarmet IA', icon: ShieldAlert },
+  { to: '/business', label: 'Biznesi im', icon: Building2 },
+  { to: '/profile', label: 'Profili im', icon: UserCircle },
 ] as const;
 
 export default function Sidebar() {
@@ -60,7 +60,7 @@ export default function Sidebar() {
         <button
           type="button"
           className="fixed inset-0 z-40 cursor-default bg-black/40 md:hidden"
-          aria-label="Close navigation menu"
+          aria-label="Mbyll menunë e navigimit"
           onClick={() => setSidebarOpen(false)}
         />
       ) : null}
@@ -80,7 +80,7 @@ export default function Sidebar() {
             type="button"
             onClick={() => setSidebarOpen(false)}
             className="rounded-md p-1 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground md:hidden"
-            aria-label="Close sidebar"
+            aria-label="Mbyll shiritin anësor"
           >
             <X className="size-5" />
           </button>

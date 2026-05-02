@@ -16,15 +16,15 @@ export function buildInferredOrderTimeline(
   updatedAt: string,
 ): OrderTimelineEntry[] {
   const items: OrderTimelineEntry[] = [
-    { key: 'draft', label: 'Draft order created', at: createdAt },
+    { key: 'draft', label: 'Porosi skicë e krijuar', at: createdAt },
   ];
 
   if (status === 'cancelled') {
-    items.push({ key: 'cancelled', label: 'Order cancelled', at: updatedAt });
+    items.push({ key: 'cancelled', label: 'Porosia u anulua', at: updatedAt });
     return items;
   }
   if (status === 'refunded') {
-    items.push({ key: 'refunded', label: 'Order refunded', at: updatedAt });
+    items.push({ key: 'refunded', label: 'Porosia u rimbursua', at: updatedAt });
     return items;
   }
 
@@ -39,10 +39,10 @@ export function buildInferredOrderTimeline(
   };
 
   const r = rank[status] ?? 0;
-  if (r >= 1) items.push({ key: 'confirmed', label: 'Order confirmed', at: updatedAt });
-  if (r >= 2) items.push({ key: 'processing', label: 'Processing', at: updatedAt });
-  if (r >= 3) items.push({ key: 'shipped', label: 'Shipped', at: updatedAt });
-  if (r >= 4) items.push({ key: 'delivered', label: 'Delivered', at: updatedAt });
+  if (r >= 1) items.push({ key: 'confirmed', label: 'Porosia u konfirmua', at: updatedAt });
+  if (r >= 2) items.push({ key: 'processing', label: 'Në përpunim', at: updatedAt });
+  if (r >= 3) items.push({ key: 'shipped', label: 'E dërguar', at: updatedAt });
+  if (r >= 4) items.push({ key: 'delivered', label: 'E dorëzuar', at: updatedAt });
 
   return items;
 }

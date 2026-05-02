@@ -40,7 +40,7 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
         )}
         {!product.is_active && (
           <Badge variant="secondary" className="absolute right-2 top-2 text-xs">
-            Inactive
+            Joaktiv
           </Badge>
         )}
       </div>
@@ -70,7 +70,7 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
         <div className="flex flex-wrap gap-1">
           {product.brand?.trim() && (
             <Badge variant="outline" className="text-xs font-normal">
-              Brand: {product.brand}
+              Marka: {product.brand}
             </Badge>
           )}
           {product.sku && (
@@ -97,19 +97,19 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
           </div>
         )}
         <p className="line-clamp-2 text-xs text-muted-foreground">
-          {product.description || 'No description'}
+          {product.description || 'Pa përshkrim'}
         </p>
         <p className="text-xs text-muted-foreground">
-          {product.in_stock !== false ? 'In stock' : 'Out of stock'}
+          {product.in_stock !== false ? 'Në stok' : 'Jashtë stokut'}
         </p>
         <div>
           {product.usage_description?.trim() ? (
             <Badge className="bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300">
-              Usage ✓
+              Përdorimi ✓
             </Badge>
           ) : (
             <Badge variant="secondary" className="text-muted-foreground">
-              No usage info
+              Pa info përdorimi
             </Badge>
           )}
         </div>
@@ -123,7 +123,7 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
           onClick={() => onEdit(product)}
         >
           <Pencil className="size-3.5" />
-          Edit
+          Ndrysho
         </Button>
         <Button
           type="button"
@@ -133,7 +133,7 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
           onClick={() => onDelete(product)}
         >
           <Trash2 className="size-3.5" />
-          Delete
+          Fshi
         </Button>
       </CardFooter>
     </Card>

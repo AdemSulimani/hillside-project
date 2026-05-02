@@ -22,7 +22,7 @@ import { useAuthStore } from '@/store/authStore';
 import type { Contact, ContactDetailPayload } from '@/types/contact';
 import type { ChannelType } from '@/types/conversation';
 
-const nameSchema = z.string().trim().min(1, 'Name is required').max(255);
+const nameSchema = z.string().trim().min(1, 'Emri është i detyrueshëm').max(255);
 
 const CONV_PAGE_SIZE = 10;
 const ORDERS_PAGE_SIZE = 20;
@@ -47,7 +47,7 @@ const InternalNotesSection = memo(function InternalNotesSection({
       onUpdateCache(updated);
     },
     onError: () => {
-      toast.error('Could not save notes');
+      toast.error('Shënimet nuk u ruajtën');
     },
   });
 
@@ -65,34 +65,34 @@ const InternalNotesSection = memo(function InternalNotesSection({
   return (
     <section className="space-y-2 rounded-xl border border-border bg-card p-4">
       <div>
-        <h2 className="text-sm font-semibold">Internal notes</h2>
+        <h2 className="text-sm font-semibold">Shënime të brendshme</h2>
         <p className="text-xs text-muted-foreground">
-          Visible only to your team — customers never see this.
+          Të dukshme vetëm për ekipin tuaj — klientët nuk i shohin kurrë.
         </p>
       </div>
       <Textarea
         value={notesDraft}
         onChange={(e) => setNotesDraft(e.target.value)}
-        placeholder="e.g. Prefers cash on delivery, lives in district 5."
+        placeholder="p.sh. Preferon pagesë në dorëzim, banon në lagjen 5."
         className="min-h-[120px] resize-y"
         maxLength={20_000}
-        aria-label="Internal notes"
+        aria-label="Shënime të brendshme"
       />
       <p className="text-xs text-muted-foreground">
         {debouncedNotes !== (serverNotes ?? '') && mutation.isPending
-          ? 'Saving…'
-          : 'Notes save automatically when you pause typing.'}
+          ? 'Duke ruajtur…'
+          : 'Shënimet ruhen automatikisht kur ndaloni së shkruari.'}
       </p>
     </section>
   );
 });
 
 function lastMessagePreview(messages: { content: string | null; type: string }[]): string {
-  if (messages.length === 0) return 'No messages in view';
+  if (messages.length === 0) return 'Nuk ka mesazhe në pamje';
   const last = messages[messages.length - 1]!;
   const t = last.content?.trim();
   if (t) return t.length > 120 ? `${t.slice(0, 117)}…` : t;
-  return last.type !== 'text' ? `(${last.type})` : '(No text)';
+  return last.type !== 'text' ? `(${last.type})` : '(Pa tekst)';
 }
 
 function renderOrderChannelIcon(channelType: Parameters<typeof orderChannelIcon>[0]) {
@@ -154,14 +154,14 @@ export default function ContactDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['contacts', 'list'] });
     },
     onError: () => {
-      toast.error('Could not save name');
+      toast.error('Emri nuk u ruajt');
     },
   });
 
   const handleNameBlur = (rawName: string, currentName: string) => {
     const parsed = nameSchema.safeParse(rawName);
     if (!parsed.success) {
-      toast.error(parsed.error.issues[0]?.message ?? 'Invalid name');
+      toast.error(parsed.error.issues[0]?.message ?? 'Emër i pavlefshëm');
       return;
     }
     if (parsed.data === currentName) return;
@@ -189,7 +189,7 @@ export default function ContactDetailPage() {
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
     return (
       <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-        Invalid contact.
+        Kontakt i pavlefshëm.
       </div>
     );
   }
@@ -211,10 +211,10 @@ export default function ContactDetailPage() {
           className={cn(buttonVariants({ variant: 'ghost', size: 'sm' }), 'inline-flex w-fit gap-1')}
         >
           <ArrowLeft className="size-4" />
-          Back to contacts
+          Kthehu te kontaktet
         </Link>
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-          Contact not found or could not be loaded.
+          Kontakti nuk u gjet ose nuk u ngarkua.
         </div>
       </div>
     );
@@ -233,7 +233,7 @@ export default function ContactDetailPage() {
           )}
         >
           <ArrowLeft className="size-4" />
-          Contacts
+          Kontakte
         </Link>
 
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
@@ -253,7 +253,7 @@ export default function ContactDetailPage() {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
                 className="h-10 max-w-md text-lg font-semibold"
-                aria-label="Contact name"
+                aria-label="Emri i kontaktit"
                 disabled={nameMutation.isPending}
               />
               {nameMutation.isPending ? (
@@ -271,13 +271,13 @@ export default function ContactDetailPage() {
 
       <Tabs defaultValue="conversations">
         <TabsList>
-          <TabsTrigger value="conversations">Conversations</TabsTrigger>
-          <TabsTrigger value="orders">Orders</TabsTrigger>
+          <TabsTrigger value="conversations">Bisedat</TabsTrigger>
+          <TabsTrigger value="orders">Porositë</TabsTrigger>
         </TabsList>
 
         <TabsContent value="conversations" className="space-y-4">
           {conversations.data.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No conversations for this contact.</p>
+            <p className="text-sm text-muted-foreground">Nuk ka biseda për këtë kontakt.</p>
           ) : (
             <ul className="flex flex-col gap-2">
               {conversations.data.map((c) => (
@@ -299,7 +299,7 @@ export default function ContactDetailPage() {
                       {lastMessagePreview(c.messages)}
                     </p>
                     <span className="mt-2 inline-block text-xs font-medium text-primary">
-                      Open in inbox →
+                      Hape në kutinë e hyrjes →
                     </span>
                   </Link>
                 </li>
@@ -315,10 +315,10 @@ export default function ContactDetailPage() {
                 disabled={convPage <= 1}
                 onClick={() => setConvPage((p) => Math.max(1, p - 1))}
               >
-                Previous
+                Mëparshëm
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Page {conversations.pagination.page} of {conversations.pagination.totalPages}
+                Faqja {conversations.pagination.page} nga {conversations.pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -327,7 +327,7 @@ export default function ContactDetailPage() {
                 disabled={convPage >= conversations.pagination.totalPages}
                 onClick={() => setConvPage((p) => p + 1)}
               >
-                Next
+                Tjetra
               </Button>
             </div>
           ) : null}
@@ -335,18 +335,18 @@ export default function ContactDetailPage() {
 
         <TabsContent value="orders">
           {orders.data.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No orders for this contact.</p>
+            <p className="text-sm text-muted-foreground">Nuk ka porosi për këtë kontakt.</p>
           ) : (
             <div className="overflow-x-auto rounded-xl border border-border">
               <table className="w-full min-w-[560px] text-left text-sm">
                 <thead className="border-b border-border bg-muted/40">
                   <tr>
-                    <th className="px-3 py-2 font-medium">Product</th>
-                    <th className="px-3 py-2 font-medium">Qty</th>
-                    <th className="px-3 py-2 text-right font-medium">Total</th>
-                    <th className="px-3 py-2 text-center font-medium">Ch.</th>
-                    <th className="px-3 py-2 font-medium">Status</th>
-                    <th className="px-3 py-2 font-medium">Date</th>
+                    <th className="px-3 py-2 font-medium">Produkti</th>
+                    <th className="px-3 py-2 font-medium">Sasia</th>
+                    <th className="px-3 py-2 text-right font-medium">Totali</th>
+                    <th className="px-3 py-2 text-center font-medium">Kan.</th>
+                    <th className="px-3 py-2 font-medium">Statusi</th>
+                    <th className="px-3 py-2 font-medium">Data</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -385,10 +385,10 @@ export default function ContactDetailPage() {
                 disabled={ordersPage <= 1}
                 onClick={() => setOrdersPage((p) => Math.max(1, p - 1))}
               >
-                Previous
+                Mëparshëm
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Page {orders.pagination.page} of {orders.pagination.totalPages}
+                Faqja {orders.pagination.page} nga {orders.pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -397,7 +397,7 @@ export default function ContactDetailPage() {
                 disabled={ordersPage >= orders.pagination.totalPages}
                 onClick={() => setOrdersPage((p) => p + 1)}
               >
-                Next
+                Tjetra
               </Button>
             </div>
           ) : null}

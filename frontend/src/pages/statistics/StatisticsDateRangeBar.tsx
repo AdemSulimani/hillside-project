@@ -5,16 +5,16 @@ import { Label } from '@/components/ui/label';
 import { parseYmdLocalEnd, parseYmdLocalStart, type StatisticsPresetId } from './dateRangePresets';
 
 const PRESETS: { id: Exclude<StatisticsPresetId, 'custom'>; label: string }[] = [
-  { id: 'today', label: 'Today' },
-  { id: 'last7', label: 'Last 7 days' },
-  { id: 'last30', label: 'Last 30 days' },
-  { id: 'thisMonth', label: 'This month' },
+  { id: 'today', label: 'Sot' },
+  { id: 'last7', label: '7 ditët e fundit' },
+  { id: 'last30', label: '30 ditët e fundit' },
+  { id: 'thisMonth', label: 'Ky muaj' },
 ];
 
 const customRangeSchema = z
   .object({
-    startYmd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a valid start date'),
-    endYmd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a valid end date'),
+    startYmd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Jepni një datë fillimi të vlefshme'),
+    endYmd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Jepni një datë mbarimi të vlefshme'),
   })
   .superRefine((v, ctx) => {
     try {
@@ -23,14 +23,14 @@ const customRangeSchema = z
       if (s.getTime() > e.getTime()) {
         ctx.addIssue({
           code: 'custom',
-          message: 'Start date must be on or before end date',
+          message: 'Data e fillimit duhet të jetë në ose para datës së mbarimit',
           path: ['endYmd'],
         });
       }
     } catch {
       ctx.addIssue({
         code: 'custom',
-        message: 'Invalid date',
+        message: 'Datë e pavlefshme',
         path: ['startYmd'],
       });
     }
@@ -65,7 +65,7 @@ export function StatisticsDateRangeBar({
       endYmd: customEndYmd,
     });
     if (!parsed.success) {
-      const first = parsed.error.issues[0]?.message ?? 'Invalid range';
+      const first = parsed.error.issues[0]?.message ?? 'Interval i pavlefshëm';
       toast.error(first);
       return;
     }
@@ -96,14 +96,14 @@ export function StatisticsDateRangeBar({
           disabled={disabled}
           onClick={() => onPresetChange('custom')}
         >
-          Custom
+          E personalizuar
         </Button>
       </div>
 
       {preset === 'custom' ? (
         <div className="flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:flex-wrap sm:items-end">
           <div className="space-y-1.5">
-            <Label htmlFor="stats-range-start">Start</Label>
+            <Label htmlFor="stats-range-start">Fillimi</Label>
             <input
               id="stats-range-start"
               type="date"
@@ -114,7 +114,7 @@ export function StatisticsDateRangeBar({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="stats-range-end">End</Label>
+            <Label htmlFor="stats-range-end">Mbarimi</Label>
             <input
               id="stats-range-end"
               type="date"
@@ -125,13 +125,13 @@ export function StatisticsDateRangeBar({
             />
           </div>
           <Button type="button" size="sm" disabled={disabled} onClick={handleApplyCustom}>
-            Apply range
+            Apliko intervalin
           </Button>
         </div>
       ) : null}
 
       <p className="text-xs text-muted-foreground">
-        Period:{' '}
+        Periudha:{' '}
         <span className="font-medium text-foreground">
           {rangeStart.toLocaleDateString(undefined, { dateStyle: 'medium' })}
         </span>{' '}

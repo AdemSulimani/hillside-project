@@ -48,21 +48,22 @@ export function useOrderActionRequiredToast(): void {
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts', 'list'] });
 
       const kind = actionTypeFromOrder(parsed.order);
+      const actionWord = kind === 'refund' ? 'rimbursim' : 'anulim';
       const toastId = toast.error(
-        `Customer requested ${kind} for order #${parsed.order.id.slice(0, 8)} — ${parsed.order.customer_name}`,
+        `Klienti kërkoi ${actionWord} për porosinë #${parsed.order.id.slice(0, 8)} — ${parsed.order.customer_name}`,
         {
           duration: Infinity,
           dismissible: false,
           closeButton: true,
           action: {
-            label: 'View Request',
+            label: 'Shiko kërkesën',
             onClick: () => {
               navigate('/orders?tab=action_required');
               toast.dismiss(toastId);
             },
           },
           cancel: {
-            label: 'Dismiss',
+            label: 'Mbyll',
             onClick: () => toast.dismiss(toastId),
           },
         },

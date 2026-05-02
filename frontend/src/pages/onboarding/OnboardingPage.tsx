@@ -14,23 +14,29 @@ import { Card, CardContent } from '@/components/ui/card';
 import StepIndicator from '@/components/onboarding/StepIndicator';
 import type { ApiResponse, User, Tenant } from '@/types';
 
-const STEPS = [
-  { label: 'Business' },
-  { label: 'Details' },
-  { label: 'Review' },
-];
+const STEPS = [{ label: 'Biznesi' }, { label: 'Detajet' }, { label: 'Rishikimi' }];
 
-const NICHES = [
-  'E-commerce',
-  'Services',
-];
+const NICHE_OPTIONS = [
+  { value: 'E-commerce', label: 'E-tregti' },
+  { value: 'Services', label: 'Shërbime' },
+] as const;
 
-const DELIVERY_METHODS = [
-  'Home Delivery',
-  'Store Pickup',
-  'Courier',
-  'Digital',
-];
+const DELIVERY_OPTIONS = [
+  { value: 'Home Delivery', label: 'Dërgesë në shtëpi' },
+  { value: 'Store Pickup', label: 'Marrje në dyqan' },
+  { value: 'Courier', label: 'Kurier' },
+  { value: 'Digital', label: 'Dixhital' },
+] as const;
+
+function nicheLabel(value: string): string {
+  return NICHE_OPTIONS.find((n) => n.value === value)?.label ?? value;
+}
+
+function deliveryLabels(values: string[]): string {
+  return values
+    .map((v) => DELIVERY_OPTIONS.find((d) => d.value === v)?.label ?? v)
+    .join(', ');
+}
 
 interface OnboardingForm {
   name: string;
@@ -54,13 +60,13 @@ function validateStep(step: number, form: OnboardingForm): FieldErrors {
   const errors: FieldErrors = {};
 
   if (step === 1) {
-    if (!form.name.trim()) errors.name = 'Business name is required';
-    if (!form.niche) errors.niche = 'Please select a niche';
+    if (!form.name.trim()) errors.name = 'Emri i biznesit është i detyrueshëm';
+    if (!form.niche) errors.niche = 'Ju lutemi zgjidhni një niç';
   }
 
   if (step === 2) {
     if (form.deliveryMethods.length === 0) {
-      errors.deliveryMethods = 'Select at least one delivery method';
+      errors.deliveryMethods = 'Zgjidhni të paktën një mënyrë dërgimi';
     }
   }
 
@@ -97,14 +103,14 @@ export default function OnboardingPage() {
     });
   }
 
-  function handleDeliveryToggle(method: string) {
+  function handleDeliveryToggle(methodValue: string) {
     setForm((prev) => {
-      const exists = prev.deliveryMethods.includes(method);
+      const exists = prev.deliveryMethods.includes(methodValue);
       return {
         ...prev,
         deliveryMethods: exists
-          ? prev.deliveryMethods.filter((m) => m !== method)
-          : [...prev.deliveryMethods, method],
+          ? prev.deliveryMethods.filter((m) => m !== methodValue)
+          : [...prev.deliveryMethods, methodValue],
       };
     });
     setErrors((prev) => {
@@ -120,12 +126,12 @@ export default function OnboardingPage() {
     if (!file) return;
 
     if (file.size > 2 * 1024 * 1024) {
-      setErrors((prev) => ({ ...prev, logo: 'Logo must be under 2 MB' }));
+      setErrors((prev) => ({ ...prev, logo: 'Logoja duhet të jetë nën 2 MB' }));
       return;
     }
 
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'].includes(file.type)) {
-      setErrors((prev) => ({ ...prev, logo: 'Only JPEG, PNG, WebP, or SVG allowed' }));
+      setErrors((prev) => ({ ...prev, logo: 'Lejohen vetëm JPEG, PNG, WebP ose SVG' }));
       return;
     }
 
@@ -177,7 +183,7 @@ export default function OnboardingPage() {
       setUser(result.user);
       setTenant(result.tenant);
       setOnboarded(true);
-      toast.success('Business setup complete!');
+      toast.success('Konfigurimi i biznesit u përfundua!');
       navigate('/dashboard', { replace: true });
     } catch (err) {
       if (err instanceof AxiosError && err.response) {
@@ -187,12 +193,12 @@ export default function OnboardingPage() {
             typeof data.error === 'object' ? data.error : {};
           setErrors(fieldErrors);
         } else if (status === 409) {
-          setGeneralError(data?.message ?? 'Onboarding was already completed.');
+          setGeneralError(data?.message ?? 'Konfigurimi i biznesit ishte përfunduar më parë.');
         } else {
-          setGeneralError(data?.message ?? 'Something went wrong. Please try again.');
+          setGeneralError(data?.message ?? 'Diçka shkoi keq. Ju lutemi provoni përsëri.');
         }
       } else {
-        setGeneralError('An unexpected error occurred.');
+        setGeneralError('Ndodhi një gabim i papritur.');
       }
     } finally {
       setLoading(false);
@@ -202,9 +208,9 @@ export default function OnboardingPage() {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center px-4 py-12">
       <div className="mb-8 text-center">
-        <h1 className="text-2xl font-semibold tracking-tight">Set up your business</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Konfiguro biznesin tënd</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Tell us about your business so we can tailor the experience for you.
+          Na trego për biznesin tënd që ta përshtasim përvojën për ty.
         </p>
       </div>
 
@@ -221,7 +227,7 @@ export default function OnboardingPage() {
           {step === 1 && (
             <>
               <div className="space-y-2">
-                <Label htmlFor="name">Business name</Label>
+                <Label htmlFor="name">Emri i biznesit</Label>
                 <Input
                   id="name"
                   value={form.name}
@@ -234,7 +240,7 @@ export default function OnboardingPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="niche">Industry / Niche</Label>
+                <Label htmlFor="niche">Industria / Niçi</Label>
                 <select
                   id="niche"
                   value={form.niche}
@@ -242,9 +248,11 @@ export default function OnboardingPage() {
                   aria-invalid={!!errors.niche}
                   className={selectClasses}
                 >
-                  <option value="" disabled>Select a niche</option>
-                  {NICHES.map((n) => (
-                    <option key={n} value={n}>{n}</option>
+                  <option value="" disabled>Zgjidhni një niç</option>
+                  {NICHE_OPTIONS.map((n) => (
+                    <option key={n.value} value={n.value}>
+                      {n.label}
+                    </option>
                   ))}
                 </select>
                 {errors.niche && <p className="text-xs text-destructive">{errors.niche}</p>}
@@ -256,12 +264,12 @@ export default function OnboardingPage() {
           {step === 2 && (
             <>
               <div className="space-y-2">
-                <Label htmlFor="description">Description <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                <Label htmlFor="description">Përshkrimi <span className="font-normal text-muted-foreground">(opsional)</span></Label>
                 <textarea
                   id="description"
                   value={form.description}
                   onChange={(e) => updateField('description', e.target.value)}
-                  placeholder="Tell us a bit about what your business does..."
+                  placeholder="Na trego pak çfarë bën biznesi yt..."
                   rows={4}
                   className="w-full resize-none rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 />
@@ -269,14 +277,14 @@ export default function OnboardingPage() {
 
               <fieldset className="space-y-3">
                 <legend className="flex items-center gap-2 text-sm font-medium leading-none select-none">
-                  Delivery methods
+                  Mënyrat e dërgimit
                 </legend>
                 <div className="grid grid-cols-2 gap-3">
-                  {DELIVERY_METHODS.map((method) => {
-                    const checked = form.deliveryMethods.includes(method);
+                  {DELIVERY_OPTIONS.map(({ value: methodValue, label: methodLabel }) => {
+                    const checked = form.deliveryMethods.includes(methodValue);
                     return (
                       <label
-                        key={method}
+                        key={methodValue}
                         className={cn(
                           'flex cursor-pointer items-center gap-3 rounded-lg border px-4 py-3 text-sm transition-colors',
                           checked
@@ -287,7 +295,7 @@ export default function OnboardingPage() {
                         <input
                           type="checkbox"
                           checked={checked}
-                          onChange={() => handleDeliveryToggle(method)}
+                          onChange={() => handleDeliveryToggle(methodValue)}
                           className="sr-only"
                         />
                         <div
@@ -304,7 +312,7 @@ export default function OnboardingPage() {
                             </svg>
                           )}
                         </div>
-                        {method}
+                        {methodLabel}
                       </label>
                     );
                   })}
@@ -319,12 +327,12 @@ export default function OnboardingPage() {
           {step === 3 && (
             <>
               <div className="space-y-2">
-                <Label>Logo <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                <Label>Logoja <span className="font-normal text-muted-foreground">(opsional)</span></Label>
                 {logoPreview ? (
                   <div className="relative inline-block">
                     <img
                       src={logoPreview}
-                      alt="Logo preview"
+                      alt="Parapamje e logos"
                       className="size-24 rounded-lg border object-cover"
                       loading="lazy"
                       decoding="async"
@@ -332,7 +340,7 @@ export default function OnboardingPage() {
                     <button
                       type="button"
                       onClick={removeLogo}
-                      aria-label="Remove logo"
+                      aria-label="Hiq logon"
                       className="absolute -right-2 -top-2 flex size-6 items-center justify-center rounded-full bg-destructive text-white shadow-sm transition-colors hover:bg-destructive/80"
                     >
                       <X className="size-3.5" />
@@ -345,8 +353,8 @@ export default function OnboardingPage() {
                     className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/30 px-6 py-8 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
                   >
                     <Upload className="size-8 opacity-50" />
-                    <span>Click to upload your logo</span>
-                    <span className="text-xs opacity-60">JPEG, PNG, WebP or SVG — max 2 MB</span>
+                    <span>Kliko për të ngarkuar logon</span>
+                    <span className="text-xs opacity-60">JPEG, PNG, WebP ose SVG — maks. 2 MB</span>
                   </button>
                 )}
                 <input
@@ -360,20 +368,20 @@ export default function OnboardingPage() {
               </div>
 
               <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
-                <h3 className="text-sm font-semibold">Review your details</h3>
+                <h3 className="text-sm font-semibold">Rishiko të dhënat</h3>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-                  <dt className="text-muted-foreground">Business name</dt>
+                  <dt className="text-muted-foreground">Emri i biznesit</dt>
                   <dd>{form.name}</dd>
-                  <dt className="text-muted-foreground">Niche</dt>
-                  <dd>{form.niche}</dd>
+                  <dt className="text-muted-foreground">Niçi</dt>
+                  <dd>{nicheLabel(form.niche)}</dd>
                   {form.description.trim() && (
                     <>
-                      <dt className="text-muted-foreground">Description</dt>
+                      <dt className="text-muted-foreground">Përshkrimi</dt>
                       <dd className="line-clamp-3">{form.description}</dd>
                     </>
                   )}
-                  <dt className="text-muted-foreground">Delivery</dt>
-                  <dd>{form.deliveryMethods.join(', ')}</dd>
+                  <dt className="text-muted-foreground">Dërgimi</dt>
+                  <dd>{deliveryLabels(form.deliveryMethods)}</dd>
                 </dl>
               </div>
             </>
@@ -382,7 +390,7 @@ export default function OnboardingPage() {
           <div className="flex items-center justify-between pt-2">
             {step > 1 ? (
               <Button variant="outline" size="lg" onClick={goBack} disabled={loading}>
-                Back
+                Prapa
               </Button>
             ) : (
               <span />
@@ -390,12 +398,12 @@ export default function OnboardingPage() {
 
             {step < 3 ? (
               <Button size="lg" onClick={goNext}>
-                Continue
+                Vazhdo
               </Button>
             ) : (
               <Button size="lg" onClick={handleSubmit} disabled={loading}>
                 {loading && <Loader2 className="animate-spin" />}
-                {loading ? 'Setting up…' : 'Complete setup'}
+                {loading ? 'Duke konfiguruar…' : 'Përfundo konfigurimin'}
               </Button>
             )}
           </div>

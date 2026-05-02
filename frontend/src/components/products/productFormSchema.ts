@@ -2,15 +2,15 @@ import { z } from 'zod';
 
 export const productFormValuesSchema = z
   .object({
-    name: z.string().trim().min(1, 'Name is required').max(255),
+    name: z.string().trim().min(1, 'Emri është i detyrueshëm').max(255),
     brand: z.string().max(255).optional().default(''),
     priceInput: z
       .string()
-      .min(1, 'Price is required')
+      .min(1, 'Çmimi është i detyrueshëm')
       .refine((s) => {
         const n = parseFloat(s.replace(/,/g, ''));
         return !Number.isNaN(n) && n >= 0;
-      }, 'Enter a valid price'),
+      }, 'Vendosni një çmim të vlefshëm'),
     discountedPriceInput: z
       .string()
       .optional()
@@ -19,7 +19,7 @@ export const productFormValuesSchema = z
         if (!s || s.trim() === '') return true;
         const n = parseFloat(s.replace(/,/g, ''));
         return !Number.isNaN(n) && n >= 0;
-      }, 'Enter a valid discounted price'),
+      }, 'Vendosni një çmim të zbritur të vlefshëm'),
     description: z.string().max(5000).optional().default(''),
     usage_description: z.string().max(10000).optional().default(''),
     sku: z.string().max(100).optional().default(''),
@@ -38,7 +38,7 @@ export const productFormValuesSchema = z
       return discounted < price;
     },
     {
-      message: 'Discounted price must be lower than the regular price',
+      message: 'Çmimi i zbritur duhet të jetë më i ulët se çmimi i rregullt',
       path: ['discountedPriceInput'],
     },
   );
@@ -60,10 +60,10 @@ export function valuesToApiBody(values: ProductFormValues) {
   if (discountedRaw !== '') {
     const n = parseFloat(discountedRaw.replace(/,/g, ''));
     if (Number.isNaN(n) || n < 0) {
-      throw new Error('Discounted price must be a positive number');
+      throw new Error('Çmimi i zbritur duhet të jetë një numër pozitiv');
     }
     if (Number.isFinite(price) && n >= price) {
-      throw new Error('Discounted price must be lower than the regular price');
+      throw new Error('Çmimi i zbritur duhet të jetë më i ulët se çmimi i rregullt');
     }
     discounted_price = n;
   }

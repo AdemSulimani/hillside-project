@@ -24,11 +24,11 @@ import { Skeleton } from '@/components/ui/skeleton';
 import type { AIConfigTestPayload, AIConfigUpdatePayload, QAPair } from '@/types/aiConfig';
 
 const TONE_OPTIONS = [
-  { value: 'professional', label: 'Professional' },
-  { value: 'friendly', label: 'Friendly' },
-  { value: 'casual', label: 'Casual' },
-  { value: 'formal', label: 'Formal' },
-  { value: 'enthusiastic', label: 'Enthusiastic' },
+  { value: 'professional', label: 'Profesionale' },
+  { value: 'friendly', label: 'Miqësore' },
+  { value: 'casual', label: 'E përditshme' },
+  { value: 'formal', label: 'Formale' },
+  { value: 'enthusiastic', label: 'Entuziaste' },
 ] as const;
 
 const selectClasses =
@@ -78,7 +78,7 @@ function validateQARows(qaRows: QARow[]): string | null {
     const q = row.question.trim();
     const a = row.answer.trim();
     if ((q && !a) || (!q && a)) {
-      return 'Each Q&A pair must include both a question and an answer, or leave both fields empty.';
+      return 'Çdo çift Pyetje–Përgjigje duhet të ketë si pyetjen ashtu edhe përgjigjen, ose lini bosh të dy fushat.';
     }
   }
   return null;
@@ -163,7 +163,7 @@ export default function AIConfigPage() {
       setClientError('');
       setFieldErrors({});
       queryClient.invalidateQueries({ queryKey: ['ai-config'] });
-      toast.success('AI configuration saved');
+      toast.success('Konfigurimi i IA-së u ruajt');
     },
     onError: (err) => {
       const fe = extractFieldErrors(err);
@@ -172,7 +172,7 @@ export default function AIConfigPage() {
         setClientError('');
       } else {
         setFieldErrors({});
-        setClientError(extractMessage(err, 'Failed to save AI configuration'));
+        setClientError(extractMessage(err, 'Ruajtja e konfigurimit të IA-së dështoi'));
       }
     },
   });
@@ -181,11 +181,11 @@ export default function AIConfigPage() {
     mutationFn: (payload: AIConfigTestPayload) => requestAITest(payload),
     onSuccess: (reply) => {
       setTestReply(reply);
-      toast.success('Test reply received');
+      toast.success('U mor përgjigja e testit');
     },
     onError: (err) => {
       setTestReply(null);
-      toast.error(extractMessage(err, 'Failed to run AI test'));
+      toast.error(extractMessage(err, 'Testi i IA-së dështoi'));
     },
   });
 
@@ -241,7 +241,7 @@ export default function AIConfigPage() {
     );
 
     if (!payload.tone.trim()) {
-      setClientError('Please select a tone.');
+      setClientError('Ju lutemi zgjidhni një ton.');
       return;
     }
 
@@ -251,7 +251,7 @@ export default function AIConfigPage() {
   function handleSendTest() {
     const msg = testMessage.trim();
     if (!msg) {
-      toast.error('Enter a test message');
+      toast.error('Shkruani një mesazh test');
       return;
     }
 
@@ -291,9 +291,9 @@ export default function AIConfigPage() {
   if (isError) {
     return (
       <div className="space-y-4">
-        <h1 className="text-2xl font-semibold tracking-tight">AI configuration</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Konfigurimi i IA-së</h1>
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          {extractMessage(loadError, 'Could not load AI configuration.')}
+          {extractMessage(loadError, 'Konfigurimi i IA-së nuk u ngarkua.')}
         </div>
       </div>
     );
@@ -304,9 +304,9 @@ export default function AIConfigPage() {
   return (
     <div className="space-y-6 pb-10">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">AI configuration</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Konfigurimi i IA-së</h1>
         <p className="text-sm text-muted-foreground">
-          Customize how your AI assistant sounds, what it can say, and how it sells.
+          Përshtatni si tingëllon ndihmësi juaj IA, çfarë mund të thotë dhe si shet.
         </p>
       </div>
 
@@ -316,13 +316,13 @@ export default function AIConfigPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <Sparkles className="size-5 text-muted-foreground" />
-              <CardTitle>Personality</CardTitle>
+              <CardTitle>Personaliteti</CardTitle>
             </div>
-            <CardDescription>Tone and character for every reply.</CardDescription>
+            <CardDescription>Toni dhe karakteri për çdo përgjigje.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="ai-tone">Tone</Label>
+              <Label htmlFor="ai-tone">Toni</Label>
               <select
                 id="ai-tone"
                 value={tone}
@@ -343,12 +343,12 @@ export default function AIConfigPage() {
               ))}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="personality-description">Personality description</Label>
+              <Label htmlFor="personality-description">Përshkrimi i personalitetit</Label>
               <Textarea
                 id="personality-description"
                 value={personalityDescription}
                 onChange={(e) => setPersonalityDescription(e.target.value)}
-                placeholder="Describe how the assistant should come across (optional)…"
+                placeholder="Përshkruani si duhet të duket ndihmësi (opsional)…"
                 rows={4}
                 aria-invalid={!!fieldErrors.personality_description}
               />
@@ -364,13 +364,13 @@ export default function AIConfigPage() {
         {/* Restrictions */}
         <Card>
           <CardHeader>
-            <CardTitle>Restrictions</CardTitle>
-            <CardDescription>Hard rules the AI must follow.</CardDescription>
+            <CardTitle>Kufizimet</CardTitle>
+            <CardDescription>Rregulla të forta që IA-ja duhet t’i ndjekë.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
               <div className="min-w-0 flex-1 space-y-2">
-                <Label htmlFor="restriction-input">Add restriction</Label>
+                <Label htmlFor="restriction-input">Shto kufizim</Label>
                 <Input
                   id="restriction-input"
                   value={restrictionDraft}
@@ -381,13 +381,13 @@ export default function AIConfigPage() {
                       addRestriction();
                     }
                   }}
-                  placeholder='e.g. Never mention competitor brands'
+                  placeholder="p.sh. Mos përmendni kurrë markat konkurruese"
                   className="h-10"
                 />
               </div>
               <Button type="button" variant="secondary" className="shrink-0" onClick={addRestriction}>
                 <Plus className="size-4" />
-                Add
+                Shto
               </Button>
             </div>
             {restrictions.length > 0 ? (
@@ -403,7 +403,7 @@ export default function AIConfigPage() {
                       type="button"
                       onClick={() => removeRestriction(i)}
                       className="ml-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                      aria-label={`Remove restriction: ${r}`}
+                      aria-label={`Hiq kufizimin: ${r}`}
                     >
                       <X className="size-3.5" />
                     </button>
@@ -411,7 +411,7 @@ export default function AIConfigPage() {
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground">No restrictions yet.</p>
+              <p className="text-sm text-muted-foreground">Ende nuk ka kufizime.</p>
             )}
             {fieldErrors.restrictions?.map((m) => (
               <p key={m} className="text-xs text-destructive">
@@ -424,17 +424,17 @@ export default function AIConfigPage() {
         {/* Sales strategy */}
         <Card>
           <CardHeader>
-            <CardTitle>Sales strategy</CardTitle>
-            <CardDescription>How the assistant should guide conversations.</CardDescription>
+            <CardTitle>Strategjia e shitjes</CardTitle>
+            <CardDescription>Si duhet të udhëheqë ndihmësi bisedat.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="sales-strategy">Strategy</Label>
+              <Label htmlFor="sales-strategy">Strategjia</Label>
               <Textarea
                 id="sales-strategy"
                 value={salesStrategy}
                 onChange={(e) => setSalesStrategy(e.target.value)}
-                placeholder="Outline your approach to helping customers and closing sales…"
+                placeholder="Përshkruani qasjen tuaj për ndihmë ndaj klientëve dhe mbylljen e shitjeve…"
                 rows={5}
                 aria-invalid={!!fieldErrors.sales_strategy}
               />
@@ -445,12 +445,12 @@ export default function AIConfigPage() {
               ))}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="objection-handling">Objection handling</Label>
+              <Label htmlFor="objection-handling">Trajtimi i kundërshtimeve</Label>
               <Textarea
                 id="objection-handling"
                 value={objectionHandling}
                 onChange={(e) => setObjectionHandling(e.target.value)}
-                placeholder="How should the assistant respond to hesitations or pushback…"
+                placeholder="Si duhet të përgjigjet ndihmësi ndaj hezitimeve ose kundërshtimeve…"
                 rows={5}
                 aria-invalid={!!fieldErrors.objection_handling}
               />
@@ -466,12 +466,12 @@ export default function AIConfigPage() {
         {/* Q&A */}
         <Card>
           <CardHeader>
-            <CardTitle>Q&amp;A pairs</CardTitle>
-            <CardDescription>Teach the assistant answers to common questions.</CardDescription>
+            <CardTitle>Çifte Pyetje–Përgjigje</CardTitle>
+            <CardDescription>Mësoni ndihmësit përgjigje për pyetje të zakonshme.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {qaRows.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No pairs yet. Add one to get started.</p>
+              <p className="text-sm text-muted-foreground">Ende nuk ka çifte. Shtoni një për të filluar.</p>
             ) : (
               <ul className="space-y-4">
                 {qaRows.map((row) => (
@@ -481,7 +481,7 @@ export default function AIConfigPage() {
                   >
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                        Pair
+                        Çifti
                       </span>
                       <Button
                         type="button"
@@ -491,27 +491,27 @@ export default function AIConfigPage() {
                         onClick={() => removeQARow(row.localId)}
                       >
                         <Trash2 className="size-4" />
-                        Remove
+                        Hiq
                       </Button>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="space-y-2">
-                        <Label htmlFor={`q-${row.localId}`}>Question</Label>
+                        <Label htmlFor={`q-${row.localId}`}>Pyetja</Label>
                         <Textarea
                           id={`q-${row.localId}`}
                           value={row.question}
                           onChange={(e) => updateQARow(row.localId, { question: e.target.value })}
-                          placeholder="Customer question…"
+                          placeholder="Pyetja e klientit…"
                           rows={3}
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor={`a-${row.localId}`}>Answer</Label>
+                        <Label htmlFor={`a-${row.localId}`}>Përgjigja</Label>
                         <Textarea
                           id={`a-${row.localId}`}
                           value={row.answer}
                           onChange={(e) => updateQARow(row.localId, { answer: e.target.value })}
-                          placeholder="Assistant answer…"
+                          placeholder="Përgjigja e ndihmësit…"
                           rows={3}
                         />
                       </div>
@@ -522,7 +522,7 @@ export default function AIConfigPage() {
             )}
             <Button type="button" variant="outline" onClick={addQARow}>
               <Plus className="size-4" />
-              Add Q&amp;A pair
+              Shto çift Pyetje–Përgjigje
             </Button>
             {fieldErrors.qa_pairs?.map((m) => (
               <p key={m} className="text-xs text-destructive">
@@ -538,21 +538,21 @@ export default function AIConfigPage() {
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-lg font-semibold tracking-tight">
                 <BrainCircuit className="size-5 text-primary" />
-                AI agent active
+                Agjenti IA aktiv
               </div>
               <p className="text-sm text-muted-foreground">
-                When off, your saved personality and rules stay in place for when you turn it back on.
+                Kur është fikur, personaliteti dhe rregullat e ruajtura mbeten për kur e ndizni përsëri.
               </p>
             </div>
             <div className="flex items-center gap-3 sm:flex-col sm:items-end sm:gap-1">
               <Switch
                 checked={isActive}
                 onCheckedChange={(v) => setIsActive(Boolean(v))}
-                aria-label="AI agent active"
+                aria-label="Agjenti IA aktiv"
                 size="default"
               />
               <span className="text-sm font-medium text-muted-foreground">
-                {isActive ? 'On' : 'Off'}
+                {isActive ? 'Aktiv' : 'Fikur'}
               </span>
             </div>
           </CardContent>
@@ -569,7 +569,7 @@ export default function AIConfigPage() {
 
         <Button type="submit" size="lg" disabled={saveMutation.isPending} className="min-w-[200px]">
           {saveMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
-          {saveMutation.isPending ? 'Saving…' : 'Save all changes'}
+          {saveMutation.isPending ? 'Duke ruajtur…' : 'Ruaj të gjitha ndryshimet'}
         </Button>
       </form>
 
@@ -578,20 +578,21 @@ export default function AIConfigPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <SendHorizontal className="size-5 text-muted-foreground" />
-            <CardTitle>Test your AI</CardTitle>
+            <CardTitle>Testoni IA-në tuaj</CardTitle>
           </div>
           <CardDescription>
-            Sends a one-off message using your <strong>current form values</strong> — nothing is saved to customers.
+            Dërgon një mesazh të vetëm duke përdorur <strong>vlerat aktuale të formularit</strong> — asgjë nuk ruhet te
+            klientët.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="test-message">Test message</Label>
+            <Label htmlFor="test-message">Mesazhi i testit</Label>
             <Textarea
               id="test-message"
               value={testMessage}
               onChange={(e) => setTestMessage(e.target.value)}
-              placeholder='Try: "Do you sell shoes?"'
+              placeholder='Provoni: "A shesni këpucë?"'
               rows={3}
             />
           </div>
@@ -605,12 +606,12 @@ export default function AIConfigPage() {
             ) : (
               <SendHorizontal className="size-4" />
             )}
-            {testMutation.isPending ? 'Sending…' : 'Send test'}
+            {testMutation.isPending ? 'Duke dërguar…' : 'Dërgo testin'}
           </Button>
 
           <div className="space-y-3 border-t border-border pt-4">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Response
+              Përgjigja
             </p>
             {testReply ? (
               <div className="flex w-full flex-col items-end gap-1">
@@ -623,12 +624,12 @@ export default function AIConfigPage() {
                   <p className="whitespace-pre-wrap break-words">{testReply}</p>
                 </div>
                 <span className="rounded-md bg-violet-500/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-violet-700 dark:bg-violet-400/20 dark:text-violet-200">
-                  AI preview
+                  Parapamje IA
                 </span>
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">
-                Run a test to see the assistant reply here.
+                Ekzekutoni një test për të parë përgjigjen e ndihmësit këtu.
               </p>
             )}
           </div>
