@@ -200,14 +200,77 @@ function buildInboundBurstContext(recentMessages: Message[]): {
   return { latestInbound, mergedInboundText, mergedAttachmentUrls };
 }
 
-async function latestInboundStillMatches(
-  conversationId: string,
-  expectedExternalMessageId: string,
-): Promise<boolean> {
+type AutomatedReplyPrecheck =
+  | { ok: true }
+  | { ok: false; reason: string; logPayload?: Record<string, unknown> };
+
+/**
+ * Re-validates tenant/channel/conversation AI gates and that no superseding inbound or human
+ * takeover occurred since the job was queued. Call immediately before any channel send in this job.
+ */
+async function shouldStillSendAutomatedReply(args: {
+  tenantId: string;
+  channelId: string;
+  conversationId: string;
+  scheduledInboundExternalId: string;
+}): Promise<AutomatedReplyPrecheck> {
+  const { tenantId, channelId, conversationId, scheduledInboundExternalId } = args;
+
+  const aiConfig = await findAIConfigByTenant(tenantId);
+  if (!aiConfig?.is_active) {
+    return { ok: false, reason: 'ai_globally_disabled' };
+  }
+
+  const channel = await findChannelById(channelId, tenantId);
+  if (!channel) {
+    return { ok: false, reason: 'channel_not_found' };
+  }
+  if (!channel.ai_enabled) {
+    return { ok: false, reason: 'ai_disabled_for_channel' };
+  }
+
+  const conversation = await findConversationById(conversationId);
+  if (!conversation) {
+    return { ok: false, reason: 'conversation_not_found' };
+  }
+  if (conversation.ai_paused) {
+    return { ok: false, reason: 'ai_paused' };
+  }
+  if (conversation.human_override_until && new Date(conversation.human_override_until) > new Date()) {
+    return {
+      ok: false,
+      reason: 'human_override_active',
+      logPayload: { until: conversation.human_override_until },
+    };
+  }
+
   const latestMessages = await findMessagesByConversation(conversationId, 8);
   const latestInbound = [...latestMessages].reverse().find((msg) => msg.direction === 'inbound');
-  if (!latestInbound) return false;
-  return latestInbound.external_message_id === expectedExternalMessageId;
+  if (!latestInbound || latestInbound.external_message_id !== scheduledInboundExternalId) {
+    return {
+      ok: false,
+      reason: 'newer_inbound',
+      logPayload: latestInbound
+        ? { scheduledFor: scheduledInboundExternalId, latestInboundExternalId: latestInbound.external_message_id }
+        : { scheduledFor: scheduledInboundExternalId },
+    };
+  }
+
+  const { rows: humanRows } = await pool.query<{ has_human_outbound: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM messages
+       WHERE conversation_id = $1 AND tenant_id = $2
+         AND direction = 'outbound'
+         AND sent_by = 'human'
+         AND created_at > $3
+     ) AS has_human_outbound`,
+    [conversationId, tenantId, latestInbound.created_at],
+  );
+  if (humanRows[0]?.has_human_outbound) {
+    return { ok: false, reason: 'human_outbound_after_inbound' };
+  }
+
+  return { ok: true };
 }
 
 function isUsageEscalationHoldingMessage(value: string): boolean {
@@ -792,14 +855,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           let sendResult:
             | Awaited<ReturnType<typeof sendMessage>>
             | null = null;
-          const stillLatestBeforeAck = await latestInboundStillMatches(
+          const ackPrecheck = await shouldStillSendAutomatedReply({
+            tenantId,
+            channelId,
             conversationId,
-            data.messageExternalId,
-          );
-          if (!stillLatestBeforeAck) {
-            console.info('[ai.reply] Skipping cancellation/refund ack because newer inbound arrived', {
+            scheduledInboundExternalId: data.messageExternalId,
+          });
+          if (!ackPrecheck.ok) {
+            console.info('[ai.reply] Skipping cancellation/refund ack send', {
               conversationId,
               scheduledFor: data.messageExternalId,
+              reason: ackPrecheck.reason,
+              ...ackPrecheck.logPayload,
             });
             return;
           }
@@ -943,14 +1010,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         const configuredDeliveryTime = tenantForDelivery?.delivery_time ?? null;
         if (configuredDeliveryTime) {
           const deliveryEtaReply = buildDeliveryEtaReply(configuredDeliveryTime);
-          const stillLatestBeforeEtaAck = await latestInboundStillMatches(
+          const etaPrecheck = await shouldStillSendAutomatedReply({
+            tenantId,
+            channelId,
             conversationId,
-            data.messageExternalId,
-          );
-          if (!stillLatestBeforeEtaAck) {
-            console.info('[ai.reply] Skipping delivery ETA auto-reply because newer inbound arrived', {
+            scheduledInboundExternalId: data.messageExternalId,
+          });
+          if (!etaPrecheck.ok) {
+            console.info('[ai.reply] Skipping delivery ETA auto-reply send', {
               conversationId,
               scheduledFor: data.messageExternalId,
+              reason: etaPrecheck.reason,
+              ...etaPrecheck.logPayload,
             });
             return;
           }
@@ -1036,14 +1107,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let sendResult:
           | Awaited<ReturnType<typeof sendMessage>>
           | null = null;
-        const stillLatestBeforePostPurchaseAck = await latestInboundStillMatches(
+        const postPurchasePrecheck = await shouldStillSendAutomatedReply({
+          tenantId,
+          channelId,
           conversationId,
-          data.messageExternalId,
-        );
-        if (!stillLatestBeforePostPurchaseAck) {
-          console.info('[ai.reply] Skipping post-purchase holding message because newer inbound arrived', {
+          scheduledInboundExternalId: data.messageExternalId,
+        });
+        if (!postPurchasePrecheck.ok) {
+          console.info('[ai.reply] Skipping post-purchase holding message send', {
             conversationId,
             scheduledFor: data.messageExternalId,
+            reason: postPurchasePrecheck.reason,
+            ...postPurchasePrecheck.logPayload,
           });
           return;
         }
@@ -1423,14 +1498,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
-  const stillLatestBeforeSend = await latestInboundStillMatches(
+  const mainSendPrecheck = await shouldStillSendAutomatedReply({
+    tenantId,
+    channelId,
     conversationId,
-    data.messageExternalId,
-  );
-  if (!stillLatestBeforeSend) {
-    console.info('[ai.reply] Skipping AI send because newer inbound arrived during processing', {
+    scheduledInboundExternalId: data.messageExternalId,
+  });
+  if (!mainSendPrecheck.ok) {
+    console.info('[ai.reply] Skipping AI send', {
       conversationId,
       scheduledFor: data.messageExternalId,
+      reason: mainSendPrecheck.reason,
+      ...mainSendPrecheck.logPayload,
     });
     return;
   }
