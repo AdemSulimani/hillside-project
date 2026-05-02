@@ -3,6 +3,7 @@ import { ensureAIConfigForTenant, updateAIConfig } from '../db/models/aiConfig';
 import { findTenantById } from '../db/models/tenant';
 import { searchProducts, type Product } from '../db/models/product';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
+import { formatBusinessProfileForPrompt } from '../services/aiService';
 import { sendSuccess, sendError } from '../utils/response';
 import type { TestAIConfigInput } from '../validators/aiConfig';
 import { redisConnection } from '../jobs/redisConnection';
@@ -55,7 +56,13 @@ export async function test(req: Request, res: Response): Promise<void> {
       custom_model_id: body.custom_model_id ?? null,
     };
 
-    const systemPrompt = buildTestSystemPrompt(tenant.name, config, products);
+    const systemPrompt = buildTestSystemPrompt(
+      tenant.name,
+      tenant.niche,
+      tenant.description,
+      config,
+      products,
+    );
     const model = config.custom_model_id || OPENAI_CHAT_MODEL;
 
     const completion = await openai.chat.completions.create({
@@ -91,6 +98,8 @@ interface TestConfig {
 
 function buildTestSystemPrompt(
   businessName: string,
+  tenantNiche: string | null | undefined,
+  tenantDescription: string | null | undefined,
   config: TestConfig,
   products: Product[],
 ): string {
@@ -109,6 +118,11 @@ function buildTestSystemPrompt(
 
   if (config.objection_handling) {
     lines.push('', `Objection handling approach: ${config.objection_handling}`);
+  }
+
+  const businessProfile = formatBusinessProfileForPrompt(tenantNiche, tenantDescription);
+  if (businessProfile) {
+    lines.push('', businessProfile);
   }
 
   if (config.restrictions.length > 0) {
@@ -143,6 +157,7 @@ function buildTestSystemPrompt(
     '- Keep tone conversational — this is a chat, not an email.',
     '- If the customer asks about a product you don\'t have, say so honestly.',
     '- Never fabricate product details, prices, or availability.',
+    '- For business location, address, or general "about the business" questions: use only the Business profile section when present. If the answer is not there, do not invent it.',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
     '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
   );

@@ -284,6 +284,9 @@ export default function BusinessPage() {
                   rows={4}
                   className="w-full resize-none rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 />
+                <p className="text-xs text-muted-foreground">
+                  The AI assistant can use this text when customers ask about your business, including location or address, if you include it here.
+                </p>
                 {errors.description?.map((msg) => (
                   <p key={msg} className="text-xs text-destructive">{msg}</p>
                 ))}

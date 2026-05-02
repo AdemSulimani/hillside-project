@@ -915,6 +915,20 @@ function normalizeProductMentionsForReply(
   return normalized.trim();
 }
 
+/** CRM "My Business" niche + description; injected so the model can answer location / about-us style questions. */
+export function formatBusinessProfileForPrompt(
+  tenantNiche?: string | null,
+  tenantDescription?: string | null,
+): string | null {
+  const niche = typeof tenantNiche === 'string' ? tenantNiche.trim() : '';
+  const desc = typeof tenantDescription === 'string' ? tenantDescription.trim() : '';
+  if (!niche && !desc) return null;
+  const parts: string[] = ['Business profile (from My Business in the CRM):'];
+  if (niche) parts.push(`Industry / niche: ${niche}`);
+  if (desc) parts.push(`Details:\n${desc}`);
+  return parts.join('\n');
+}
+
 function buildSystemPrompt(
   businessName: string,
   config: typeof DEFAULT_AI_CONFIG,
@@ -924,6 +938,8 @@ function buildSystemPrompt(
   orderClosingAlreadyAskedInConversation: boolean,
   customerAskedDiscount: boolean,
   discountAlreadyAddressedInConversation: boolean,
+  tenantNiche?: string | null,
+  tenantDescription?: string | null,
 ): string {
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
@@ -940,6 +956,11 @@ function buildSystemPrompt(
 
   if (config.objection_handling) {
     lines.push('', `Objection handling approach: ${config.objection_handling}`);
+  }
+
+  const businessProfile = formatBusinessProfileForPrompt(tenantNiche, tenantDescription);
+  if (businessProfile) {
+    lines.push('', businessProfile);
   }
 
   if (config.restrictions.length > 0) {
@@ -966,6 +987,7 @@ function buildSystemPrompt(
     '- When the requested product is unavailable or not an exact match, clearly say that exact product is not available, then immediately suggest 1-2 similar alternatives from the same category in the catalog (never more than two).',
     '- For unavailable-product cases, keep the sequence: (1) unavailable acknowledgement, (2) relevant alternatives from same category, (3) short order-oriented follow-up question.',
     '- Never fabricate product details, prices, or availability.',
+    '- For business location, physical address, pickup point, hours, or general "about the business" questions: use only the Business profile section when it is present above. If it does not contain the answer, do not invent one — offer to have a team member help.',
     '- Strict rule: never mention product price or stock availability unless the customer explicitly asks for price/stock in their current message.',
     '- Currency rule: whenever you mention any product price amount, use the Euro symbol (€), never the dollar sign ($).',
     '- If a question is outside your scope, politely let the customer know a human agent can help.',
@@ -2018,6 +2040,8 @@ export async function generateReply(
     orderClosingAlreadyAskedInConversation,
     customerAskedDiscount,
     discountAlreadyAddressedInConversation,
+    tenant.niche,
+    tenant.description,
   );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
