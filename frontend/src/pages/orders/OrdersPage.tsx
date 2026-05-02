@@ -26,6 +26,7 @@ import { formatFlagReason } from '@/lib/aiAlertLabels';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
+import { useAppStore } from '@/store/app';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import type { OrderListSortColumn, OrderResolutionStatus, OrderStatus } from '@/types/order';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -129,6 +130,7 @@ function SortHeader({
 
 export default function OrdersPage() {
   const tenantId = useAuthStore((s) => s.user?.tenant_id ?? null);
+  const resetOrdersNavNewCount = useAppStore((s) => s.resetOrdersNavNewCount);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -148,6 +150,10 @@ export default function OrdersPage() {
   const [drawerOrderId, setDrawerOrderId] = useState<string | null>(initialDrawerOrderId);
   const [drawerOpen, setDrawerOpen] = useState(Boolean(initialDrawerOrderId));
   const [actionForms, setActionForms] = useState<Record<string, ActionFormState>>({});
+
+  useEffect(() => {
+    resetOrdersNavNewCount();
+  }, [resetOrdersNavNewCount]);
 
   useEffect(() => {
     if (!openFromQuery || !/^[0-9a-f-]{36}$/i.test(openFromQuery)) return;
