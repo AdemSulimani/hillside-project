@@ -18,6 +18,8 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
+# tsc does not emit .sql files; migrate.js reads dist/db/migrations at runtime
+COPY --from=builder /app/src/db/migrations ./dist/db/migrations
 
 EXPOSE 8000
 ENV PORT=8000
