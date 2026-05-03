@@ -14,8 +14,8 @@ export default function PrivacyPolicyPage() {
         <h2 className="text-base font-semibold text-foreground">Data deletion requests</h2>
         <p className="mt-2 text-sm leading-6 text-foreground">
           To request deletion of personal data, email{' '}
-          <a href="mailto:privacy@thehillside.io" className="font-medium text-primary underline">
-            privacy@thehillside.io
+          <a href="mailto:privacy@byhillside.com" className="font-medium text-primary underline">
+            privacy@byhillside.com
           </a>
           . Step-by-step instructions are on our{' '}
           <Link to="/data-deletion" className="font-medium text-primary underline">
@@ -37,7 +37,7 @@ export default function PrivacyPolicyPage() {
           <p>
             For questions about this Privacy Policy or to exercise your rights, contact us at:
             <br />
-            Email: privacy@thehillside.io
+            Email: privacy@byhillside.com
             <br />
             Address: St. Ndue Përlleshi, 207, Floor 2, No. 8, Matiçan, Pristina, Kosovo
           </p>
@@ -54,7 +54,7 @@ export default function PrivacyPolicyPage() {
             under the instructions of the relevant business customer.
           </p>
           <p>
-            Data Deletion: To request deletion of your personal data, contact privacy@thehillside.io with the subject
+            Data Deletion: To request deletion of your personal data, contact privacy@byhillside.com with the subject
             line &quot;Data Deletion Request&quot;. For Meta Platform Data, use the subject line &quot;Meta Data
             Deletion Request&quot;. We will process requests in accordance with applicable law and Meta platform
             requirements.
@@ -449,7 +449,7 @@ export default function PrivacyPolicyPage() {
             </li>
           </ul>
           <p>
-            To exercise any of these rights, contact privacy@thehillside.io. We will respond within the timeframe
+            To exercise any of these rights, contact privacy@byhillside.com. We will respond within the timeframe
             required by applicable law (generally within 30 days under the GDPR). We may require verification of your
             identity before processing your request.
           </p>
@@ -459,7 +459,7 @@ export default function PrivacyPolicyPage() {
           <h2 className="text-xl font-semibold">12. Data Deletion Requests</h2>
           <h3 className="text-base font-semibold">12.1 Business Customer Requests</h3>
           <p>
-            Business customers may request deletion of their account data by contacting privacy@thehillside.io. We will
+            Business customers may request deletion of their account data by contacting privacy@byhillside.com. We will
             process deletion requests in accordance with our data retention obligations, applicable law, and any
             binding legal holds.
           </p>
@@ -467,12 +467,12 @@ export default function PrivacyPolicyPage() {
           <p>
             If you are an end user whose data has been processed through a business customer&apos;s connected channels,
             you may submit a deletion request either to the relevant business directly or to Hillside at
-            privacy@thehillside.io. We will assist in processing such requests within the scope of our role as data
+            privacy@byhillside.com. We will assist in processing such requests within the scope of our role as data
             processor.
           </p>
           <h3 className="text-base font-semibold">12.3 Meta Platform Data Deletion</h3>
           <p>
-            To submit a deletion request specifically relating to Meta Platform Data, contact privacy@thehillside.io
+            To submit a deletion request specifically relating to Meta Platform Data, contact privacy@byhillside.com
             with the subject line &quot;Meta Data Deletion Request&quot; and include sufficient information to identify
             your records (e.g., platform account identifier or connected channel identifier). We will process such
             requests in accordance with applicable Meta platform requirements and applicable law.
@@ -500,7 +500,7 @@ export default function PrivacyPolicyPage() {
           </ul>
           <p>
             No security measure can guarantee absolute protection. If you identify a security vulnerability or
-            incident, please contact security@thehillside.io promptly.
+            incident, please contact security@byhillside.com promptly.
           </p>
         </section>
 
@@ -530,7 +530,7 @@ export default function PrivacyPolicyPage() {
           <h2 className="text-xl font-semibold">16. Changes to This Policy</h2>
           <p>
             We may update this Privacy Policy from time to time to reflect changes in our practices, platform features,
-            or applicable law. The updated Policy will be posted at thehillside.io/privacy-policy with a revised
+            or applicable law. The updated Policy will be posted at byhillside.com/privacy-policy with a revised
             Effective Date. We will provide reasonable notice of material changes (for example, by email or in-platform
             notification) before they take effect. Your continued use of the platform following the effective date of a
             revised Policy constitutes your acceptance of the changes.
@@ -546,9 +546,9 @@ export default function PrivacyPolicyPage() {
             <br />
             St. Ndue Përlleshi, 207, Floor 2, No. 8, Matiçan, Pristina, Kosovo
             <br />
-            Privacy: privacy@thehillside.io
+            Privacy: privacy@byhillside.com
             <br />
-            Security: security@thehillside.io
+            Security: security@byhillside.com
           </p>
         </section>
       </div>

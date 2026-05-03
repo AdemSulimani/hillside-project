@@ -13,8 +13,8 @@ export default function DataDeletionRequestPage() {
           <h2 className="text-lg font-semibold">Business accounts (tenants)</h2>
           <p>
             To request deletion of your organization&apos;s account and related data, email{' '}
-            <a href="mailto:privacy@thehillside.io" className="font-medium text-primary underline">
-              privacy@thehillside.io
+            <a href="mailto:privacy@byhillside.com" className="font-medium text-primary underline">
+              privacy@byhillside.com
             </a>{' '}
             from the address registered on your account. Include your business name and the email used to sign in so we
             can verify your request.

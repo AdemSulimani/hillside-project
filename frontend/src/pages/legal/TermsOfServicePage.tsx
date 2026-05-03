@@ -20,7 +20,7 @@ operate a legitimate business with a lawful use case compatible with the Platfor
 You are solely responsible for maintaining the confidentiality of your account credentials and for all activity that occurs under your account. You must:
 use strong, unique credentials and enable any available multi-factor authentication;
 restrict access to authorized personnel only; and
-notify us immediately at support@thehillside.io if you know or reasonably suspect unauthorized access to your account or credentials.
+notify us immediately at support@byhillside.com if you know or reasonably suspect unauthorized access to your account or credentials.
 
 Hillside shall not be liable for losses resulting from unauthorized account access caused by your failure to maintain adequate credential security.
 
@@ -122,13 +122,13 @@ In the event of ambiguity regarding usage metrics, billable event classification
 
 7. Data Processing and Privacy
 7.1 Privacy Policy
-Hillside's collection, use, and disclosure of personal data in connection with the Platform is described in the Hillside Privacy Policy, available at thehillside.io/privacy-policy, which is incorporated into these Terms by reference. In the event of conflict between these Terms and the Privacy Policy with respect to data processing matters, the Privacy Policy governs.
+Hillside's collection, use, and disclosure of personal data in connection with the Platform is described in the Hillside Privacy Policy, available at byhillside.com/privacy-policy, which is incorporated into these Terms by reference. In the event of conflict between these Terms and the Privacy Policy with respect to data processing matters, the Privacy Policy governs.
 
 7.2 Processor Role
 With respect to personal data processed through the Platform on behalf of your business—including Meta Platform Data and end-user message data—Hillside acts as a data processor (or service provider under applicable law). You act as the data controller (or business, as applicable) and retain responsibility for the lawfulness of the underlying data collection and the instructions you provide to Hillside for processing.
 
 7.3 Data Processing Agreement
-If you require a Data Processing Agreement (DPA) to satisfy obligations under the GDPR, UK GDPR, or other applicable data protection law, please contact privacy@thehillside.io. We will provide a DPA on terms consistent with applicable law and our processing activities.
+If you require a Data Processing Agreement (DPA) to satisfy obligations under the GDPR, UK GDPR, or other applicable data protection law, please contact privacy@byhillside.com. We will provide a DPA on terms consistent with applicable law and our processing activities.
 
 7.4 Your Data Obligations
 You represent and warrant that:
@@ -172,7 +172,7 @@ the information you provide to Hillside in connection with account registration 
 
 12. Suspension and Termination
 12.1 Termination by Customer
-You may terminate your account at any time by notifying us at support@thehillside.io or through the account settings interface. Termination is effective at the end of the then-current billing cycle. Fees paid prior to termination are non-refundable unless required by applicable mandatory law.
+You may terminate your account at any time by notifying us at support@byhillside.com or through the account settings interface. Termination is effective at the end of the then-current billing cycle. Fees paid prior to termination are non-refundable unless required by applicable mandatory law.
 
 12.2 Suspension and Termination by Hillside
 Hillside may immediately suspend your access to the Platform, or terminate these Terms with written notice, if:
@@ -219,7 +219,7 @@ Neither party waives any right to seek interim injunctive or other equitable rel
 These Terms, together with the Privacy Policy and any applicable Order, constitute the entire agreement between the parties with respect to the Platform and supersede all prior and contemporaneous agreements, representations, and understandings. In the event of conflict, the order of precedence is: (1) Order, (2) these Terms, (3) Privacy Policy.
 
 17.2 Amendments
-Hillside may amend these Terms by posting an updated version at thehillside.io/terms with reasonable advance notice of material changes. Continued use of the Platform following the effective date of amended Terms constitutes your acceptance. If you do not accept amended Terms, you must cease use of the Platform and notify Hillside of your termination.
+Hillside may amend these Terms by posting an updated version at byhillside.com/terms with reasonable advance notice of material changes. Continued use of the Platform following the effective date of amended Terms constitutes your acceptance. If you do not accept amended Terms, you must cease use of the Platform and notify Hillside of your termination.
 
 17.3 Severability
 If any provision of these Terms is found unenforceable by a court of competent jurisdiction, that provision shall be modified to the minimum extent necessary to make it enforceable, and the remaining provisions shall continue in full force and effect.
@@ -231,14 +231,14 @@ Hillside's failure to exercise or enforce any right or provision of these Terms 
 You may not assign or transfer your rights or obligations under these Terms without Hillside's prior written consent. Hillside may assign these Terms, including in connection with a merger, acquisition, or sale of assets, upon written notice to you.
 
 17.6 Notices
-Notices to Hillside must be sent to legal@thehillside.io or to the address below. Notices to you will be sent to the email address associated with your account. Notices are effective upon confirmed delivery.
+Notices to Hillside must be sent to legal@byhillside.com or to the address below. Notices to you will be sent to the email address associated with your account. Notices are effective upon confirmed delivery.
 
 18. Contact and Legal Notices
 Hillside L.L.C.
 St. Ndue Përlleshi, 207, Floor 2, No. 8, Matiçan, Pristina, Kosovo
-Support: support@thehillside.io
-Privacy: privacy@thehillside.io
-Legal / Notices: legal@thehillside.io`;
+Support: support@byhillside.com
+Privacy: privacy@byhillside.com
+Legal / Notices: legal@byhillside.com`;
 
 export default function TermsOfServicePage() {
   const contentLines = TERMS_TEXT.split('\n').slice(3);
