@@ -20,24 +20,32 @@ import type { RegisterInput, LoginInput } from '../validators/auth';
 const SALT_ROUNDS = 12;
 const COOKIE_NAME = 'refresh_token';
 
+/** Cross-origin SPA (e.g. Vercel → Render): cookies must use SameSite=None + Secure or the browser will not send them on API requests. */
+function refreshCookieBaseOptions(): {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: 'strict' | 'none';
+  path: string;
+} {
+  const production = process.env.NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    secure: production,
+    sameSite: production ? 'none' : 'strict',
+    path: '/api/auth',
+  };
+}
+
 function setRefreshCookie(res: Response, token: string, persistent: boolean): void {
   const maxAge = getRefreshCookieMaxAgeMs(persistent);
   res.cookie(COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    ...refreshCookieBaseOptions(),
     ...(maxAge !== undefined ? { maxAge } : {}),
-    path: '/api/auth',
   });
 }
 
 function clearRefreshCookie(res: Response): void {
-  res.clearCookie(COOKIE_NAME, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    path: '/api/auth',
-  });
+  res.clearCookie(COOKIE_NAME, refreshCookieBaseOptions());
 }
 
 export async function register(req: Request, res: Response): Promise<void> {
