@@ -7,7 +7,6 @@ import RequireOnboarding from '@/components/auth/RequireOnboarding';
 import CRMLayout from '@/components/layouts/CRMLayout';
 import AdminLayout from '@/components/layouts/AdminLayout';
 import { FullPageRouteFallback } from '@/components/layouts/RouteFallback';
-const HomePage = lazy(() => import('@/pages/Home'));
 const PrivacyPolicyPage = lazy(() => import('@/pages/legal/PrivacyPolicyPage'));
 const TermsOfServicePage = lazy(() => import('@/pages/legal/TermsOfServicePage'));
 const DataDeletionRequestPage = lazy(() => import('@/pages/legal/DataDeletionRequestPage'));
@@ -38,7 +37,7 @@ export default function App() {
   return (
     <Suspense fallback={<FullPageRouteFallback />}>
       <Routes>
-        <Route path="/" element={<HomePage />} />
+        <Route path="/" element={<Navigate to="/login" replace />} />
         <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
         <Route path="/terms-of-service" element={<TermsOfServicePage />} />
         <Route path="/data-deletion" element={<DataDeletionRequestPage />} />
@@ -83,7 +82,7 @@ export default function App() {
           </Route>
         </Route>
 
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </Suspense>
   );
