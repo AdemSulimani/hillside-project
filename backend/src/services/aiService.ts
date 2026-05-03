@@ -7,10 +7,17 @@ import {
   searchProductsBySimilarity,
   type Product,
 } from '../db/models/product';
+import { formatProductCatalog } from './productCatalogFormat';
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
 import { redisConnection } from '../jobs/redisConnection';
+
+export {
+  formatProductCatalog,
+  truncateCatalogText,
+  type FormatProductCatalogOptions,
+} from './productCatalogFormat';
 
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
 
@@ -800,51 +807,6 @@ function inboundTextLikelyReferencesProduct(inboundMessage: string, product: Pro
   }
 
   return false;
-}
-
-export function formatProductCatalog(
-  products: Product[],
-  options?: { includePrice?: boolean; includeDiscount?: boolean },
-): string {
-  const includePrice = options?.includePrice ?? true;
-  const includeDiscount = options?.includeDiscount ?? false;
-  if (products.length === 0) return 'No matching products found in the catalog.';
-
-  return products
-    .map((p) => {
-      const typeText = p.tags.length > 0 ? p.tags.join(', ') : 'N/A';
-      const parts = [
-        `- Brand: ${getProductBrand(p) ?? 'Unknown'}, Product: ${p.name}, Type: ${typeText}`,
-      ];
-      if (includePrice) {
-        parts.push(`  Price: €${Number(p.price).toFixed(2)}`);
-      }
-      if (includeDiscount || includePrice) {
-        const discounted = p.discounted_price;
-        if (discounted !== null && discounted !== undefined) {
-          const discountedNum = Number(discounted);
-          if (Number.isFinite(discountedNum)) {
-            parts.push(
-              `  Discounted price (maximum offer when customer asks for a discount): €${discountedNum.toFixed(2)}`,
-            );
-          }
-        } else if (includeDiscount) {
-          parts.push('  Discounted price: not configured (no discount available)');
-        }
-      }
-      if (p.description) parts.push(`  ${p.description}`);
-      if (p.usage_description) {
-        parts.push('  Usage description:');
-        parts.push(`  ${p.usage_description}`);
-      }
-      if (p.category) parts.push(`  Category: ${p.category}`);
-      if (p.tags.length > 0) parts.push(`  Tags: ${p.tags.join(', ')}`);
-      parts.push(
-        `  Stock status (agent-only; do not mention unless the customer asks about availability/stock): ${p.in_stock === false ? 'out of stock' : 'in stock'}`,
-      );
-      return parts.join('\n');
-    })
-    .join('\n');
 }
 
 function formatQAPairs(pairs: { question: string; answer: string }[]): string {
@@ -1857,13 +1819,22 @@ async function isConversationEnding(
   }
 }
 
+export type GenerateReplyOptions = {
+  /**
+   * Override usage intent for catalog formatting (tests or callers that already classified).
+   * When omitted, `generateReply` calls `classifyUsageQuestionIntent` after discount pre-checks.
+   */
+  usageQuestionIntent?: boolean;
+};
+
 export async function generateReply(
   conversationId: string,
   tenantId: string,
   inboundMessage: string,
   attachmentUrlsRaw: unknown = [],
   productCatalogContext?: string,
-): Promise<{ reply: string; productCatalogContext: string }> {
+  replyOptions?: GenerateReplyOptions,
+): Promise<{ reply: string; productCatalogContext: string; usageQuestionIntent: boolean }> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
@@ -1909,8 +1880,14 @@ export async function generateReply(
         typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
           ? productCatalogContext
           : '',
+      usageQuestionIntent: false,
     };
   }
+
+  const usageQuestionIntentResolved =
+    replyOptions?.usageQuestionIntent !== undefined
+      ? replyOptions.usageQuestionIntent
+      : await classifyUsageQuestionIntent(inboundMessage);
 
   let products: Product[] = [];
   let usedFullCatalogFallback = false;
@@ -2003,6 +1980,7 @@ export async function generateReply(
       : formatProductCatalog(products, {
           includePrice: customerAskedPrice || customerAskedDiscount,
           includeDiscount: customerAskedDiscount,
+          includeFullUsage: usageQuestionIntentResolved,
         });
 
   const primaryFocusedProduct = products[0];
@@ -2043,6 +2021,7 @@ export async function generateReply(
     return {
       reply: OUT_OF_STOCK_PRODUCT_REPLY,
       productCatalogContext: resolvedProductCatalogContext,
+      usageQuestionIntent: usageQuestionIntentResolved,
     };
   }
 
@@ -2129,7 +2108,11 @@ export async function generateReply(
     const explicitClosingReplies = new Set([noThanksClosing, greetingClosing]);
 
     if (previousAssistantText && explicitClosingReplies.has(previousAssistantText)) {
-      return { reply: '[NO_REPLY]', productCatalogContext: resolvedProductCatalogContext };
+      return {
+        reply: '[NO_REPLY]',
+        productCatalogContext: resolvedProductCatalogContext,
+        usageQuestionIntent: usageQuestionIntentResolved,
+      };
     }
 
     const closingAppend = CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE.replace(
@@ -2171,5 +2154,6 @@ export async function generateReply(
   return {
     reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
     productCatalogContext: resolvedProductCatalogContext,
+    usageQuestionIntent: usageQuestionIntentResolved,
   };
 }

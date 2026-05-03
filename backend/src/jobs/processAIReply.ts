@@ -32,7 +32,6 @@ import {
   classifyOrderClosingQuestionReplyIntent,
   classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
-  classifyUsageQuestionIntent,
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
   detectPostPurchaseSupportIntent,
@@ -1161,7 +1160,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const { reply: replyText, productCatalogContext } = await generateReply(
+  const { reply: replyText, productCatalogContext, usageQuestionIntent } = await generateReply(
     conversationId,
     tenantId,
     inboundText,
@@ -1183,9 +1182,6 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   const usedVerbatimUsageDescription = usageDescription
     ? normalizeVerbatimComparison(replyText) === normalizeVerbatimComparison(usageDescription)
-    : false;
-  const usageQuestionIntent = inboundText
-    ? await classifyUsageQuestionIntent(inboundText)
     : false;
   const usageRelated =
     Boolean(usageDescription) && (usageQuestionIntent || usedVerbatimUsageDescription);
