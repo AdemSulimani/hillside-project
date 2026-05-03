@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 
 const EFFECTIVE_DATE = 'April 14, 2026';
-const LAST_UPDATED = 'April 21, 2026';
+const LAST_UPDATED = 'May 3, 2026';
 
 export default function PrivacyPolicyPage() {
   return (
@@ -251,6 +251,11 @@ export default function PrivacyPolicyPage() {
             detecting purchase intent, supporting order workflows, and conducting quality checks&mdash;all on behalf of the
             relevant business customer. AI providers are bound by written agreements that restrict their use of the
             data to providing services on Hillside&apos;s behalf.
+          </p>
+          <p>
+            Hillside does not use Meta Platform Data to train general-purpose or unrelated machine learning models; Meta
+            Platform Data is processed only to provide the platform services described in this Policy and for
+            improvements permitted under Meta Platform Terms and our agreements with subprocessors.
           </p>
         </section>
 

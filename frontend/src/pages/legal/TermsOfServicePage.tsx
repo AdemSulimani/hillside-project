@@ -1,5 +1,5 @@
 const TERMS_TEXT = `TERMS OF SERVICE
-Effective Date: April 14, 2026  •  Last Updated: April 21, 2026
+Effective Date: April 14, 2026  •  Last Updated: May 3, 2026
 
 These Terms of Service ("Terms") constitute a legally binding agreement between Hillside L.L.C. ("Hillside", "Company", "we", "us", or "our"), a limited liability company registered in Kosovo, and the business entity or individual ("Customer", "you", or "your") that creates an account or accesses the Hillside platform. By registering an account, clicking "I agree", or otherwise accessing or using the platform, you represent that you have read, understood, and agree to be bound by these Terms. If you do not agree to these Terms, you must not access or use the platform.
 
@@ -64,6 +64,7 @@ Meta Platform Data obtained through the Platform may only be used for the specif
 you must not use Meta Platform Data for purposes unrelated to the user interaction through which it was collected, including but not limited to: advertising unrelated to the originating interaction, cross-business profiling, surveillance, credit scoring, or resale to any third party;
 you must not combine Meta Platform Data with data from other sources to build independent user profiles or for purposes inconsistent with Meta Platform Terms; and
 any automated messaging through Meta channels must be user-initiated or explicitly configured and authorized by you as the business operator, and must not constitute autonomous outbound spam or unsolicited bulk communications.
+Hillside does not use Meta Platform Data to train general-purpose or unrelated machine learning models; Hillside processes Meta Platform Data only to provide the Platform and for improvements permitted under Meta Policies and Hillside's agreements with subprocessors, as further described in the Privacy Policy.
 Note: Hillside acts solely as a data processor with respect to Meta Platform Data and processes such data exclusively on your behalf and under your instructions. See Section 7 for full data processing terms.
 
 4.4 API Changes and Service Continuity
