@@ -1,5 +1,6 @@
 import { Worker } from 'bullmq';
-import { redisConnection } from './redisConnection';
+import type { WorkerOptions } from 'bullmq';
+import { createWorkerRedisConnection } from './queue';
 import type { InboundWebhookJobData } from './jobTypes';
 import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
@@ -10,12 +11,27 @@ import { checkFinetuningStatus, startFinetuningJob } from './checkFinetuningStat
 import { processNotificationJob } from './processNotificationJob';
 import { attachWorkerFailureHandler } from './failureHandler';
 
+/** Shared BullMQ worker tuning to reduce idle / polling Redis traffic. */
+const redisOptimizedWorkerOptions: Pick<
+  WorkerOptions,
+  'stalledInterval' | 'maxStalledCount' | 'drainDelay' | 'lockDuration' | 'lockRenewTime' | 'settings'
+> = {
+  stalledInterval: 60_000,
+  maxStalledCount: 2,
+  drainDelay: 10,
+  lockDuration: 30_000,
+  lockRenewTime: 15_000,
+  settings: {
+    backoffStrategy: (attemptsMade) => Math.min(attemptsMade * 1000, 30_000),
+  },
+};
+
 export const webhookWorker = new Worker<InboundWebhookJobData>(
   'webhook',
   async (job) => {
     await processInboundMessage(job.data);
   },
-  { connection: redisConnection, concurrency: 10 },
+  { connection: createWorkerRedisConnection(), concurrency: 10, ...redisOptimizedWorkerOptions },
 );
 
 export const aiWorker = new Worker<AIReplyJobData>(
@@ -24,9 +40,9 @@ export const aiWorker = new Worker<AIReplyJobData>(
     await processAIReply(job.data);
   },
   {
-    connection: redisConnection,
+    connection: createWorkerRedisConnection(),
     concurrency: 5,
-    lockDuration: 60_000,
+    ...redisOptimizedWorkerOptions,
   },
 );
 
@@ -35,7 +51,7 @@ export const notificationsWorker = new Worker(
   async (job) => {
     await processNotificationJob(job);
   },
-  { connection: redisConnection, concurrency: 3 },
+  { connection: createWorkerRedisConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
 );
 
 export const finetuningWorker = new Worker(
@@ -55,7 +71,13 @@ export const finetuningWorker = new Worker(
     }
     console.warn('[jobs] finetuning queue: unknown job name', { name: job.name, id: job.id });
   },
-  { connection: redisConnection, concurrency: 1, lockDuration: 300_000 },
+  {
+    connection: createWorkerRedisConnection(),
+    concurrency: 1,
+    ...redisOptimizedWorkerOptions,
+    stalledInterval: 300_000,
+    lockDuration: 300_000,
+  },
 );
 
 export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
@@ -67,7 +89,7 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
     }
     await processGenerateProductEmbedding(job.data);
   },
-  { connection: redisConnection, concurrency: 3 },
+  { connection: createWorkerRedisConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
 );
 
 attachWorkerFailureHandler(webhookWorker, { queueName: 'webhook' });
