@@ -21,8 +21,6 @@ function extractHandshakeToken(auth: unknown): string | null {
 }
 
 export function initSocketServer(httpServer: HttpServer): void {
-  // Default in-memory adapter only — @socket.io/redis-adapter is not used (not in deps).
-  // Use a Redis pub/sub adapter when you run multiple Node processes behind a load balancer.
   io = new Server(httpServer, {
     cors: {
       origin: frontendOrigin,

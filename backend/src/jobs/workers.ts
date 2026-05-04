@@ -1,6 +1,6 @@
 import { Worker } from 'bullmq';
 import type { WorkerOptions } from 'bullmq';
-import { createWorkerRedisConnection } from './queue';
+import { redisConnection } from './redisConnection';
 import type { InboundWebhookJobData } from './jobTypes';
 import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
@@ -31,7 +31,7 @@ export const webhookWorker = new Worker<InboundWebhookJobData>(
   async (job) => {
     await processInboundMessage(job.data);
   },
-  { connection: createWorkerRedisConnection(), concurrency: 10, ...redisOptimizedWorkerOptions },
+  { connection: redisConnection, concurrency: 10, ...redisOptimizedWorkerOptions },
 );
 
 export const aiWorker = new Worker<AIReplyJobData>(
@@ -40,7 +40,7 @@ export const aiWorker = new Worker<AIReplyJobData>(
     await processAIReply(job.data);
   },
   {
-    connection: createWorkerRedisConnection(),
+    connection: redisConnection,
     concurrency: 5,
     ...redisOptimizedWorkerOptions,
   },
@@ -51,7 +51,7 @@ export const notificationsWorker = new Worker(
   async (job) => {
     await processNotificationJob(job);
   },
-  { connection: createWorkerRedisConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
+  { connection: redisConnection, concurrency: 3, ...redisOptimizedWorkerOptions },
 );
 
 export const finetuningWorker = new Worker(
@@ -72,7 +72,7 @@ export const finetuningWorker = new Worker(
     console.warn('[jobs] finetuning queue: unknown job name', { name: job.name, id: job.id });
   },
   {
-    connection: createWorkerRedisConnection(),
+    connection: redisConnection,
     concurrency: 1,
     ...redisOptimizedWorkerOptions,
     stalledInterval: 300_000,
@@ -89,7 +89,7 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
     }
     await processGenerateProductEmbedding(job.data);
   },
-  { connection: createWorkerRedisConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
+  { connection: redisConnection, concurrency: 3, ...redisOptimizedWorkerOptions },
 );
 
 attachWorkerFailureHandler(webhookWorker, { queueName: 'webhook' });

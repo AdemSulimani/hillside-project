@@ -1,5 +1,6 @@
-/**
- * Shared non-blocking Redis for BullMQ Queues, cache, and rate limiting.
- * Workers use {@link createWorkerRedisConnection} from `./queue`.
- */
-export { sharedConnection as redisConnection, createWorkerRedisConnection } from './queue';
+import IORedis from 'ioredis';
+
+/** Shared Redis connection for BullMQ queues, workers, and outbound rate limiting. */
+export const redisConnection = new IORedis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', {
+  maxRetriesPerRequest: null,
+});

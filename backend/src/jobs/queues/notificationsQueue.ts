@@ -1,16 +1,15 @@
 import { Queue } from 'bullmq';
-import { sharedConnection } from '../queue';
-import { queueDefaultJobRetention, queueStreamsRedisOpts } from './queueRedisDefaults';
+import { redisConnection } from '../redisConnection';
 
 export type NotificationJobData = Record<string, unknown>;
 
 /** Email / push / internal notifications (reserved for future jobs). */
 export const notificationsQueue = new Queue<NotificationJobData>('notifications', {
-  connection: sharedConnection,
-  ...queueStreamsRedisOpts,
+  connection: redisConnection,
   defaultJobOptions: {
     attempts: 5,
     backoff: { type: 'exponential', delay: 2000 },
-    ...queueDefaultJobRetention,
+    removeOnComplete: 200,
+    removeOnFail: 200,
   },
 });

@@ -97,10 +97,6 @@ const DEFAULT_AI_CONFIG: Pick<
   custom_model_id: null,
 };
 
-/** Redis TTLs for AI hot path. Keys are cleared on config / business updates; longer TTLs mainly cut repeat DB reads. */
-const AI_CONFIG_CACHE_TTL_SEC = 900; // 15 min
-const TENANT_CACHE_TTL_SEC = 1800; // 30 min
-
 async function loadAIConfig(tenantId: string) {
   const cacheKey = `ai_config:${tenantId}`;
   const cached = await redisConnection.get(cacheKey);
@@ -114,7 +110,7 @@ async function loadAIConfig(tenantId: string) {
 
   const config = await findAIConfigByTenant(tenantId);
   const resolved = config ?? DEFAULT_AI_CONFIG;
-  await redisConnection.set(cacheKey, JSON.stringify(resolved), 'EX', AI_CONFIG_CACHE_TTL_SEC);
+  await redisConnection.set(cacheKey, JSON.stringify(resolved), 'EX', 300);
   return resolved;
 }
 
@@ -131,7 +127,7 @@ async function loadTenant(tenantId: string) {
 
   const tenant = await findTenantById(tenantId);
   if (tenant) {
-    await redisConnection.set(cacheKey, JSON.stringify(tenant), 'EX', TENANT_CACHE_TTL_SEC);
+    await redisConnection.set(cacheKey, JSON.stringify(tenant), 'EX', 300);
   }
   return tenant;
 }
