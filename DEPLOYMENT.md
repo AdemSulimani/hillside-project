@@ -40,8 +40,9 @@ Use this list before and after shipping Hillside CRM to production. Adjust hostn
 
 1. Deploy the **backend** process (or container) with `NODE_ENV=production`.
 2. Deploy **BullMQ workers** if they run as a separate process in your setup (this repo starts workers from `server.ts` in the same Node process).
-3. Deploy the **frontend** static build behind **CDN or Nginx** with SPA fallback (`try_files … /index.html`).
-4. Configure **health checks** (e.g. HTTP `GET /api/health` and `npm run healthcheck` in CI for DB/Redis/OpenAI smoke tests).
+3. **Socket.IO horizontal scaling** — Realtime broadcasts use the **Redis adapter** (`REDIS_URL`). Every API replica must share the **same** Redis so inbox, orders, and AI alerts propagate across instances. Without that, users only see updates handled by the same replica they are connected to (often fixed by a full page refresh that refetches from the API).
+4. Deploy the **frontend** static build behind **CDN or Nginx** with SPA fallback (`try_files … /index.html`).
+5. Configure **health checks** (e.g. HTTP `GET /api/health` and `npm run healthcheck` in CI for DB/Redis/OpenAI smoke tests).
 
 ## Webhooks and Meta
 

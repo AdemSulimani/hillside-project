@@ -1,5 +1,7 @@
 import type { Server as HttpServer } from 'http';
 import { Server } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
+import IORedis from 'ioredis';
 import { verifyAccessToken } from '../services/tokenService';
 import { socketService } from '../services/socketService';
 
@@ -21,6 +23,10 @@ function extractHandshakeToken(auth: unknown): string | null {
 }
 
 export function initSocketServer(httpServer: HttpServer): void {
+  const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+  const pubClient = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+  const subClient = pubClient.duplicate();
+
   io = new Server(httpServer, {
     cors: {
       origin: frontendOrigin,
@@ -29,6 +35,7 @@ export function initSocketServer(httpServer: HttpServer): void {
     },
   });
 
+  io.adapter(createAdapter(pubClient, subClient));
   socketService.attach(io);
 
   io.use((socket, next) => {
