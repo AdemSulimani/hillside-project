@@ -1,14 +1,15 @@
 import { Queue } from 'bullmq';
-import { redisConnection } from '../redisConnection';
+import { sharedConnection } from '../queue';
 import type { GenerateProductEmbeddingJobData } from '../generateProductEmbedding';
+import { queueDefaultJobRetention, queueStreamsRedisOpts } from './queueRedisDefaults';
 
 /** General background work (e.g. product embeddings). */
 export const defaultQueue = new Queue<GenerateProductEmbeddingJobData>('default', {
-  connection: redisConnection,
+  connection: sharedConnection,
+  ...queueStreamsRedisOpts,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 200,
+    ...queueDefaultJobRetention,
   },
 });
