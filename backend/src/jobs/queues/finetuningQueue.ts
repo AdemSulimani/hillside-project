@@ -1,12 +1,13 @@
 import { Queue } from 'bullmq';
-import { redisConnection } from '../redisConnection';
+import { sharedQueueConnection } from '../queue';
+import { redisOptimizedQueueBase } from './redisOptimizedQueueBase';
 
 /** Nightly fine-tuning dataset preparation and polling jobs. */
 export const finetuningQueue = new Queue<Record<string, unknown>, unknown, string>('finetuning', {
-  connection: redisConnection,
+  connection: sharedQueueConnection,
+  ...redisOptimizedQueueBase,
   defaultJobOptions: {
+    ...redisOptimizedQueueBase.defaultJobOptions,
     attempts: 1,
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
   },
 });

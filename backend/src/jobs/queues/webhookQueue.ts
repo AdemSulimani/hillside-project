@@ -1,14 +1,15 @@
 import { Queue } from 'bullmq';
-import { redisConnection } from '../redisConnection';
+import { sharedQueueConnection } from '../queue';
 import type { InboundWebhookJobData } from '../jobTypes';
+import { redisOptimizedQueueBase } from './redisOptimizedQueueBase';
 
 /** Inbound Meta / channel webhooks — fast, bounded retries. */
 export const webhookQueue = new Queue<InboundWebhookJobData>('webhook', {
-  connection: redisConnection,
+  connection: sharedQueueConnection,
+  ...redisOptimizedQueueBase,
   defaultJobOptions: {
+    ...redisOptimizedQueueBase.defaultJobOptions,
     attempts: 3,
     backoff: { type: 'fixed', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 500,
   },
 });

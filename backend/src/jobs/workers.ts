@@ -1,6 +1,8 @@
+import IORedis from 'ioredis';
 import { Worker } from 'bullmq';
 import type { WorkerOptions } from 'bullmq';
-import { redisConnection } from './redisConnection';
+import { bullMqRedisConnectionOptions } from '../redisClientDefaults';
+import { redisUrl } from './redisConnection';
 import type { InboundWebhookJobData } from './jobTypes';
 import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
@@ -26,12 +28,16 @@ const redisOptimizedWorkerOptions: Pick<
   },
 };
 
+function createWorkerConnection(): IORedis {
+  return new IORedis(redisUrl, bullMqRedisConnectionOptions);
+}
+
 export const webhookWorker = new Worker<InboundWebhookJobData>(
   'webhook',
   async (job) => {
     await processInboundMessage(job.data);
   },
-  { connection: redisConnection, concurrency: 10, ...redisOptimizedWorkerOptions },
+  { connection: createWorkerConnection(), concurrency: 10, ...redisOptimizedWorkerOptions },
 );
 
 export const aiWorker = new Worker<AIReplyJobData>(
@@ -40,7 +46,7 @@ export const aiWorker = new Worker<AIReplyJobData>(
     await processAIReply(job.data);
   },
   {
-    connection: redisConnection,
+    connection: createWorkerConnection(),
     concurrency: 5,
     ...redisOptimizedWorkerOptions,
   },
@@ -51,7 +57,7 @@ export const notificationsWorker = new Worker(
   async (job) => {
     await processNotificationJob(job);
   },
-  { connection: redisConnection, concurrency: 3, ...redisOptimizedWorkerOptions },
+  { connection: createWorkerConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
 );
 
 export const finetuningWorker = new Worker(
@@ -72,7 +78,7 @@ export const finetuningWorker = new Worker(
     console.warn('[jobs] finetuning queue: unknown job name', { name: job.name, id: job.id });
   },
   {
-    connection: redisConnection,
+    connection: createWorkerConnection(),
     concurrency: 1,
     ...redisOptimizedWorkerOptions,
     stalledInterval: 300_000,
@@ -89,7 +95,7 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
     }
     await processGenerateProductEmbedding(job.data);
   },
-  { connection: redisConnection, concurrency: 3, ...redisOptimizedWorkerOptions },
+  { connection: createWorkerConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
 );
 
 attachWorkerFailureHandler(webhookWorker, { queueName: 'webhook' });
