@@ -36,10 +36,12 @@ import {
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
   detectPostPurchaseSupportIntent,
+  detectReplyLanguage,
   findProductsForInboundMessage,
   generateReply,
   isOutOfStockProductReply,
   isUsageQuestionUnanswered,
+  type ReplyLocale,
 } from '../services/aiService';
 import {
   evaluateReply,
@@ -277,6 +279,7 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
   const exactCandidates = [
     'pershendetje, se shpejti do t\'ju kontaktoje nje specialist lidhur me kete ceshtje.',
     'pershendetje, se shpejti do tju kontaktoje nje specialist lidhur me kete ceshtje.',
+    normalizeEscalationMessage(HOLDING_MESSAGES.en.usageEscalation),
   ];
   if (exactCandidates.some((candidate) => normalized === normalizeEscalationMessage(candidate))) {
     return true;
@@ -288,17 +291,29 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
     (normalized.includes('se shpejti') || normalized.includes('shpejt')) &&
     normalized.includes('ceshtje');
 
-  return looksLikeAlbanianEscalation;
+  const looksLikeEnglishEscalation =
+    normalized.includes('specialist') &&
+    normalized.includes('contact') &&
+    (normalized.includes('shortly') || normalized.includes('soon')) &&
+    (normalized.includes('matter') || normalized.includes('issue') || normalized.includes('regarding'));
+
+  return looksLikeAlbanianEscalation || looksLikeEnglishEscalation;
 }
 
-const HOLDING_MESSAGES = {
+const HOLDING_MESSAGES: Record<ReplyLocale, { postPurchaseSupport: string; usageEscalation: string }> = {
   sq: {
     postPurchaseSupport:
       'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet.',
     usageEscalation:
       'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
   },
-} as const;
+  en: {
+    postPurchaseSupport:
+      'Hello, we are sorry for the issue. A member of our team will get back to you shortly.',
+    usageEscalation:
+      'Hello, a specialist from our team will contact you shortly regarding this matter.',
+  },
+};
 
 const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
   '24h': 24,
@@ -306,16 +321,18 @@ const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
   '72h': 72,
 };
 
-function buildDeliveryEtaReply(deliveryTime: DeliveryTime): string {
+function buildDeliveryEtaReply(deliveryTime: DeliveryTime, locale: ReplyLocale): string {
   const hours = DELIVERY_TIME_LABEL_HOURS[deliveryTime];
-  return `Përshëndetje, porosia juaj do të mbërrijë brenda ${hours} orëve.`;
+  return locale === 'sq'
+    ? `Përshëndetje, porosia juaj do të mbërrijë brenda ${hours} orëve.`
+    : `Hello, your order will arrive within ${hours} hours.`;
 }
 
-type HoldingMessageLocale = keyof typeof HOLDING_MESSAGES;
-const ORDER_CONFIRMATION_FOLLOW_UP =
-  {
-    sq: 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.',
-  } as const;
+type HoldingMessageLocale = ReplyLocale;
+const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
+  sq: 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.',
+  en: 'If you have any other questions or would like to place another order, I am here to help.',
+};
 
 function normalizeForIncludesCheck(value: string): string {
   return value
@@ -334,9 +351,14 @@ function normalizeForIncludesCheck(value: string): string {
 }
 
 /** CRM-configured ETA line for order-confirmation replies (before the standard follow-up). */
-function buildOrderConfirmationDeliveryLine(deliveryTime: DeliveryTime): string {
+function buildOrderConfirmationDeliveryLine(
+  deliveryTime: DeliveryTime,
+  locale: ReplyLocale,
+): string {
   const hours = DELIVERY_TIME_LABEL_HOURS[deliveryTime];
-  return `Produkti do të mbërrijë brenda ${hours} orëve.`;
+  return locale === 'sq'
+    ? `Produkti do të mbërrijë brenda ${hours} orëve.`
+    : `Your product will arrive within ${hours} hours.`;
 }
 
 function insertDeliveryLineBeforeOrderFollowUp(
@@ -576,45 +598,82 @@ function stripGenericFollowUpInvitation(
   return reply;
 }
 
-function inferHoldingMessageLocale(text: string): HoldingMessageLocale {
-  // Shqip-only mode.
+/**
+ * Falls back to a quick heuristic on the inbound text when no precomputed locale is available.
+ * The full LLM detector lives in `aiService.detectReplyLanguage` and is used everywhere we have
+ * conversation context (i.e. inside `generateReply`); the caller in this file passes that locale
+ * along through `precomputed`. We keep this synchronous fallback for the very narrow case where
+ * we only have raw inbound text and no async budget.
+ */
+function inferHoldingMessageLocale(
+  text: string,
+  precomputed?: ReplyLocale,
+): HoldingMessageLocale {
+  if (precomputed) return precomputed;
+  const sample = (text ?? '').trim();
+  if (!sample) return 'sq';
+
+  if (/[ËëÇç]/.test(sample)) return 'sq';
+
+  const normalized = sample
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const albanianMarkers = [
+    'pershendetje', 'mirdita', 'naten e mire', 'faleminderit', 'flm', 'fln',
+    'porosi', 'porosit', 'porosis', 'cmim', 'qmim', 'stok', 'produkt', 'produkti',
+    'doni', 'deshironi', 'mund', 'kemi', 'kam', 'keni', 'jam', 'jeni', 'nuk',
+    'gjendet', 'derges', 'adres', 'ju lutem', 'kalofshi', 'kalofsh',
+  ];
+  const englishMarkers = [
+    'hello', 'hi there', 'hey', 'thanks', 'thank you', 'please', 'sorry',
+    'how much', 'do you have', 'is this', 'are you', 'available', 'in stock',
+    'shipping', 'delivery', 'address', 'order', 'product', 'price', 'discount',
+  ];
+
+  const albanianHits = albanianMarkers.filter((needle) => normalized.includes(needle)).length;
+  const englishHits = englishMarkers.filter((needle) => normalized.includes(needle)).length;
+  if (albanianHits >= 1 && albanianHits >= englishHits) return 'sq';
+  if (englishHits >= 1 && englishHits > albanianHits) return 'en';
   return 'sq';
 }
 
-function stripExactSentenceLine(text: string, sentence: string): string {
-  const target = normalizeForIncludesCheck(sentence);
-  const cleaned = text
-    .split(/\r?\n/)
-    .filter((line) => normalizeForIncludesCheck(line.replace(/^[-*]\s*/, '')) !== target)
-    .join('\n');
-  return cleaned.replace(/\n{3,}/g, '\n\n').trim();
-}
+/** Per-locale fixed phrases the AI must never echo in the OPPOSITE locale. */
+const FIXED_PHRASES_BY_LOCALE: Record<ReplyLocale, readonly string[]> = {
+  sq: [
+    HOLDING_MESSAGES.sq.postPurchaseSupport,
+    HOLDING_MESSAGES.sq.usageEscalation,
+    ORDER_CONFIRMATION_FOLLOW_UP.sq,
+  ],
+  en: [
+    HOLDING_MESSAGES.en.postPurchaseSupport,
+    HOLDING_MESSAGES.en.usageEscalation,
+    ORDER_CONFIRMATION_FOLLOW_UP.en,
+    // Legacy English variants previously authored by the model — kept so we still strip them
+    // when running in Albanian mode and the model accidentally falls back to old wording.
+    "Hello, we're sorry for the issue. A member of our team will reply to you shortly.",
+    'Hello, a specialist from our team will contact you shortly regarding this issue.',
+  ],
+};
 
-function enforceSingleLanguageSystemPhrases(
-  text: string,
-  _locale: HoldingMessageLocale,
-): string {
-  return text;
-}
+/**
+ * When the AI accidentally leaks a fixed sentence in the WRONG language, drop those lines so the
+ * downstream `ensureOrderConfirmationDeliveryAndFollowUp` step can append the correct one.
+ */
+function stripFixedPhrasesOfOtherLocale(text: string, locale: ReplyLocale): string {
+  const otherLocale: ReplyLocale = locale === 'sq' ? 'en' : 'sq';
+  const phrasesToStrip = FIXED_PHRASES_BY_LOCALE[otherLocale];
+  if (phrasesToStrip.length === 0) return text;
 
-const KNOWN_ENGLISH_REPLY_LINES = [
-  'If you have any other questions or would like to place another order, I am here to help.',
-  "Hello, we're sorry for the issue. A member of our team will reply to you shortly.",
-  'Hello, a specialist from our team will contact you shortly regarding this issue.',
-] as const;
-
-const KNOWN_ENGLISH_REPLY_LINES_NORMALIZED = new Set(
-  KNOWN_ENGLISH_REPLY_LINES.map((line) => normalizeForIncludesCheck(line)),
-);
-
-function stripKnownEnglishPhrases(text: string): string {
+  const phraseSet = new Set(phrasesToStrip.map((p) => normalizeForIncludesCheck(p)));
   const cleanedLines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => {
       if (!line) return true;
       const normalizedLine = normalizeForIncludesCheck(line.replace(/^[-*]\s*/, ''));
-      return !KNOWN_ENGLISH_REPLY_LINES_NORMALIZED.has(normalizedLine);
+      return !phraseSet.has(normalizedLine);
     });
 
   return cleanedLines
@@ -812,6 +871,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
+  // Detect the conversation's reply language ONCE here and thread it through every canned-reply
+  // path (cancellation/refund ack, post-purchase support, delivery ETA, AI generation,
+  // post-processing strip helpers, and order-confirmation follow-up). This guarantees the entire
+  // reply — including system-inserted lines — is in the same language as the customer's message.
+  const replyLanguage = await detectReplyLanguage(inboundText, recentMessages);
+  console.info(
+    `[REPLY_LANGUAGE] tenantId: ${tenantId} conversationId: ${conversationId} language: ${replyLanguage}`,
+  );
+
   if (inboundText) {
     try {
       const cancellationRefundIntent = await detectCancellationOrRefundIntent(
@@ -831,8 +899,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           conversation.contact_id,
         );
 
-        // Fixed copy (not model-generated): same line as post-purchase holding message.
-        const ackText = HOLDING_MESSAGES.sq.postPurchaseSupport;
+        // Fixed copy (not model-generated): same line as post-purchase holding message,
+        // localized to the customer's current language.
+        const ackText = HOLDING_MESSAGES[replyLanguage].postPurchaseSupport;
 
         const contactForSend = await findContactById(conversation.contact_id);
         let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
@@ -997,7 +1066,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         const tenantForDelivery = await findTenantById(tenantId);
         const configuredDeliveryTime = tenantForDelivery?.delivery_time ?? null;
         if (configuredDeliveryTime) {
-          const deliveryEtaReply = buildDeliveryEtaReply(configuredDeliveryTime);
+          const deliveryEtaReply = buildDeliveryEtaReply(configuredDeliveryTime, replyLanguage);
           const etaPrecheck = await shouldStillSendAutomatedReply({
             tenantId,
             channelId,
@@ -1078,7 +1147,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           return;
         }
 
-        const locale = inferHoldingMessageLocale(inboundText);
+        const locale = inferHoldingMessageLocale(inboundText, replyLanguage);
         const postPurchaseHoldingMessage = HOLDING_MESSAGES[locale].postPurchaseSupport;
         const client = await pool.connect();
         let alert: AIAlert | undefined;
@@ -1161,16 +1230,21 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const { reply: replyText, productCatalogContext } = await generateReply(
-    conversationId,
-    tenantId,
-    inboundText,
-    attachmentUrls,
-  );
+  const { reply: replyText, productCatalogContext, language: generatedLanguage } =
+    await generateReply(
+      conversationId,
+      tenantId,
+      inboundText,
+      attachmentUrls,
+      undefined,
+      replyLanguage,
+    );
 
   if (replyText.trim() === '[NO_REPLY]') {
     return;
   }
+
+  const replyLocale: ReplyLocale = generatedLanguage;
 
   const isOosCannedReply = isOutOfStockProductReply(replyText);
 
@@ -1190,7 +1264,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const usageRelated =
     Boolean(usageDescription) && (usageQuestionIntent || usedVerbatimUsageDescription);
 
-  const usageHoldingMessage = HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText)].usageEscalation;
+  const usageHoldingMessage =
+    HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText, replyLocale)].usageEscalation;
   let finalReplyText = replyText;
   let usageEscalated = false;
   let usageQuestionUnanswered: boolean | null = null;
@@ -1359,11 +1434,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   if (!usageEscalated && inboundText && !isOosCannedReply) {
     isOrderConfirmationReply = await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText);
     if (isOrderConfirmationReply) {
-      const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[inferHoldingMessageLocale(inboundText)];
+      const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[replyLocale];
       const tenantForOrderConfirmation = await findTenantById(tenantId);
       const configuredDeliveryTime = tenantForOrderConfirmation?.delivery_time ?? null;
       const deliveryLine = configuredDeliveryTime
-        ? buildOrderConfirmationDeliveryLine(configuredDeliveryTime)
+        ? buildOrderConfirmationDeliveryLine(configuredDeliveryTime, replyLocale)
         : null;
       finalReplyText = ensureOrderConfirmationDeliveryAndFollowUp(
         finalReplyText,
@@ -1373,7 +1448,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
   if (inboundText) {
-    finalReplyText = stripKnownEnglishPhrases(finalReplyText);
+    // Drop any fixed-phrase the model leaked in the OPPOSITE locale before we add the
+    // canonical follow-up sentence below — this guarantees no language mixing in the reply.
+    finalReplyText = stripFixedPhrasesOfOtherLocale(finalReplyText, replyLocale);
     const orderClosingAlreadyAskedInConversation =
       await hasAssistantAskedOrderClosingInConversation(recentMessages);
     finalReplyText = await stripRepeatedOrderClosingQuestion(
@@ -1393,6 +1470,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const explicitClosingReplies = [
     'Pa problem, kaloni bukur.',
     'Edhe ju gjithashtu, kalofshi bukur.',
+    'No problem, take care.',
+    'You too, have a great day.',
   ];
   const containsNegativeAvailabilityPhrase = await classifyNegativeAvailabilityReply(finalReplyText);
   const hasNoMatchingProducts =
