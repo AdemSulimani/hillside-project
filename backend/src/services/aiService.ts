@@ -17,6 +17,14 @@ const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.7
 /** How many catalog rows we consider for matching + OOS canned detection (needs the named SKU in-list). */
 const FOCUSED_PRODUCT_MATCH_LIMIT = 10;
 
+/**
+ * Reply language. The AI mirrors the customer's language: Albanian (`sq`) or English (`en`).
+ * Default for ambiguous/empty input is `sq` to preserve legacy behaviour.
+ */
+export type ReplyLocale = 'sq' | 'en';
+
+export const DEFAULT_REPLY_LOCALE: ReplyLocale = 'sq';
+
 const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   const raw = process.env.CONTEXT_MAX_HISTORY_TOKENS;
   if (raw === undefined || raw.trim() === '') return 6000;
@@ -662,6 +670,120 @@ export async function customerAskedAboutDiscount(message: string): Promise<boole
   return includesAnyKeyword(inbound, DISCOUNT_REQUEST_KEYWORDS);
 }
 
+/**
+ * Lightweight heuristic backstop for the LLM language classifier. Detects clear Albanian/English
+ * markers; returns null when the message is too ambiguous (very short, emoji-only, digits,
+ * affirmation tokens like "ok"/"po"/"yes" that exist in both languages or in slang).
+ *
+ * Diacritics are NOT required to detect Albanian — typos and Latin-only spellings are normal in
+ * messaging apps, so we lowercase + strip diacritics before matching.
+ */
+function heuristicallyDetectLanguage(text: string): ReplyLocale | null {
+  const raw = text.trim();
+  if (!raw) return null;
+
+  if (/[ËëÇç]/.test(raw)) return 'sq';
+
+  const normalized = raw
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const ALBANIAN_MARKERS = [
+    'pershendetje', 'mirdita', 'naten e mire', 'faleminderit', 'flm', 'fln',
+    'porosi', 'porosit', 'porosis', 'cmim', 'qmim', 'stok', 'produkt', 'produkti',
+    'doni', 'deshironi', 'mund', 'kemi', 'kam', 'keni', 'jam', 'jeni',
+    'nuk', 'pse', 'ku', 'kur', 'sa kushton', 'a keni', 'a kemi', 'me lir',
+    'gjendet', 'derges', 'adres', 'ju lutem', 'mire', 'kalofshi', 'kalofsh',
+    'mund te', 'mundeni', 'jashte stoku',
+  ];
+  const ENGLISH_MARKERS = [
+    'hello', 'hi there', 'hey', 'good morning', 'good afternoon', 'good evening',
+    'thanks', 'thank you', 'please', 'sorry', 'how much', 'do you have',
+    'is this', 'is it', 'are you', 'are these', 'i need', 'i want', 'i would like',
+    'can you', 'could you', 'would you', 'available', 'in stock', 'out of stock',
+    'shipping', 'delivery', 'address', 'order', 'product', 'price', 'cost',
+    'discount', 'cheaper', 'refund', 'cancel',
+  ];
+
+  const albanianHits = ALBANIAN_MARKERS.filter((needle) => normalized.includes(needle)).length;
+  const englishHits = ENGLISH_MARKERS.filter((needle) => normalized.includes(needle)).length;
+
+  if (albanianHits >= 1 && albanianHits > englishHits) return 'sq';
+  if (englishHits >= 1 && englishHits > albanianHits) return 'en';
+  return null;
+}
+
+/**
+ * Detects whether the AI should reply in Albanian (`sq`) or English (`en`).
+ *
+ * The latest customer message drives the decision. For very short or ambiguous messages
+ * ("ok", "po", "yes", emojis, numbers), we feed the recent customer turns to the LLM as
+ * tie-breaking context so the conversation does not flip languages mid-thread. The classifier
+ * is asked to return ONLY `sq` or `en`; we never emit any other locale.
+ */
+export async function detectReplyLanguage(
+  inboundMessage: string,
+  conversationHistory: Message[] = [],
+): Promise<ReplyLocale> {
+  const inbound = inboundMessage.trim();
+
+  const customerHistory = conversationHistory
+    .filter((msg) => msg.sent_by === 'customer')
+    .map((msg) => (msg.content ?? '').trim())
+    .filter((text) => text.length > 0);
+  const recentCustomerTexts = customerHistory.slice(-4);
+  const sampleForHeuristic =
+    inbound || recentCustomerTexts[recentCustomerTexts.length - 1] || '';
+
+  if (!sampleForHeuristic) return DEFAULT_REPLY_LOCALE;
+
+  // Fast path: if the latest message has unambiguous language signals, skip the API call.
+  const heuristicForInbound = heuristicallyDetectLanguage(inbound);
+  if (heuristicForInbound !== null) {
+    return heuristicForInbound;
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict language classifier for an Albanian/English customer-support assistant. Decide whether the LATEST customer message should be answered in Albanian ("sq") or English ("en"). Only those two outputs are allowed. Rules:\n- If the latest message is clearly Albanian (with or without diacritics), return "sq".\n- If the latest message is clearly English, return "en".\n- For very short or ambiguous messages (e.g., "ok", "po", "yes", "no", emojis, numbers, single product names), use the language of the recent prior customer messages. If those are also absent or ambiguous, return "sq".\n- Mixed messages: pick the language of the majority of meaningful words.\nReturn only JSON: {"language":"sq"} or {"language":"en"}.',
+        },
+        {
+          role: 'user',
+          content: `Recent customer messages (oldest to newest):\n${
+            recentCustomerTexts.length > 0
+              ? recentCustomerTexts.map((t, i) => `${i + 1}. ${t}`).join('\n')
+              : '(none)'
+          }\n\nLatest customer message to classify:\n${inbound || '(empty)'}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 32,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { language?: string };
+      if (parsed.language === 'en') return 'en';
+      if (parsed.language === 'sq') return 'sq';
+    }
+  } catch {
+    // Fall through to heuristic over the most recent customer turn(s).
+  }
+
+  for (let i = recentCustomerTexts.length - 1; i >= 0; i -= 1) {
+    const guess = heuristicallyDetectLanguage(recentCustomerTexts[i]);
+    if (guess !== null) return guess;
+  }
+  return DEFAULT_REPLY_LOCALE;
+}
+
 function assistantAlreadyAddressedDiscount(conversationHistory: Message[]): boolean {
   const assistantMessages = conversationHistory.filter((msg) => msg.sent_by !== 'customer');
   if (assistantMessages.length === 0) return false;
@@ -729,12 +851,25 @@ export async function findProductsForInboundMessage(
   return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
 }
 
-/** Exact reply when the customer is asking about one focused catalog match that is out of stock. */
-export const OUT_OF_STOCK_PRODUCT_REPLY =
-  'Përshëndetje, produkti për momentin është jashtë stokut. Nëse jeni të interesuar për ndonjë produkt tjetër, mund te ju ndihmoj.';
+/**
+ * Exact replies (per language) when the customer is asking about one focused catalog match that
+ * is out of stock. The locale is decided by `detectReplyLanguage` upstream.
+ */
+export const OUT_OF_STOCK_PRODUCT_REPLY: Record<ReplyLocale, string> = {
+  sq: 'Përshëndetje, produkti për momentin është jashtë stokut. Nëse jeni të interesuar për ndonjë produkt tjetër, mund te ju ndihmoj.',
+  en: 'Hello, this product is currently out of stock. If you are interested in any other product, I would be happy to help.',
+};
+
+export function getOutOfStockProductReply(locale: ReplyLocale): string {
+  return OUT_OF_STOCK_PRODUCT_REPLY[locale];
+}
 
 export function isOutOfStockProductReply(reply: string): boolean {
-  return reply.trim() === OUT_OF_STOCK_PRODUCT_REPLY;
+  const trimmed = reply.trim();
+  return (
+    trimmed === OUT_OF_STOCK_PRODUCT_REPLY.sq ||
+    trimmed === OUT_OF_STOCK_PRODUCT_REPLY.en
+  );
 }
 
 function looksLikeSimpleGreetingOrClosing(text: string): boolean {
@@ -950,9 +1085,39 @@ function buildSystemPrompt(
   orderClosingAlreadyAskedInConversation: boolean,
   customerAskedDiscount: boolean,
   discountAlreadyAddressedInConversation: boolean,
+  language: ReplyLocale,
   tenantNiche?: string | null,
   tenantDescription?: string | null,
 ): string {
+  const isSq = language === 'sq';
+  const orderClosingExample = isSq ? 'A doni ta porosisni?' : 'Would you like to order it?';
+  const orderClosingFallback = isSq
+    ? 'Produkti është në dispozicion nëse doni ta porosisni'
+    : 'The product is available if you would like to order it';
+  const discountOfferExample = isSq
+    ? 'Mund t\'jua ofrojmë me [discounted_price].'
+    : 'We can offer it for [discounted_price].';
+  const noFurtherDiscountSentence = isSq
+    ? 'Më vjen keq, nuk mund të aplikohet zbritje shtesë. Çmimi që ju ofruam është final.'
+    : 'I am sorry, no additional discount can be applied. The price we offered is final.';
+  const noDiscountAvailableSentence = isSq
+    ? 'Për këtë produkt nuk është e mundur asnjë zbritje, çmimi aktual është final.'
+    : 'No discount is available for this product; the current price is final.';
+  const orderConfirmationFollowUp = isSq
+    ? 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t\u2019ju ndihmuar.'
+    : 'If you have any other questions or would like to place another order, I am here to help.';
+  const postPurchaseIssueSentence = isSq
+    ? 'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t\u2019ju përgjigjet.'
+    : 'Hello, we are sorry for the issue. A member of our team will get back to you shortly.';
+  const languageName = isSq ? 'Albanian (shqip)' : 'English';
+  const otherLanguageName = isSq ? 'English' : 'Albanian';
+  const fixedPhraseLanguageDirective = isSq ? 'In Albanian use exactly' : 'In English use exactly';
+  const orderConfirmationLanguageDirective = isSq
+    ? 'in Albanian only (this is the ONLY follow-up allowed in an order-confirmation reply, and it must appear exactly once)'
+    : 'in English only (this is the ONLY follow-up allowed in an order-confirmation reply, and it must appear exactly once)';
+  const postPurchaseLanguageDirective = isSq
+    ? 'reply with exactly one Albanian sentence and nothing else'
+    : 'reply with exactly one English sentence and nothing else';
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
     `Your tone should be: ${config.tone}.`,
@@ -990,7 +1155,8 @@ function buildSystemPrompt(
   lines.push(
     '',
     'Guidelines:',
-    '- You MUST reply in Albanian only (shqip). Never output English.',
+    `- LANGUAGE LOCK (very important): the customer's current language is ${languageName}. Reply ONLY in ${languageName}. Do NOT include any ${otherLanguageName} words, sentences, or phrases. Never mix the two languages in the same reply — keep the entire message in ${languageName} from greeting to closing.`,
+    `- If a RESTRICTION above, a Q&A pair, or any other instruction is written in ${otherLanguageName} (or specifies a fixed sentence in ${otherLanguageName}), apply the rule's intent in ${languageName}. When the rule pins an exact sentence to send, translate it cleanly into ${languageName} while preserving the meaning, tone, and any product/value placeholders. Never echo a fixed sentence in a language other than ${languageName} in the customer-facing reply.`,
     '- Brevity (very important): default to the shortest reply that fully answers — usually a few clear sentences. Lead with the direct answer; avoid long introductions, filler, repeating the customer\'s whole question, essay-length blocks, and unnecessary bullet lists.',
     '- If a topic truly needs more explanation, stay structured and tight: add only what is necessary, no padding or redundancy — it should still feel easy to skim in a chat thread.',
     '- Tone stays warm and conversational, but this is a messaging app, not email — scannable beats wordy.',
@@ -1010,10 +1176,10 @@ function buildSystemPrompt(
       : '- Do not mention any product price unless the customer explicitly asks for the price/cost in their message.',
     '- Discount handling rules:',
     '  1) If the customer asks for a discount/lower price/promotion/offer, look up the matched product in the catalog above and check the "Discounted price" line.',
-    '  2) If a "Discounted price" value is configured for that product, offer it explicitly using the EXACT amount from the catalog. In Albanian, reply with one short sentence such as: "Mund t\'jua ofrojmë me [discounted_price].". Do not invent or round the value.',
+    `  2) If a "Discounted price" value is configured for that product, offer it explicitly using the EXACT amount from the catalog. Reply with one short sentence such as: "${discountOfferExample}". Do not invent or round the value.`,
     '  3) The configured "Discounted price" is the MAXIMUM available discount. Never propose a value lower than the catalog discounted price, and never offer multiple progressively smaller prices.',
-    '  4) If the customer keeps insisting on a further/extra discount AFTER you have already offered the catalog discounted price (or after a previous assistant message in this conversation has already addressed the discount), reply that no additional discount can be applied. In Albanian use exactly: "Më vjen keq, nuk mund të aplikohet zbritje shtesë. Çmimi që ju ofruam është final."',
-    '  5) If the matched product has NO discounted price configured (the catalog shows "Discounted price: not configured" or no Discounted price line), inform the customer that no discount is available and that the current price is final. In Albanian use exactly: "Për këtë produkt nuk është e mundur asnjë zbritje, çmimi aktual është final." (you may include the regular catalog price if helpful).',
+    `  4) If the customer keeps insisting on a further/extra discount AFTER you have already offered the catalog discounted price (or after a previous assistant message in this conversation has already addressed the discount), reply that no additional discount can be applied. ${fixedPhraseLanguageDirective}: "${noFurtherDiscountSentence}"`,
+    `  5) If the matched product has NO discounted price configured (the catalog shows "Discounted price: not configured" or no Discounted price line), inform the customer that no discount is available and that the current price is final. ${fixedPhraseLanguageDirective}: "${noDiscountAvailableSentence}" (you may include the regular catalog price if helpful).`,
     '  6) Never reveal a discounted price unless the customer is asking for a discount. Do not volunteer discount info in normal product replies.',
     '  7) Never invent, estimate, or negotiate a discount value that is not explicitly listed as "Discounted price" in the catalog above.',
     customerAskedDiscount
@@ -1026,7 +1192,7 @@ function buildSystemPrompt(
     '- Treat "Stock status" in the catalog as internal information. Mention availability only when the customer explicitly asks about stock/availability in their current message.',
     '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
     '- STRICT FOLLOW-UP / CLOSING POLICY (very important): only include a follow-up question, invitation, or closing prompt in EXACTLY two cases:',
-    '  (a) The very first product-related reply in this conversation (only when an order-closing question has not yet been asked in this conversation) may end with exactly ONE short order-oriented follow-up question — e.g., "A doni ta porosisni?".',
+    `  (a) The very first product-related reply in this conversation (only when an order-closing question has not yet been asked in this conversation) may end with exactly ONE short order-oriented follow-up question — e.g., "${orderClosingExample}".`,
     '  (b) When you are confirming that an order has been placed/confirmed, end with the exact order-confirmation follow-up sentence specified later in these rules.',
     '- In ALL OTHER CASES — including product recommendations, product explanations, product comparisons, follow-up product replies after the first one, price answers, stock answers, post-recommendation messages, ambiguous short answers, and general chat — DO NOT include ANY follow-up question, invitation, "let me know" prompt, "tell me if you want more details" phrasing, or any closing prompt. End the reply naturally right after delivering the requested information.',
     '- Forbidden trailing patterns when the strict policy applies (in any language; not exhaustive): "më tregoni", "më shkruani", "më kontaktoni", "doni më shumë informacion", "nëse dëshironi detaje më tregoni", "nëse dëshironi të porosisni më tregoni", "let me know", "feel free to ask", "anything else", "if you want more info just ask", or any equivalent. Do not produce them.',
@@ -1046,17 +1212,17 @@ function buildSystemPrompt(
     '- For non-product/general chat, end naturally without forcing a question.',
     orderClosingAlreadyAskedInConversation
       ? '- For this turn, do not include any order-focused closing question, follow-up question, invitation, or "let me know" prompt, because the order closing was already asked earlier in the conversation.'
-      : '- For this turn (first product reply), include exactly one order-focused follow-up question at the end (e.g., "A doni ta porosisni?" or "Produkti është në dispozicion nëse doni ta porosisni"). Do not add any additional invitations.',
+      : `- For this turn (first product reply), include exactly one order-focused follow-up question at the end (e.g., "${orderClosingExample}" or "${orderClosingFallback}"). Do not add any additional invitations.`,
     '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
     '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
     '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
-    '- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence in Albanian only (this is the ONLY follow-up allowed in an order-confirmation reply, and it must appear exactly once): "Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t\u2019ju ndihmuar."',
-    '- When the business has configured a delivery-time window in the CRM, the platform inserts one Albanian sentence with that ETA immediately before that follow-up; do not add your own separate delivery-arrival time line in order-confirmation replies (avoid duplicating it).',
+    `- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence ${orderConfirmationLanguageDirective}: "${orderConfirmationFollowUp}"`,
+    `- When the business has configured a delivery-time window in the CRM, the platform inserts one ${languageName} sentence with that ETA immediately before that follow-up; do not add your own separate delivery-arrival time line in order-confirmation replies (avoid duplicating it).`,
     '- For ambiguous short customer replies (e.g., "po", "ok", "yes", "po ju lutem"), rely on conversation context and classifier signals to decide intent. Do not classify based only on keywords. If classifier/context indicates order affirmation, continue order flow; escalate only when classifier/context indicates a real post-purchase issue.',
     '- Draft/confirm order behavior must be triggered only when classifier + conversation context indicate explicit order affirmation. Product inquiries alone (price, stock, details, comparison, availability) are not order confirmation.',
     '- If the assistant has already asked to proceed with an order (or requested delivery details), and the customer then provides BOTH required details (phone number and full delivery address), treat that as valid order-confirmation context even without an explicit "yes" in the latest message.',
     '- Never treat an order as complete/ready for creation unless BOTH required delivery details are present: a contact phone number and a full delivery/shipping address. If either detail is missing, ask specifically for the missing detail and do not confirm order placement yet.',
-    '- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, reply with exactly one Albanian sentence and nothing else: "Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet."',
+    `- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, ${postPurchaseLanguageDirective}: "${postPurchaseIssueSentence}"`,
   );
 
   if (hasImages) {
@@ -1711,14 +1877,43 @@ function buildMessagesArray(
 const CONVERSATION_ENDING_ANALYST_SYSTEM =
   "You are a conversation analyst. Your only job is to determine if a message signals that a conversation is ending. This includes any form of goodbye, thank you and goodbye combined, polite dismissal, or closing pleasantry in ANY language including formal and informal versions, slang, abbreviations, and regional variations. For example in Albanian 'klm' means 'kalofshi mirë' which is have a nice day. 'fln' means 'faleminderit' which is thank you. Consider all such abbreviations and slang as ending signals. Return only a JSON object with a single boolean field: { is_ending: true } or { is_ending: false }";
 
-const CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE = `
+const CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE_BY_LOCALE: Record<ReplyLocale, string> = {
+  sq: `
 Final-closing behavior:
 - If the latest customer message is a closing/thank-you/goodbye signal, reply with exactly one short polite closing sentence.
 - Keep it brief (around 2-7 words), warm, and natural in Albanian.
 - Reply ONLY in Albanian. Use this exact sentence: "__CLOSING_SENTENCE__".
 - Do not ask any follow-up question.
 - Do not continue the sales flow or introduce new topics.
-`.trim();
+`.trim(),
+  en: `
+Final-closing behavior:
+- If the latest customer message is a closing/thank-you/goodbye signal, reply with exactly one short polite closing sentence.
+- Keep it brief (around 2-7 words), warm, and natural in English.
+- Reply ONLY in English. Use this exact sentence: "__CLOSING_SENTENCE__".
+- Do not ask any follow-up question.
+- Do not continue the sales flow or introduce new topics.
+`.trim(),
+};
+
+/** Closing-reply sentences (per locale + per flavor) used when the customer is wrapping up. */
+export const CLOSING_REPLY_SENTENCES: Record<ReplyLocale, { no_thanks: string; greeting: string }> = {
+  sq: {
+    no_thanks: 'Pa problem, kaloni bukur.',
+    greeting: 'Edhe ju gjithashtu, kalofshi bukur.',
+  },
+  en: {
+    no_thanks: 'No problem, take care.',
+    greeting: 'You too, have a great day.',
+  },
+};
+
+export function getClosingReplySentences(locale: ReplyLocale): {
+  no_thanks: string;
+  greeting: string;
+} {
+  return CLOSING_REPLY_SENTENCES[locale];
+}
 
 function normalizeClosingSignalText(value: string): string {
   return value
@@ -1863,7 +2058,8 @@ export async function generateReply(
   inboundMessage: string,
   attachmentUrlsRaw: unknown = [],
   productCatalogContext?: string,
-): Promise<{ reply: string; productCatalogContext: string }> {
+  precomputedLanguage?: ReplyLocale,
+): Promise<{ reply: string; productCatalogContext: string; language: ReplyLocale }> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
@@ -1882,10 +2078,14 @@ export async function generateReply(
     conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
       ? conversationHistoryWindow.slice(-RECENT_RAW_HISTORY_MESSAGES)
       : conversationHistoryWindow;
-  const [customerAskedPrice, customerAskedDiscount] = await Promise.all([
+  const [customerAskedPrice, customerAskedDiscount, detectedLanguage] = await Promise.all([
     customerAskedAboutPrice(inboundMessage),
     customerAskedAboutDiscount(inboundMessage),
+    precomputedLanguage
+      ? Promise.resolve(precomputedLanguage)
+      : detectReplyLanguage(inboundMessage, conversationHistoryWindow),
   ]);
+  const language: ReplyLocale = detectedLanguage;
 
   if (!tenant) {
     throw new Error(`Tenant not found: ${tenantId}`);
@@ -1909,6 +2109,7 @@ export async function generateReply(
         typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
           ? productCatalogContext
           : '',
+      language,
     };
   }
 
@@ -2041,8 +2242,9 @@ export async function generateReply(
 
   if (shouldReturnOutOfStockCanned) {
     return {
-      reply: OUT_OF_STOCK_PRODUCT_REPLY,
+      reply: getOutOfStockProductReply(language),
       productCatalogContext: resolvedProductCatalogContext,
+      language,
     };
   }
 
@@ -2059,6 +2261,7 @@ export async function generateReply(
     orderClosingAlreadyAskedInConversation,
     customerAskedDiscount,
     discountAlreadyAddressedInConversation,
+    language,
     tenant.niche,
     tenant.description,
   );
@@ -2119,20 +2322,29 @@ export async function generateReply(
 
   if (conversationEnding && !inboundMessage.includes('?')) {
     const closingFlavor = classifyClosingFlavor(inboundMessage);
-    const noThanksClosing = 'Pa problem, kaloni bukur.';
-    const greetingClosing = 'Edhe ju gjithashtu, kalofshi bukur.';
+    const closingSentencesForLocale = getClosingReplySentences(language);
     const closingSentence =
-      closingFlavor === 'no_thanks' ? noThanksClosing : greetingClosing;
+      closingFlavor === 'no_thanks'
+        ? closingSentencesForLocale.no_thanks
+        : closingSentencesForLocale.greeting;
 
     const previousAssistant = getPreviousAssistantMessageBeforeLatestCustomer(historyForPrompt);
     const previousAssistantText = (previousAssistant?.content ?? '').trim();
-    const explicitClosingReplies = new Set([noThanksClosing, greetingClosing]);
+    // Suppress a repeat closing in any locale: detect prior bot closings across both languages.
+    const allKnownClosingReplies = new Set([
+      ...Object.values(CLOSING_REPLY_SENTENCES.sq),
+      ...Object.values(CLOSING_REPLY_SENTENCES.en),
+    ]);
 
-    if (previousAssistantText && explicitClosingReplies.has(previousAssistantText)) {
-      return { reply: '[NO_REPLY]', productCatalogContext: resolvedProductCatalogContext };
+    if (previousAssistantText && allKnownClosingReplies.has(previousAssistantText)) {
+      return {
+        reply: '[NO_REPLY]',
+        productCatalogContext: resolvedProductCatalogContext,
+        language,
+      };
     }
 
-    const closingAppend = CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE.replace(
+    const closingAppend = CLOSING_REPLY_SYSTEM_APPEND_TEMPLATE_BY_LOCALE[language].replace(
       '__CLOSING_SENTENCE__',
       closingSentence,
     );
@@ -2171,5 +2383,6 @@ export async function generateReply(
   return {
     reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
     productCatalogContext: resolvedProductCatalogContext,
+    language,
   };
 }
