@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import IORedis from 'ioredis';
 import { Pool } from 'pg';
+import { redisClientDefaults } from '../redisClientDefaults';
 
 function requireEnv(name: string): string {
   const v = process.env[name]?.trim();
@@ -30,7 +31,7 @@ async function checkDatabase(): Promise<void> {
 
 async function checkRedis(): Promise<void> {
   const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-  const client = new IORedis(url, { maxRetriesPerRequest: null, lazyConnect: true });
+  const client = new IORedis(url, redisClientDefaults);
   try {
     await client.connect();
     const pong = await client.ping();

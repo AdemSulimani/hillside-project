@@ -103,7 +103,7 @@ async function loadAIConfig(tenantId: string) {
 
   const config = await findAIConfigByTenant(tenantId);
   const resolved = config ?? DEFAULT_AI_CONFIG;
-  await redisConnection.set(cacheKey, JSON.stringify(resolved), 'EX', 300);
+  await redisConnection.set(cacheKey, JSON.stringify(resolved), 'EX', 900);
   return resolved;
 }
 
@@ -120,7 +120,7 @@ async function loadTenant(tenantId: string) {
 
   const tenant = await findTenantById(tenantId);
   if (tenant) {
-    await redisConnection.set(cacheKey, JSON.stringify(tenant), 'EX', 300);
+    await redisConnection.set(cacheKey, JSON.stringify(tenant), 'EX', 1800);
   }
   return tenant;
 }
