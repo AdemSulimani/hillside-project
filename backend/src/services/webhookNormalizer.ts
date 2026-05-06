@@ -650,6 +650,25 @@ function userTextAfterRichLines(contentLines: string[], baseText: string | null)
   return user;
 }
 
+/** Page Messenger webhooks usually omit `sender.name` for customers; PSID + User Profile API supply the real name. */
+function facebookMessengerContactName(
+  isEcho: boolean,
+  sender: Record<string, unknown> | null,
+  recipient: Record<string, unknown> | null,
+  contactExternalId: string | null,
+): string {
+  if (isEcho) {
+    if (recipient && typeof recipient.name === 'string' && recipient.name.trim()) {
+      return recipient.name.trim();
+    }
+    return contactExternalId ? `Messenger user ${contactExternalId}` : 'Unknown';
+  }
+  if (sender && typeof sender.name === 'string' && sender.name.trim()) {
+    return sender.name.trim();
+  }
+  return contactExternalId ? `Messenger user ${contactExternalId}` : 'Unknown';
+}
+
 function buildReactionInboundDto(
   channelType: 'facebook' | 'instagram',
   entry: Record<string, unknown> | null,
@@ -676,7 +695,11 @@ function buildReactionInboundDto(
   const emojiChar = emoji || 'reaction';
   const content = `Customer sent a reaction: ${emojiChar}${action && action !== 'react' ? ` (${action})` : ''}`;
   const contactName =
-    sender && typeof sender.name === 'string' && sender.name.trim() ? sender.name.trim() : 'Unknown';
+    channelType === 'facebook'
+      ? facebookMessengerContactName(false, sender, recipient, contactExternalId)
+      : sender && typeof sender.name === 'string' && sender.name.trim()
+        ? sender.name.trim()
+        : 'Unknown';
 
   if (!channelExternalId || !contactExternalId) {
     throw new Error('Invalid webhook payload: required message identifiers are missing');
@@ -892,13 +915,7 @@ function extractFacebookMessengerMessage(payload: Record<string, unknown>): Inbo
     throw new Error('Invalid webhook payload: required message identifiers are missing');
   }
 
-  const contactName = isEcho
-    ? recipient && typeof recipient.name === 'string' && recipient.name.trim()
-      ? recipient.name.trim()
-      : 'Unknown'
-    : sender && typeof sender.name === 'string' && sender.name.trim()
-      ? sender.name.trim()
-      : 'Unknown';
+  const contactName = facebookMessengerContactName(isEcho, sender, recipient, contactExternalId);
 
   const skipAiReply = rich.skipAiReply === true;
 
