@@ -43,7 +43,10 @@ export type { InboundWebhookJobData } from './jobTypes';
 const GRAPH_API_BASE = 'https://graph.facebook.com/v25.0';
 const INSTAGRAM_GRAPH_API_BASE = 'https://graph.instagram.com/v25.0';
 const PROFILE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** When display name is still a placeholder, retry User Profile API sooner (Meta may return `{}` until BAUPA / opt-in). */
+const PROFILE_ATTEMPT_THROTTLE_MS = 10 * 60 * 1000;
 const PROFILE_LAST_LOOKUP_METADATA_KEY = 'profile_last_lookup_at';
+const PROFILE_LAST_ATTEMPT_METADATA_KEY = 'profile_last_attempt_at';
 
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -197,7 +200,8 @@ function isFallbackContactLabel(name: string): boolean {
   const trimmed = name.trim();
   if (!trimmed) return true;
   if (trimmed.toLowerCase() === 'unknown') return true;
-  return /^ig user \d+$/i.test(trimmed);
+  if (/^ig user \d+$/i.test(trimmed)) return true;
+  return /^messenger user \d+$/i.test(trimmed);
 }
 
 function isProfileLookupDebugEnabled(): boolean {
@@ -217,13 +221,37 @@ function readProfileLastLookupAt(metadata: Record<string, unknown> | null | unde
   return parsed;
 }
 
+function readProfileLastAttemptAt(metadata: Record<string, unknown> | null | undefined): Date | null {
+  const raw = metadata?.[PROFILE_LAST_ATTEMPT_METADATA_KEY];
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
+}
+
 function shouldRefreshProfileLookup(
   channelType: ChannelType,
   metadata: Record<string, unknown> | null | undefined,
+  existingContactName?: string | null,
 ): boolean {
   if (channelType !== 'instagram' && channelType !== 'facebook') {
     return false;
   }
+  const hasExistingName =
+    typeof existingContactName === 'string' && existingContactName.trim().length > 0;
+  const isFallback = hasExistingName && isFallbackContactLabel(existingContactName!);
+  const lastAttemptAt = readProfileLastAttemptAt(metadata);
+  if (isFallback) {
+    if (!lastAttemptAt) {
+      return true;
+    }
+    return Date.now() - lastAttemptAt.getTime() >= PROFILE_ATTEMPT_THROTTLE_MS;
+  }
+
   const lastLookupAt = readProfileLastLookupAt(metadata);
   if (!lastLookupAt) {
     return true;
@@ -324,16 +352,41 @@ async function resolveFacebookContactProfile(
   try {
     const resp = await axios.get(`${GRAPH_API_BASE}/${contactExternalId}`, {
       params: {
-        fields: 'name,profile_pic',
+        // Messenger User Profile API: `name` may be absent; docs use first_name + last_name.
+        fields: 'name,first_name,last_name,profile_pic',
         access_token: accessToken,
       },
     });
-    const data = resp.data as { name?: unknown; profile_pic?: unknown };
-    const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : null;
+    const data = resp.data as {
+      name?: unknown;
+      first_name?: unknown;
+      last_name?: unknown;
+      profile_pic?: unknown;
+    };
+    const fromParts = [
+      typeof data.first_name === 'string' ? data.first_name.trim() : '',
+      typeof data.last_name === 'string' ? data.last_name.trim() : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    const name =
+      typeof data.name === 'string' && data.name.trim()
+        ? data.name.trim()
+        : fromParts || null;
     const avatarUrl =
       typeof data.profile_pic === 'string' && data.profile_pic.trim()
         ? data.profile_pic.trim()
         : null;
+    if (!name && !avatarUrl && isProfileLookupDebugEnabled()) {
+      const keys = resp.data && typeof resp.data === 'object' && !Array.isArray(resp.data)
+        ? Object.keys(resp.data as object)
+        : [];
+      console.info('[inbound] Facebook profile lookup returned no fields (empty object or no access)', {
+        contactExternalId,
+        responseKeys: keys,
+      });
+    }
     return { name, avatarUrl };
   } catch (err) {
     if (isProfileLookupDebugEnabled() && axios.isAxiosError(err)) {
@@ -433,18 +486,28 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   const shouldRefreshProfile = shouldRefreshProfileLookup(
     normalized.channelType,
     existingContact?.metadata,
+    existingContact?.name,
   );
 
-  if (shouldRefreshProfile) {
-    contactMetadata[PROFILE_LAST_LOOKUP_METADATA_KEY] = new Date().toISOString();
-  }
+  let resolvedProfileFromApi = false;
 
   // Instagram webhook payloads may omit sender display info on later events; avoid
   // replacing a known real name with fallback labels like "IG user 123...".
   if (
     normalized.channelType === 'instagram' &&
     existingContact?.name &&
-    isFallbackContactLabel(contactName)
+    isFallbackContactLabel(contactName) &&
+    !isFallbackContactLabel(existingContact.name)
+  ) {
+    contactName = existingContact.name;
+  }
+
+  // Same for Messenger: later webhooks often omit sender.name; keep a resolved name when we have one.
+  if (
+    normalized.channelType === 'facebook' &&
+    existingContact?.name &&
+    isFallbackContactLabel(contactName) &&
+    !isFallbackContactLabel(existingContact.name)
   ) {
     contactName = existingContact.name;
   }
@@ -461,6 +524,9 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
       }
       if (profile.username) {
         contactMetadata.username = profile.username;
+      }
+      if (profile.name || profile.username || profile.avatarUrl) {
+        resolvedProfileFromApi = true;
       }
     } catch (err) {
       console.warn('[inbound] Could not resolve instagram contact profile', {
@@ -480,11 +546,26 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
       if (profile.avatarUrl) {
         contactAvatarUrl = profile.avatarUrl;
       }
+      if (profile.name || profile.avatarUrl) {
+        resolvedProfileFromApi = true;
+      }
     } catch (err) {
       console.warn('[inbound] Could not resolve facebook contact profile', {
         contactExternalId: normalized.contactExternalId,
         err: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  if (shouldRefreshProfile) {
+    const profileLookupStampEarned =
+      resolvedProfileFromApi ||
+      !isFallbackContactLabel(normalized.contactName) ||
+      !isFallbackContactLabel(contactName);
+    if (profileLookupStampEarned) {
+      contactMetadata[PROFILE_LAST_LOOKUP_METADATA_KEY] = new Date().toISOString();
+    } else {
+      contactMetadata[PROFILE_LAST_ATTEMPT_METADATA_KEY] = new Date().toISOString();
     }
   }
 
