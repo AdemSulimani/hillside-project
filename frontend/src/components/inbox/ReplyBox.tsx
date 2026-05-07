@@ -90,7 +90,7 @@ export function ReplyBox({
   return (
     <div className="border-t border-border bg-background p-3">
       <div className="mb-2 flex items-center justify-between gap-2 text-xs">
-        <span className="text-muted-foreground">Përgjigju si njeri</span>
+        <span className="text-muted-foreground">Reply as human</span>
         <span
           className={cn(
             'rounded-full px-2 py-0.5 font-medium',
@@ -99,7 +99,7 @@ export function ReplyBox({
               : 'bg-muted text-muted-foreground',
           )}
         >
-          {aiPaused ? 'Dritare përgjigjeje njerëzore (IA në pritje)' : 'Pa mbajtje njerëzore'}
+          {aiPaused ? 'Human reply window (AI on hold)' : 'No human hold'}
         </span>
       </div>
       {disabled && disabledReason ? (
@@ -126,7 +126,7 @@ export function ReplyBox({
                 size="icon-xs"
                 className="absolute top-0.5 right-0.5 size-6 rounded-full shadow-sm"
                 disabled={sending}
-                aria-label="Hiq imazhin"
+                aria-label="Remove image"
                 onClick={() => removePending(p.id)}
               >
                 <X className="size-3.5" />
@@ -154,8 +154,8 @@ export function ReplyBox({
             size="icon"
             className="mt-1 shrink-0 self-start text-muted-foreground hover:text-foreground"
             disabled={disabled || sending || pending.length >= MAX_ATTACHMENTS}
-            aria-label="Bashkëngjit imazhe"
-            title="Bashkëngjit imazhe"
+            aria-label="Attach images"
+            title="Attach images"
             onClick={() => fileInputRef.current?.click()}
           >
             <Paperclip className="size-4" />
@@ -163,7 +163,7 @@ export function ReplyBox({
           <Textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={disabled ? 'Rihap bisedën për të përgjigjur…' : 'Shkruani një mesazh…'}
+            placeholder={disabled ? 'Reopen this conversation to reply…' : 'Write a message…'}
             disabled={disabled || sending}
             rows={3}
             className="min-h-[4.5rem] flex-1 resize-none border-0 bg-transparent px-2 py-2 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
@@ -186,7 +186,7 @@ export function ReplyBox({
           ) : (
             <>
               <Send className="size-4" />
-              Dërgo
+              Send
             </>
           )}
         </Button>

@@ -64,9 +64,9 @@ function statusBadgeVariant(
 }
 
 function statusShortLabel(status: AIAlertStatus): string {
-  if (status === 'unread') return 'E re';
-  if (status === 'read') return 'E hapur';
-  return 'E mbyllur';
+  if (status === 'unread') return 'New';
+  if (status === 'read') return 'Open';
+  return 'Closed';
 }
 
 function isCancellationOrRefundReason(reason: string): boolean {
@@ -115,7 +115,7 @@ export default function AIAlertsPage() {
     onSuccess: () => {
       invalidateAlertQueries();
     },
-    onError: (err) => toast.error(extractMessage(err, 'Nuk u përditësua alarmi')),
+    onError: (err) => toast.error(extractMessage(err, 'Could not update alert')),
   });
 
   const markAllMutation = useMutation({
@@ -123,12 +123,12 @@ export default function AIAlertsPage() {
     onSuccess: (count) => {
       toast.success(
         count > 0
-          ? `U shënuan ${count} alarm(e) si të lexuara (ende aktive derisa t’i mbyllni).`
-          : 'Nuk ka alarme të reja për të shënuar.',
+          ? `Marked ${count} alert(s) as read (still active until you close them).`
+          : 'No new alerts to mark.',
       );
       invalidateAlertQueries();
     },
-    onError: (err) => toast.error(extractMessage(err, 'Nuk mund të shënohen të gjitha si të lexuara')),
+    onError: (err) => toast.error(extractMessage(err, 'Could not mark all as read')),
   });
 
   const resolveMutation = useMutation({
@@ -137,13 +137,13 @@ export default function AIAlertsPage() {
     onSuccess: (_, variables) => {
       toast.success(
         variables.resume_ai
-          ? 'Alarmi u mbyll dhe IA-ja u rifillua për këtë bisedë.'
-          : 'Alarmi u mbyll.',
+          ? 'Alert closed and AI resumed for this conversation.'
+          : 'Alert closed.',
       );
       setResumeConfirmTarget(null);
       invalidateAlertQueries();
     },
-    onError: (err) => toast.error(extractMessage(err, 'Nuk mund të mbyllet alarmi')),
+    onError: (err) => toast.error(extractMessage(err, 'Could not close alert')),
   });
 
   const alerts = listQuery.data?.alerts ?? [];
@@ -159,7 +159,7 @@ export default function AIAlertsPage() {
     <div className="space-y-6 pb-10">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Alarmet IA</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">AI Alerts</h1>
           <p className="text-sm text-muted-foreground">
             Së pari përgjigjuni manualisht në bisedë. Kur të jetë zgjidhur çështja, kthehuni këtu:{' '}
             <strong>Mbyll alarmin</strong> ose, nëse doni që IA-ja të vazhdojë,{' '}
@@ -172,7 +172,7 @@ export default function AIAlertsPage() {
               <DropdownMenuTrigger
                 render={
                   <Button type="button" variant="outline" size="sm" className="gap-1">
-                    Më shumë veprime
+                    More actions
                     <MoreHorizontal className="size-4 opacity-70" aria-hidden />
                   </Button>
                 }
@@ -182,7 +182,7 @@ export default function AIAlertsPage() {
                   disabled={markAllMutation.isPending}
                   onClick={() => markAllMutation.mutate()}
                 >
-                  Shëno të gjitha &quot;të reja&quot; si të lexuara
+                  Mark all "new" as read
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -209,7 +209,7 @@ export default function AIAlertsPage() {
               {unreadCountQuery.data > 99 ? '99+' : unreadCountQuery.data}
             </span>
           ) : null}
-          Në pritje
+          Open
         </Button>
         <Button
           type="button"
@@ -220,7 +220,7 @@ export default function AIAlertsPage() {
             setPage(1);
           }}
         >
-          Histori
+          History
         </Button>
       </div>
 
@@ -233,13 +233,13 @@ export default function AIAlertsPage() {
           </div>
         ) : listQuery.isError ? (
           <p className="text-sm text-destructive">
-            {extractMessage(listQuery.error, 'Nuk u ngarkuan alarmet.')}
+            {extractMessage(listQuery.error, 'Alerts could not be loaded.')}
           </p>
         ) : alerts.length === 0 ? (
           <Card>
             <CardHeader>
               <CardTitle className="text-base">
-                {tab === 'open' ? 'Nuk ka alarme në pritje' : 'Nuk ka alarme të mbyllura'}
+                {tab === 'open' ? 'No open alerts' : 'No closed alerts'}
               </CardTitle>
               <CardDescription>
                 {tab === 'open'
@@ -333,10 +333,10 @@ export default function AIAlertsPage() {
                               {resolvingId === alert.id ? (
                                 <>
                                   <Loader2 className="size-4 animate-spin" aria-hidden />
-                                  Duke mbyllur…
+                                  Closing...
                                 </>
                               ) : (
-                                'Mbyll alarmin'
+                                'Close alert'
                               )}
                             </Button>
                             {alert.conversation_id ? (
@@ -347,7 +347,7 @@ export default function AIAlertsPage() {
                                   'inline-flex w-full justify-center sm:w-auto',
                                 )}
                               >
-                                Shiko bisedën
+                                View conversation
                               </Link>
                             ) : null}
                             {alert.conversation_id ? (
@@ -361,7 +361,7 @@ export default function AIAlertsPage() {
                                       className="w-full gap-1 sm:w-auto"
                                       disabled={resolveMutation.isPending}
                                     >
-                                      Opsione
+                                      Options
                                       <MoreHorizontal className="size-4 opacity-70" aria-hidden />
                                     </Button>
                                   }
@@ -371,14 +371,14 @@ export default function AIAlertsPage() {
                                     onClick={() => setResumeConfirmTarget(alert)}
                                     disabled={resolveMutation.isPending}
                                   >
-                                    Mbyll dhe rifillo IA-në për bisedën
+                                    Close and resume AI for conversation
                                   </DropdownMenuItem>
                                   {alert.status === 'unread' ? (
                                     <DropdownMenuItem
                                       onClick={() => markReadMutation.mutate(alert.id)}
                                       disabled={markReadMutation.isPending}
                                     >
-                                      Shëno si të lexuar (pa e mbyllur)
+                                      Mark as read (without closing)
                                     </DropdownMenuItem>
                                   ) : null}
                                 </DropdownMenuContent>
@@ -392,7 +392,7 @@ export default function AIAlertsPage() {
                               to={`/inbox?c=${alert.conversation_id}`}
                               className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }), 'inline-flex')}
                             >
-                              Shiko bisedën
+                              View conversation
                             </Link>
                           </div>
                         ) : null}
@@ -414,10 +414,10 @@ export default function AIAlertsPage() {
               disabled={page <= 1 || listQuery.isFetching}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
             >
-              E mëparshmja
+              Previous
             </Button>
             <span className="text-sm text-muted-foreground tabular-nums">
-              Faqja {page} nga {totalPages}
+              Page {page} of {totalPages}
             </span>
             <Button
               type="button"
@@ -426,7 +426,7 @@ export default function AIAlertsPage() {
               disabled={page >= totalPages || listQuery.isFetching}
               onClick={() => setPage((p) => p + 1)}
             >
-              Tjetra
+              Next
             </Button>
           </div>
         ) : null}
@@ -440,14 +440,14 @@ export default function AIAlertsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Rifilloni IA-në?</AlertDialogTitle>
+            <AlertDialogTitle>Resume AI?</AlertDialogTitle>
             <AlertDialogDescription>
-              Alarmi do të mbyllet dhe asistenti do të mund të përgjigjet përsëri automatikisht në këtë bisedë.
-              Përdoreni vetëm nëse jeni gati që IA-ja të vazhdojë pa ndërhyrje njerëzore.
+              The alert will be closed and the assistant will resume automatic replies in this conversation.
+              Use this only if you are ready for AI to continue without human intervention.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={resolveMutation.isPending}>Anulo</AlertDialogCancel>
+            <AlertDialogCancel disabled={resolveMutation.isPending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               disabled={resolveMutation.isPending || !resumeConfirmTarget}
               onClick={() => {
@@ -461,10 +461,10 @@ export default function AIAlertsPage() {
               {resolveMutation.isPending ? (
                 <>
                   <Loader2 className="size-4 animate-spin" aria-hidden />
-                  Duke u përditësuar…
+                  Updating...
                 </>
               ) : (
-                'Po, mbyll dhe rifillo IA-në'
+                'Yes, close and resume AI'
               )}
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -40,10 +40,10 @@ export default function LoginPage() {
             typeof data.error === 'object' ? data.error.body ?? data.error : {};
           setErrors(fieldErrors);
         } else {
-          setGeneralError(data?.message ?? 'Hyrja dështoi. Ju lutemi provoni përsëri.');
+          setGeneralError(data?.message ?? 'Login failed. Please try again.');
         }
       } else {
-        setGeneralError('Ndodhi një gabim i papritur.');
+        setGeneralError('An unexpected error occurred.');
       }
     } finally {
       setLoading(false);
@@ -59,11 +59,11 @@ export default function LoginPage() {
         </div>
         <div className="space-y-2">
           <p className="text-lg font-medium leading-snug">
-            &quot;Hillside e ka transformuar plotësisht mënyrën se si e menaxhojmë punën tonë.&quot;
+            &quot;Hillside completely transformed how we manage our daily work.&quot;
           </p>
-          <p className="text-sm opacity-80">— Klient i kënaqur</p>
+          <p className="text-sm opacity-80">— Happy customer</p>
         </div>
-        <p className="text-xs opacity-60">&copy; {new Date().getFullYear()} Hillside. Të gjitha të drejtat e rezervuara.</p>
+        <p className="text-xs opacity-60">&copy; {new Date().getFullYear()} Hillside. All rights reserved.</p>
       </div>
 
       {/* Right — Form */}
@@ -71,9 +71,9 @@ export default function LoginPage() {
         <div className="w-full max-w-sm space-y-8">
           <div className="space-y-2 text-center">
             <h1 className="text-2xl font-semibold tracking-tight lg:hidden">Hillside</h1>
-            <h2 className="text-2xl font-semibold tracking-tight">Mirë se erdhe përsëri</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Welcome back</h2>
             <p className="text-sm text-muted-foreground">
-              Vendos kredencialet për t&apos;u futur
+              Enter your credentials to sign in
             </p>
           </div>
 
@@ -91,7 +91,7 @@ export default function LoginPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="ju@shembull.com"
+                placeholder="you@example.com"
                 aria-invalid={!!errors.email}
                 className="h-10"
                 required
@@ -102,12 +102,12 @@ export default function LoginPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="password">Fjalëkalimi</Label>
+              <Label htmlFor="password">Password</Label>
               <PasswordInput
                 id="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Fjalëkalimi juaj"
+                placeholder="Your password"
                 aria-invalid={!!errors.password}
                 required
               />
@@ -123,37 +123,37 @@ export default function LoginPage() {
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="size-4 rounded border-input accent-primary"
               />
-              Mbaj mend për 30 ditë
+              Remember me for 30 days
             </label>
 
             <Button type="submit" size="lg" className="w-full" disabled={loading}>
               {loading && <Loader2 className="animate-spin" />}
-              {loading ? 'Duke u futur…' : 'Hyr'}
+              {loading ? 'Signing in…' : 'Sign in'}
             </Button>
           </form>
 
           <p className="text-center text-sm text-muted-foreground">
-            Nuk keni llogari?{' '}
+            Don&apos;t have an account?{' '}
             <Link to="/register" className="font-medium text-primary hover:underline">
-              Krijoni një
+              Create one
             </Link>
           </p>
 
           <p className="text-center text-xs text-muted-foreground">
-            Duke vazhduar, pranoni{' '}
+            By continuing, you agree to the{' '}
             <Link to="/terms-of-service" className="hover:text-foreground hover:underline">
-              Kushtet e shërbimit
+              Terms of Service
             </Link>{' '}
             dhe{' '}
             <Link to="/privacy-policy" className="hover:text-foreground hover:underline">
-              Politikën e privatësisë
+              Privacy Policy
             </Link>
             .
           </p>
 
           <p className="text-center text-xs text-muted-foreground">
             <Link to="/data-deletion" className="hover:text-foreground hover:underline">
-              Kërkesat për fshirje të dhënash
+              Data deletion requests
             </Link>
           </p>
         </div>

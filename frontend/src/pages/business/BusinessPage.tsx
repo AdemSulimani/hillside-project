@@ -111,7 +111,7 @@ export default function BusinessPage() {
       setErrors({});
       setGeneralError('');
       queryClient.invalidateQueries({ queryKey: ['business'] });
-      toast.success('Detajet e biznesit u përditësuan me sukses');
+      toast.success('Business details updated successfully');
     },
     onError: (err) => {
       const fieldErrors = extractFieldErrors(err);
@@ -120,7 +120,7 @@ export default function BusinessPage() {
         setGeneralError('');
       } else {
         setErrors({});
-        setGeneralError(extractMessage(err, 'Përditësimi i detajeve të biznesit dështoi'));
+        setGeneralError(extractMessage(err, 'Updating business details failed'));
       }
     },
   });
@@ -139,10 +139,10 @@ export default function BusinessPage() {
     onSuccess: (logoUrl) => {
       setLogoPreview(assetUrl(logoUrl) ?? null);
       queryClient.invalidateQueries({ queryKey: ['business'] });
-      toast.success('Logoja u ngarkua me sukses');
+      toast.success('Logo uploaded successfully');
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Ngarkimi i logos dështoi'));
+      toast.error(extractMessage(err, 'Logo upload failed'));
     },
   });
 
@@ -163,12 +163,12 @@ export default function BusinessPage() {
     if (!file) return;
 
     if (file.size > 2 * 1024 * 1024) {
-      toast.error('Logoja duhet të jetë nën 2 MB');
+      toast.error('Logo must be under 2 MB');
       return;
     }
 
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'].includes(file.type)) {
-      toast.error('Lejohen vetëm JPEG, PNG, WebP ose SVG');
+      toast.error('Only JPEG, PNG, WebP, or SVG are allowed');
       return;
     }
 
@@ -211,9 +211,9 @@ export default function BusinessPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Biznesi im</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">My Business</h1>
         <p className="text-sm text-muted-foreground">
-          Menaxhoni detajet dhe identitetin vizual të biznesit tuaj.
+          Manage your business details and visual identity.
         </p>
       </div>
 
@@ -223,9 +223,9 @@ export default function BusinessPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <Building2 className="size-5 text-muted-foreground" />
-              <CardTitle>Detajet e biznesit</CardTitle>
+              <CardTitle>Business details</CardTitle>
             </div>
-            <CardDescription>Përditësoni informacionin e biznesit tuaj.</CardDescription>
+            <CardDescription>Update your business information.</CardDescription>
           </CardHeader>
           <CardContent>
             {generalError && (
@@ -237,12 +237,12 @@ export default function BusinessPage() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="businessName">Emri i biznesit</Label>
+                  <Label htmlFor="businessName">Business name</Label>
                   <Input
                     id="businessName"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Shembull Sh.p.k."
+                    placeholder="Example LLC"
                     aria-invalid={!!errors.name}
                     className="h-10"
                   />
@@ -252,7 +252,7 @@ export default function BusinessPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="niche">Industria / nishë</Label>
+                  <Label htmlFor="niche">Industry / niche</Label>
                   <select
                     id="niche"
                     value={niche}
@@ -260,7 +260,7 @@ export default function BusinessPage() {
                     aria-invalid={!!errors.niche}
                     className={selectClasses}
                   >
-                    <option value="" disabled>Zgjidhni një nishë</option>
+                    <option value="" disabled>Select a niche</option>
                     {NICHE_OPTIONS.map((n) => (
                       <option key={n.value} value={n.value}>
                         {n.label}
@@ -275,19 +275,20 @@ export default function BusinessPage() {
 
               <div className="space-y-2">
                 <Label htmlFor="description">
-                  Përshkrimi{' '}
-                  <span className="font-normal text-muted-foreground">(opsional)</span>
+                  Description{' '}
+                  <span className="font-normal text-muted-foreground">(optional)</span>
                 </Label>
                 <textarea
                   id="description"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Na tregoni pak çfarë bën biznesi juaj..."
+                  placeholder="Tell us briefly what your business does..."
                   rows={4}
                   className="w-full resize-none rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Asistenti IA përdorë këtë tekst kur klientët pyesin për biznesin tuaj, përfshi vendndodhjen ose adresën, nëse e përfshini këtu.
+                  The AI assistant uses this when customers ask about your business, including location or address if
+                  you include it here.
                 </p>
                 {errors.description?.map((msg) => (
                   <p key={msg} className="text-xs text-destructive">{msg}</p>
@@ -296,7 +297,7 @@ export default function BusinessPage() {
 
               <fieldset className="space-y-3">
                 <legend className="flex items-center gap-2 text-sm font-medium leading-none select-none">
-                  Mënyrat e dërgimit
+                  Delivery methods
                 </legend>
                 <div className="grid grid-cols-2 gap-3">
                   {DELIVERY_OPTIONS.map(({ value: methodValue, label: methodLabel }) => {
@@ -343,8 +344,8 @@ export default function BusinessPage() {
 
               <div className="space-y-2">
                 <Label htmlFor="deliveryTime">
-                  Informacion kohe dërgimi{' '}
-                  <span className="font-normal text-muted-foreground">(opsional)</span>
+                  Delivery time information{' '}
+                  <span className="font-normal text-muted-foreground">(optional)</span>
                 </Label>
                 <select
                   id="deliveryTime"
@@ -353,13 +354,13 @@ export default function BusinessPage() {
                   aria-invalid={!!errors.delivery_time}
                   className={selectClasses}
                 >
-                  <option value="">I pakonfiguruar</option>
+                  <option value="">Not configured</option>
                   {DELIVERY_TIME_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>{opt.label}</option>
                   ))}
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  Kur vendoset, IA-ja do të përgjigjet për kohën e dërgimit me këtë vlerësim.
+                  When set, AI will reply with this delivery time estimate.
                 </p>
                 {errors.delivery_time?.map((msg) => (
                   <p key={msg} className="text-xs text-destructive">{msg}</p>
@@ -369,7 +370,7 @@ export default function BusinessPage() {
               <div className="pt-2">
                 <Button type="submit" disabled={updateMutation.isPending}>
                   {updateMutation.isPending && <Loader2 className="animate-spin" />}
-                  {updateMutation.isPending ? 'Duke ruajtur…' : 'Ruaj ndryshimet'}
+                  {updateMutation.isPending ? 'Saving...' : 'Save changes'}
                 </Button>
               </div>
             </form>
@@ -381,16 +382,16 @@ export default function BusinessPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <ImageIcon className="size-5 text-muted-foreground" />
-              <CardTitle>Logoja</CardTitle>
+              <CardTitle>Logo</CardTitle>
             </div>
-            <CardDescription>Ngarkoni logon e biznesit tuaj.</CardDescription>
+            <CardDescription>Upload your business logo.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {logoPreview ? (
               <div className="relative inline-block">
                 <img
                   src={logoPreview}
-                  alt="Logoja e biznesit"
+                  alt="Business logo"
                   className="size-32 rounded-lg border object-cover"
                   loading="lazy"
                   decoding="async"
@@ -398,7 +399,7 @@ export default function BusinessPage() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  aria-label="Ndrysho logon"
+                  aria-label="Change logo"
                   className="absolute -right-2 -top-2 flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-colors hover:bg-primary/80"
                 >
                   <Upload className="size-3" />
@@ -412,8 +413,8 @@ export default function BusinessPage() {
                 className="flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/30 px-6 py-8 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
               >
                 <Upload className="size-8 opacity-50" />
-                <span>Kliko për të ngarkuar</span>
-                <span className="text-xs opacity-60">JPEG, PNG, WebP ose SVG — maks. 2 MB</span>
+                <span>Click to upload</span>
+                <span className="text-xs opacity-60">JPEG, PNG, WebP or SVG - max 2 MB</span>
               </button>
             )}
 
@@ -428,7 +429,7 @@ export default function BusinessPage() {
             {logoMutation.isPending && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
-                Duke ngarkuar…
+                Uploading...
               </div>
             )}
 
@@ -440,7 +441,7 @@ export default function BusinessPage() {
                 disabled={logoMutation.isPending}
               >
                 <Upload className="size-4" />
-                Ndrysho logon
+                Change logo
               </Button>
             )}
           </CardContent>

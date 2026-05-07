@@ -13,10 +13,10 @@ interface DashboardSummary {
 }
 
 const metricConfig = [
-  { key: 'messagesToday', label: 'Mesazhe sot', icon: MessageSquare },
-  { key: 'totalOrders', label: 'Porosi gjithsej', icon: ShoppingCart },
-  { key: 'totalContacts', label: 'Kontakte gjithsej', icon: Users },
-  { key: 'activeChannels', label: 'Kanale aktive', icon: Radio },
+  { key: 'messagesToday', label: 'Messages today', icon: MessageSquare },
+  { key: 'totalOrders', label: 'Total orders', icon: ShoppingCart },
+  { key: 'totalContacts', label: 'Total contacts', icon: Users },
+  { key: 'activeChannels', label: 'Active channels', icon: Radio },
 ] as const;
 
 export default function DashboardPage() {
@@ -31,9 +31,9 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Paneli</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
         <p className="text-sm text-muted-foreground">
-          Pamje e shpejtë e biznesit tuaj.
+          Quick overview of your business.
         </p>
       </div>
 

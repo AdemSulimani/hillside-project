@@ -126,19 +126,19 @@ export default function StatisticsPage() {
   const conversionPct = summary ? summary.conversionRate * 100 : 0;
 
   const modelLine = aiConfigQuery.data?.custom_model_id?.trim()
-    ? `Modeli: ${aiConfigQuery.data.custom_model_id}`
-    : 'Modeli: parazgjedhja e platformës';
-  const assistantState = aiConfigQuery.data?.is_active ? 'Ndihmësi aktiv' : 'Ndihmësi në pauzë';
+    ? `Model: ${aiConfigQuery.data.custom_model_id}`
+    : 'Model: platform default';
+  const assistantState = aiConfigQuery.data?.is_active ? 'Assistant active' : 'Assistant paused';
 
   return (
     <div className="space-y-6 pb-10">
       <div>
         <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
           <BarChart3 className="size-7 text-muted-foreground" />
-          Statistika
+          Statistics
         </h1>
         <p className="text-sm text-muted-foreground">
-          Performanca e shitjeve, efektiviteti i IA-së dhe përzierja e kanaleve për periudhën që zgjidhni.
+          Sales performance, AI effectiveness, and channel mix for your selected period.
         </p>
       </div>
 
@@ -159,7 +159,7 @@ export default function StatisticsPage() {
 
       {error ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          {extractMessage(statsQuery.error, 'Statistikat nuk u ngarkuan.')}
+          {extractMessage(statsQuery.error, 'Statistics could not be loaded.')}
         </div>
       ) : null}
 
@@ -169,28 +169,28 @@ export default function StatisticsPage() {
         ) : (
           <>
             <KpiCard
-              label="Mesazhe"
+              label="Messages"
               icon={MessageSquare}
               value={totalMessages.toLocaleString()}
-              sub="Hyrëse + IA + përgjigje njerëzore në interval"
+              sub="Incoming + AI + human replies in range"
             />
             <KpiCard
-              label="Porosi"
+              label="Orders"
               icon={ShoppingCart}
               value={(summary?.ordersCreated ?? 0).toLocaleString()}
-              sub="Porosi skicë të krijuara në interval"
+              sub="Draft orders created in range"
             />
             <KpiCard
-              label="Shkalla e konvertimit"
+              label="Conversion rate"
               icon={Percent}
               value={`${conversionPct.toFixed(1)}%`}
-              sub="Të konfirmuara ÷ të krijuara (i njëjti interval)"
+              sub="Confirmed / created (same range)"
             />
             <KpiCard
-              label="Shkalla e përgjigjeve IA"
+              label="AI reply rate"
               icon={Sparkles}
               value={`${(aiRate * 100).toFixed(1)}%`}
-              sub="Përgjigje IA ÷ (IA + njeri)"
+              sub="AI replies / (AI + human)"
             />
           </>
         )}
@@ -201,22 +201,22 @@ export default function StatisticsPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Produktet kryesore</CardTitle>
-            <CardDescription>Sipas volumit të porosive dhe të ardhurave në këtë periudhë.</CardDescription>
+            <CardTitle>Top products</CardTitle>
+            <CardDescription>By order volume and revenue in this period.</CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? (
               <Skeleton className="h-40 w-full rounded-lg" />
             ) : !summary?.topProducts.length ? (
-              <p className="text-sm text-muted-foreground">Ende nuk ka porosi me produkte në këtë interval.</p>
+              <p className="text-sm text-muted-foreground">No product orders yet in this range.</p>
             ) : (
               <div className="overflow-x-auto rounded-lg border border-border">
                 <table className="w-full min-w-[20rem] text-left text-sm">
                   <thead className="border-b border-border bg-muted/40">
                     <tr>
-                      <th className="px-3 py-2 font-medium">Produkti</th>
-                      <th className="px-3 py-2 font-medium text-right">Njësi</th>
-                      <th className="px-3 py-2 font-medium text-right">Të ardhura</th>
+                      <th className="px-3 py-2 font-medium">Product</th>
+                      <th className="px-3 py-2 font-medium text-right">Units</th>
+                      <th className="px-3 py-2 font-medium text-right">Revenue</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -238,9 +238,9 @@ export default function StatisticsPage() {
           <CardHeader>
             <div className="flex items-center gap-2">
               <BrainCircuit className="size-5 text-muted-foreground" />
-              <CardTitle>Performanca e IA-së</CardTitle>
+              <CardTitle>AI performance</CardTitle>
             </div>
-            <CardDescription>Aktiviteti në intervalin e zgjedhur plus statusi aktual i modelit tuaj.</CardDescription>
+            <CardDescription>Activity in selected range plus your current model status.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {loading ? (
@@ -248,12 +248,12 @@ export default function StatisticsPage() {
             ) : (
               <dl className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2.5 dark:bg-muted/10">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Përgjigje IA</dt>
+                  <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">AI replies</dt>
                   <dd className="text-xl font-semibold">{(summary?.aiReplies ?? 0).toLocaleString()}</dd>
                 </div>
                 <div className="rounded-lg border border-border/80 bg-muted/20 px-3 py-2.5 dark:bg-muted/10">
                   <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Komente (interval)
+                    Feedback (range)
                   </dt>
                   <dd className="text-xl font-semibold">{(summary?.feedbackSubmitted ?? 0).toLocaleString()}</dd>
                 </div>
@@ -264,7 +264,7 @@ export default function StatisticsPage() {
               <Skeleton className="h-16 w-full rounded-lg" />
             ) : aiConfigQuery.isError ? (
               <p className="text-sm text-muted-foreground">
-                {extractMessage(aiConfigQuery.error, 'Konfigurimi i IA-së nuk u ngarkua.')}
+                {extractMessage(aiConfigQuery.error, 'AI config could not be loaded.')}
               </p>
             ) : (
               <div className="rounded-lg border border-primary/15 bg-primary/[0.04] px-3 py-3 text-sm dark:bg-primary/10">

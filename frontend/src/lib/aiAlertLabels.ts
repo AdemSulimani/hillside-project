@@ -1,20 +1,20 @@
 /** Same copy as alert toasts and Alarmet IA guidance: manual reply, then close / resume from Alarmet IA. */
 export const AI_ALERT_RESOLUTION_HINT =
-  'Së pari, përgjigjuni manualisht në bisedë. Pasi të keni zgjedhur problemin, klikoni te faqja Alarmet IA (anash ne sidebar) → Opsione → Mbyll dhe rifillo IA-në për bisedën (ose Mbyll alarmin nëse IA-ja duhet të mbetet e ndalur).';
+  'First, reply manually in the conversation. After handling the issue, go to the AI Alerts page (in the sidebar) → Options → Close and Resume AI for this conversation (or Close alert if AI should remain paused).';
 
 const LABELS: Record<string, string> = {
-  off_topic: 'Jashtë temës',
-  unclear: 'E paqartë',
-  irrelevant: 'E parëndësishme',
-  misleading: 'E rrejshme',
-  low_confidence: 'Besim i ulët',
-  usage_question_unanswered: 'Pyetje përdorimi pa përgjigje',
-  cancellation_request: 'Kërkesë anulimi',
-  refund_request: 'Kërkesë rimbursimi',
-  post_purchase_support_request: 'Problem me dërgesën ose produktin',
-  rate_limit_exceeded: 'U tejkalua kufiri i kërkesave të IA-së',
-  message_send_failed: 'Dërgimi i mesazhit dështoi',
-  token_refresh_failed: 'Rifreskimi i token-it dështoi',
+  off_topic: 'Off topic',
+  unclear: 'Unclear',
+  irrelevant: 'Irrelevant',
+  misleading: 'Misleading',
+  low_confidence: 'Low confidence',
+  usage_question_unanswered: 'Usage question unanswered',
+  cancellation_request: 'Cancellation request',
+  refund_request: 'Refund request',
+  post_purchase_support_request: 'Delivery or product issue',
+  rate_limit_exceeded: 'AI rate limit exceeded',
+  message_send_failed: 'Message sending failed',
+  token_refresh_failed: 'Token refresh failed',
 };
 
 export function formatFlagReason(reason: string): string {

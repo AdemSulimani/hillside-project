@@ -28,7 +28,7 @@ function statusBadgeVariant(status: FeedbackLogStatus): 'secondary' | 'default' 
 }
 
 function statusLabel(status: FeedbackLogStatus): string {
-  return status === 'pending' ? 'Në pritje' : 'Përfshirë në trajnim';
+  return status === 'pending' ? 'Pending' : 'Included in training';
 }
 
 function CellText({ text, empty = '—' }: { text: string | null | undefined; empty?: string }) {
@@ -42,9 +42,9 @@ function CellText({ text, empty = '—' }: { text: string | null | undefined; em
 }
 
 const STATUS_TABS: { key: 'all' | FeedbackLogStatus; label: string; filter?: FeedbackLogStatus }[] = [
-  { key: 'all', label: 'Të gjitha' },
-  { key: 'pending', label: 'Në pritje', filter: 'pending' },
-  { key: 'included_in_training', label: 'Të përfshira', filter: 'included_in_training' },
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Pending', filter: 'pending' },
+  { key: 'included_in_training', label: 'Included', filter: 'included_in_training' },
 ];
 
 export default function FeedbackPage() {
@@ -84,9 +84,9 @@ export default function FeedbackPage() {
   return (
     <div className="space-y-6 pb-10">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Komente për IA-në</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">AI Feedback</h1>
         <p className="text-sm text-muted-foreground">
-          Shënoni përgjigjet e gabuara të IA-së në Mesazhet dhe ndiqni korrigjimet për trajnim të mëtejshëm.
+          Mark incorrect AI replies in Inbox and track corrections for future training.
         </p>
       </div>
 
@@ -95,16 +95,16 @@ export default function FeedbackPage() {
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2">
               <MessageSquareHeart className="size-5 text-muted-foreground" />
-              <CardTitle>Progresi i mbledhjes</CardTitle>
+              <CardTitle>Collection progress</CardTitle>
             </div>
-            <CardDescription>Elemente komentesh të regjistruara për hapësirën tuaj të punës.</CardDescription>
+            <CardDescription>Feedback items collected for your workspace.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {configQuery.isLoading ? (
               <Skeleton className="h-10 w-full rounded-lg" />
             ) : configQuery.isError ? (
               <p className="text-sm text-destructive">
-                {extractMessage(configQuery.error, 'Nuk u ngarkua progresi.')}
+                {extractMessage(configQuery.error, 'Progress could not be loaded.')}
               </p>
             ) : (
               <>
@@ -112,7 +112,7 @@ export default function FeedbackPage() {
                   <span className="text-2xl font-semibold tabular-nums">{feedbackCount}</span>
                   <span className="text-muted-foreground tabular-nums">
                     {' '}
-                    / {target} komente të mbledhura
+                    / {target} feedback items collected
                   </span>
                 </p>
                 <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -123,7 +123,7 @@ export default function FeedbackPage() {
                     aria-valuenow={feedbackCount}
                     aria-valuemin={0}
                     aria-valuemax={target}
-                    aria-label="Progresi i mbledhjes së komenteve"
+                    aria-label="Feedback collection progress"
                   />
                 </div>
               </>
@@ -153,13 +153,13 @@ export default function FeedbackPage() {
         <Skeleton className="h-96 w-full rounded-xl" />
       ) : listQuery.isError ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-          {extractMessage(listQuery.error, 'Nuk u ngarkuan regjistrat e komenteve.')}
+          {extractMessage(listQuery.error, 'Feedback logs could not be loaded.')}
         </div>
       ) : logs.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
           <MessageSquareHeart className="size-10 text-muted-foreground opacity-50" />
           <p className="text-sm text-muted-foreground">
-            Ende nuk ka komente. Përdorni butonin “thumb down” në një mesazh IA në Mesazhet.
+            No feedback yet. Use the "thumb down" button on an AI message in Inbox.
           </p>
         </div>
       ) : (
@@ -168,11 +168,11 @@ export default function FeedbackPage() {
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead className="border-b border-border bg-muted/40">
                 <tr>
-                  <th className="px-3 py-3 font-medium">Përgjigja origjinale e IA-së</th>
-                  <th className="px-3 py-3 font-medium">Përgjigja e korrigjuar</th>
-                  <th className="px-3 py-3 font-medium">Arsyeja</th>
-                  <th className="px-3 py-3 font-medium">Statusi</th>
-                  <th className="px-3 py-3 font-medium">Data</th>
+                  <th className="px-3 py-3 font-medium">Original AI response</th>
+                  <th className="px-3 py-3 font-medium">Corrected response</th>
+                  <th className="px-3 py-3 font-medium">Reason</th>
+                  <th className="px-3 py-3 font-medium">Status</th>
+                  <th className="px-3 py-3 font-medium">Date</th>
                 </tr>
               </thead>
               <tbody>
@@ -209,7 +209,7 @@ export default function FeedbackPage() {
           {listQuery.isFetching ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              Duke përditësuar…
+              Updating...
             </div>
           ) : null}
 
@@ -222,10 +222,10 @@ export default function FeedbackPage() {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                E mëparshmja
+                Previous
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Faqja {pagination.page} nga {pagination.totalPages}
+                Page {pagination.page} of {pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -234,7 +234,7 @@ export default function FeedbackPage() {
                 disabled={page >= pagination.totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >
-                Tjetra
+                Next
               </Button>
             </div>
           ) : null}
