@@ -1,38 +1,56 @@
 import { Pool, type PoolConfig } from 'pg';
 
-function sslOption(): PoolConfig['ssl'] | undefined {
-  const url = process.env.DATABASE_URL;
-  if (!url) return undefined;
+function isLocalHost(host: string) {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
 
-  let host: string;
+function isDigitalOceanPostgres(host: string) {
+  return host.endsWith('.db.ondigitalocean.com') || host.includes('ondigitalocean.com');
+}
+
+/**
+ * `DATABASE_URL` from DigitalOcean includes `sslmode=require`. node-pg parses that as
+ * verify-full and ignores our Pool `ssl` option enough that TLS still fails with
+ * SELF_SIGNED_CERT_IN_CHAIN. Strip those params and set `ssl` on the Pool explicitly.
+ */
+function buildPoolConfig(): PoolConfig {
+  const raw = process.env.DATABASE_URL;
+  if (!raw) return {};
+
+  let u: URL;
   try {
-    host = new URL(url).hostname;
+    u = new URL(raw);
   } catch {
-    return undefined;
+    return { connectionString: raw };
   }
 
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
-    return undefined;
+  const host = u.hostname;
+
+  if (isLocalHost(host)) {
+    return { connectionString: raw };
   }
+
+  for (const key of ['sslmode', 'ssl', 'sslrootcert', 'sslfactory']) {
+    u.searchParams.delete(key);
+  }
+  const connectionString = u.toString();
 
   const ca = process.env.DATABASE_SSL_CA?.trim();
   if (ca) {
-    return { ca, rejectUnauthorized: true };
+    return { connectionString, ssl: { ca, rejectUnauthorized: true } };
   }
 
-  // DigitalOcean Postgres: chain is not in Node's default trust store without their CA.
-  // In DO control panel you can download the CA and set DATABASE_SSL_CA (PEM) for full verification.
-  if (host.endsWith('.db.ondigitalocean.com') || host.includes('ondigitalocean.com')) {
-    return { rejectUnauthorized: false };
+  if (isDigitalOceanPostgres(host)) {
+    return {
+      connectionString,
+      ssl: { rejectUnauthorized: false },
+    };
   }
 
-  return undefined;
+  return { connectionString, ssl: true };
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: sslOption(),
-});
+const pool = new Pool(buildPoolConfig());
 
 pool.on('error', (err) => {
   console.error('Unexpected error on idle database client', err);
