@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+.env.staging.private
+.env.production.private
 *.log
 uploads/*
 !uploads/.gitkeep
