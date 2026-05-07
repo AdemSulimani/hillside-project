@@ -1,0 +1,116 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy-staging:
+    name: Deploy Staging
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            export APP_DIR="${{ secrets.STAGING_APP_DIR }}"
+            export REPOSITORY="${{ github.repository }}"
+            export REF_NAME="${{ github.ref_name }}"
+            export BACKEND_ENV_B64="${{ secrets.STAGING_BACKEND_ENV_B64 }}"
+            export FRONTEND_ENV_B64="${{ secrets.STAGING_FRONTEND_ENV_B64 }}"
+            if [ ! -d "$APP_DIR/.git" ]; then
+              git clone "https://github.com/$REPOSITORY.git" "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            git fetch --all --tags
+            git checkout "$REF_NAME"
+            git pull --ff-only origin "$REF_NAME" || true
+            bash "$APP_DIR/scripts/deploy.sh" staging
+
+      - name: Verify staging health endpoint
+        env:
+          HEALTHCHECK_URL: ${{ secrets.STAGING_HEALTHCHECK_URL }}
+        run: |
+          test -n "$HEALTHCHECK_URL"
+          for i in $(seq 1 12); do
+            if curl --fail --silent --show-error "$HEALTHCHECK_URL" > /dev/null; then
+              echo "Staging health check passed"
+              exit 0
+            fi
+            echo "Waiting for staging health endpoint ($i/12)..."
+            sleep 10
+          done
+          echo "Staging health check failed"
+          exit 1
+
+  deploy-production:
+    name: Deploy Production
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'production') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            export APP_DIR="${{ secrets.PROD_APP_DIR }}"
+            export REPOSITORY="${{ github.repository }}"
+            export REF_NAME="${{ github.ref_name }}"
+            export BACKEND_ENV_B64="${{ secrets.PROD_BACKEND_ENV_B64 }}"
+            export FRONTEND_ENV_B64="${{ secrets.PROD_FRONTEND_ENV_B64 }}"
+            if [ ! -d "$APP_DIR/.git" ]; then
+              git clone "https://github.com/$REPOSITORY.git" "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            git fetch --all --tags
+            git checkout "$REF_NAME"
+            git pull --ff-only origin "$REF_NAME" || true
+            bash "$APP_DIR/scripts/deploy.sh" production
+
+      - name: Verify production health endpoint
+        env:
+          HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}
+        run: |
+          test -n "$HEALTHCHECK_URL"
+          for i in $(seq 1 12); do
+            if curl --fail --silent --show-error "$HEALTHCHECK_URL" > /dev/null; then
+              echo "Production health check passed"
+              exit 0
+            fi
+            echo "Waiting for production health endpoint ($i/12)..."
+            sleep 10
+          done
+          echo "Production health check failed"
+          exit 1

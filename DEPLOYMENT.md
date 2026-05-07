@@ -1,78 +1,158 @@
-# Production deployment checklist
+# Deployment and CI/CD guide
 
-Use this list before and after shipping Hillside CRM to production. Adjust hostnames, secrets stores, and orchestration (VM, Kubernetes, PaaS) to match your environment.
+This project now includes GitHub Actions workflows for:
 
-## Prerequisites
+- CI validation on pull requests and pushes to `main`
+- Automatic deployment to **staging** on `main`
+- Automatic deployment to **production** on `v*` tags
+- Manual deployment to either environment with `workflow_dispatch`
 
-- **PostgreSQL** 16+ with extensions used by migrations (including `pgcrypto`, `vector` where applicable).
-- **Redis** 7+ for BullMQ queues and rate limiting.
-- **Node.js** 22 LTS (or run the provided **Docker** images).
-- **Meta / OpenAI** credentials as required by your channels and AI features.
-- **Sentry** project (optional but recommended) for backend error monitoring.
+## 1) Environments and topology
 
-## Configuration
+Recommended setup:
 
-1. **Backend environment** — Copy `backend/.env.example` to `backend/.env` (or inject the same keys via your secret manager). Ensure at least:
-   - `DATABASE_URL`, `REDIS_URL`
-   - `JWT_SECRET`, `JWT_REFRESH_SECRET`
-   - `OPENAI_API_KEY` (and embedding-related vars if you use product search embeddings)
-   - `FRONTEND_URL` (exact browser origin, e.g. `https://app.example.com`)
-   - `BACKEND_URL` (public API base used for attachment URLs, e.g. `https://api.example.com`)
-   - `META_*`, `WEBHOOK_VERIFY_TOKEN`, `ENCRYPTION_KEY` for Meta channels
-   - `SENTRY_DSN` when using Sentry
-2. **Frontend build-time** — Set `VITE_API_URL` and `VITE_WS_URL` to the **browser-visible** API and WebSocket URLs (e.g. `https://api.example.com/api` and `wss://api.example.com`). Rebuild the SPA after any change.
-3. **CORS / cookies** — Production must use **HTTPS** if you rely on `Secure` cookies. Align `FRONTEND_URL` with the SPA origin.
-4. **Admin operations** — Set `ADMIN_KEY` if you use admin-only HTTP routes (e.g. tenant deletion).
+- **Staging**: separate VM or container host, separate DB and Redis, staging domain
+- **Production**: isolated VM/cluster, production DB and Redis, production domain
+- Keep staging and production credentials fully separate
 
-## Database
+## 2) Required runtime prerequisites
 
-1. Run migrations against the production database (from CI or a release job):
+- Docker Engine + Docker Compose plugin on each host
+- Git installed on each host
+- Public GitHub repository access from hosts (or deploy key/token if private)
+- PostgreSQL 16+ and Redis 7+ reachable from backend
 
-   ```bash
-   cd backend && npm ci && npm run build && node dist/db/migrate.js
-   ```
+## 3) Configure environment files
 
-   Or rely on the backend Docker image entrypoint, which runs migrations before `node dist/server.js`.
+Backend keys come from `backend/.env.example`.
+Frontend keys come from `frontend/.env.example`.
 
-2. Take an initial **backup** and schedule recurring backups / PITR according to your RPO/RTO.
+At minimum in each backend env:
 
-## Application services
+- `DATABASE_URL`, `REDIS_URL`
+- `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ADMIN_JWT_SECRET`
+- `OPENAI_API_KEY`
+- `FRONTEND_URL`, `BACKEND_URL`
+- `META_*`, `WEBHOOK_VERIFY_TOKEN`, `ENCRYPTION_KEY` (if Meta channels are enabled)
 
-1. Deploy the **backend** process (or container) with `NODE_ENV=production`.
-2. Deploy **BullMQ workers** if they run as a separate process in your setup (this repo starts workers from `server.ts` in the same Node process).
-3. **Socket.IO horizontal scaling** — Realtime broadcasts use the **Redis adapter** (`REDIS_URL`). Every API replica must share the **same** Redis so inbox, orders, and AI alerts propagate across instances. Without that, users only see updates handled by the same replica they are connected to (often fixed by a full page refresh that refetches from the API).
-4. Deploy the **frontend** static build behind **CDN or Nginx** with SPA fallback (`try_files … /index.html`).
-5. Configure **health checks** (e.g. HTTP `GET /api/health` and `npm run healthcheck` in CI for DB/Redis/OpenAI smoke tests).
+At minimum in each frontend env:
 
-## Webhooks and Meta
+- `VITE_API_URL`
+- `VITE_WS_URL`
 
-1. Set Meta app **callback / webhook** URLs to your public API host.
-2. Confirm `WEBHOOK_VERIFY_TOKEN` matches the Meta dashboard.
-3. Validate **end-to-end** message flow: inbound webhook → persisted message → AI reply → optional order draft → inbox UI.
+## 4) GitHub environments (must do)
 
-## Post-deploy verification
+Create 2 GitHub environments in repo settings:
 
-- [ ] Login, session refresh, and `GET /api/auth/me` succeed.
-- [ ] Inbox loads conversations and message history; WebSocket updates work (`VITE_WS_URL`).
-- [ ] Channels OAuth / webhook verification succeeds.
-- [ ] Queue depth is healthy under load; Redis connectivity stable.
-- [ ] Sentry receives a test error when `SENTRY_DSN` is set (optional debug route or controlled throw in staging only).
-- [ ] Logs are aggregated (stdout JSON or shipper) and alerts wired (`ALERT_WEBHOOK_URL` if used).
+- `staging`
+- `production`
 
-## Rollback
+Enable protection rules:
 
-- Keep the previous container images or release artifacts.
-- Database: avoid destructive migrations without backups; document forward-only migration policy.
+- `production`: required reviewers (recommended), optional wait timer
+- `staging`: optional reviewers
 
-## Local Docker stack
+These map to the workflow jobs in `.github/workflows/deploy.yml`.
 
-From the repository root (after `cp backend/.env.example backend/.env` and filling secrets):
+## 5) GitHub secrets to add
+
+### Staging secrets
+
+- `STAGING_SSH_HOST`
+- `STAGING_SSH_USER`
+- `STAGING_SSH_PRIVATE_KEY`
+- `STAGING_APP_DIR` (example: `/opt/hillside-staging`)
+- `STAGING_BACKEND_ENV_B64` (base64-encoded backend `.env`)
+- `STAGING_FRONTEND_ENV_B64` (base64-encoded frontend `.env`)
+- `STAGING_HEALTHCHECK_URL` (example: `https://staging-api.yourdomain.com/api/health`)
+
+### Production secrets
+
+- `PROD_SSH_HOST`
+- `PROD_SSH_USER`
+- `PROD_SSH_PRIVATE_KEY`
+- `PROD_APP_DIR` (example: `/opt/hillside-prod`)
+- `PROD_BACKEND_ENV_B64` (base64-encoded backend `.env`)
+- `PROD_FRONTEND_ENV_B64` (base64-encoded frontend `.env`)
+- `PROD_HEALTHCHECK_URL` (example: `https://api.yourdomain.com/api/health`)
+
+You can generate base64 values locally (Linux/macOS):
 
 ```bash
-docker compose up --build
+base64 -w 0 backend/.env
+base64 -w 0 frontend/.env
 ```
 
-- **Postgres**: `localhost:5432` (user/password/db per `docker-compose.yml`).
-- **Redis**: `localhost:6379`.
-- **API**: `http://localhost:8000`.
-- **SPA**: `http://localhost:3000` (Nginx serving the Vite build; API calls go to `localhost:8000` from the browser).
+PowerShell (Windows):
+
+```powershell
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content backend/.env -Raw)))
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content frontend/.env -Raw)))
+```
+
+## 6) Branch and release strategy
+
+Recommended promotion flow:
+
+1. Create feature branch from `main`
+2. Open PR, wait for CI to pass
+3. Merge to `main`
+4. `main` auto-deploys to staging
+5. Validate staging smoke tests
+6. Create release tag (example `v1.4.0`) from the promoted commit
+7. Tag push deploys production (with production environment approval)
+
+## 7) Workflows included
+
+### CI (`.github/workflows/ci.yml`)
+
+- Backend: `npm ci`, `npm run typecheck`, `npm run build`
+- Backend smoke: run migrations against ephemeral Postgres, boot API, verify `/api/health`
+- Frontend: `npm ci`, `npm run lint`, `npm run build`
+
+### Deploy (`.github/workflows/deploy.yml`)
+
+- `main` push -> staging deploy
+- tag push `v*` -> production deploy
+- manual deploy supported for both environments
+- post-deploy health gate validates public `/api/health` URL before job is marked successful
+
+Deployment runs `scripts/deploy.sh`, which:
+
+1. writes `backend/.env` and `frontend/.env` from GitHub secrets
+2. runs `docker compose up -d --build`
+3. prunes dangling images
+
+## 8) Host bootstrap (first time only)
+
+On each host:
+
+```bash
+sudo mkdir -p /opt/hillside-staging
+sudo chown -R $USER:$USER /opt/hillside-staging
+```
+
+And similarly for production (for example `/opt/hillside-prod`).
+
+Ensure the deploy user can run Docker without sudo:
+
+```bash
+sudo usermod -aG docker $USER
+```
+
+Then re-login.
+
+## 9) Post-deploy verification checklist
+
+- `GET /api/health` returns 200
+- Login and refresh token flow works
+- Realtime updates work from UI (`VITE_WS_URL`)
+- Meta webhooks verify and inbound messages process
+- Queue processing is healthy and Redis stable
+- Staging-only controlled error appears in Sentry (if configured)
+
+## 10) Rollback strategy
+
+- Re-deploy previous known-good tag to production
+- Keep DB migrations forward-safe; avoid destructive migrations without backup
+- Maintain automated DB backups + restore drills
