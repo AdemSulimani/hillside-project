@@ -29,8 +29,8 @@ export function ConversationAiStatusBar({
         )}
       >
         {aiPaused
-          ? 'IA-ja është e ndalur për këtë bisedë'
-          : 'IA-ja po përgjigjet në këtë bisedë'}
+          ? 'AI is paused for this conversation'
+          : 'AI is replying in this conversation'}
       </p>
       <Button
         type="button"
@@ -45,12 +45,12 @@ export function ConversationAiStatusBar({
         ) : aiPaused ? (
           <>
             <Play className="size-4" />
-            Rifillo IA-në
+            Resume AI
           </>
         ) : (
           <>
             <Pause className="size-4" />
-            Ndalo IA-në
+            Pause AI
           </>
         )}
       </Button>

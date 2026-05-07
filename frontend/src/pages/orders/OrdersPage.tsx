@@ -48,23 +48,23 @@ const PAGE_SIZE = 20;
 type OrdersTabKey = 'all' | OrderStatus | 'action_required';
 
 const STATUS_TABS: { key: OrdersTabKey; label: string; filter?: OrderStatus }[] = [
-  { key: 'all', label: 'Të gjitha' },
-  { key: 'draft', label: 'Skicë', filter: 'draft' },
-  { key: 'confirmed', label: 'E konfirmuar', filter: 'confirmed' },
-  { key: 'processing', label: 'Në përpunim', filter: 'processing' },
-  { key: 'shipped', label: 'E dërguar', filter: 'shipped' },
-  { key: 'delivered', label: 'E dorëzuar', filter: 'delivered' },
-  { key: 'cancelled', label: 'E anuluar', filter: 'cancelled' },
-  { key: 'refunded', label: 'E rimbursuar', filter: 'refunded' },
-  { key: 'action_required', label: 'Veprim i nevojshëm' },
+  { key: 'all', label: 'All' },
+  { key: 'draft', label: 'Draft', filter: 'draft' },
+  { key: 'confirmed', label: 'Confirmed', filter: 'confirmed' },
+  { key: 'processing', label: 'Processing', filter: 'processing' },
+  { key: 'shipped', label: 'Shipped', filter: 'shipped' },
+  { key: 'delivered', label: 'Delivered', filter: 'delivered' },
+  { key: 'cancelled', label: 'Cancelled', filter: 'cancelled' },
+  { key: 'refunded', label: 'Refunded', filter: 'refunded' },
+  { key: 'action_required', label: 'Action required' },
 ];
 
 type ResolutionChoice = Exclude<OrderResolutionStatus, 'pending'>;
 
 const RESOLUTION_OPTIONS: { value: ResolutionChoice; label: string }[] = [
-  { value: 'approved', label: 'Aprovo' },
-  { value: 'rejected', label: 'Refuzo' },
-  { value: 'store_credit_offered', label: 'Ofro kredit dyqani' },
+  { value: 'approved', label: 'Approve' },
+  { value: 'rejected', label: 'Reject' },
+  { value: 'store_credit_offered', label: 'Offer store credit' },
 ];
 
 interface ActionFormState {
@@ -219,13 +219,13 @@ export default function OrdersPage() {
   const resolveAlertTaskMutation = useMutation({
     mutationFn: (alertId: string) => resolveAIAlert(alertId, { resume_ai: false }),
     onSuccess: () => {
-      toast.success('Alarmi u mbyll');
+      toast.success('Alert closed');
       void queryClient.invalidateQueries({ queryKey: ['orders'] });
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
     },
     onError: () => {
-      toast.error('Nuk u mbyll alarmi. Provoni nga faqja Alarmet IA.');
+      toast.error('Could not close alert. Try from the AI Alerts page.');
     },
   });
 
@@ -247,13 +247,13 @@ export default function OrdersPage() {
       });
     },
     onSuccess: () => {
-      toast.success('Zgjidhja u dërgua te klienti');
+      toast.success('Resolution sent to customer');
       void queryClient.invalidateQueries({ queryKey: ['orders'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations'] });
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
     },
     onError: () => {
-      toast.error('Dërgimi i zgjidhjes dështoi. Ju lutemi provoni përsëri.');
+      toast.error('Sending resolution failed. Please try again.');
     },
   });
 
@@ -329,16 +329,16 @@ export default function OrdersPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Porositë</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Orders</h1>
           <p className="text-sm text-muted-foreground">
-            Shqyrtoni skicët e zbuluara nga IA-ja, konfirmoni me klientët dhe ndiqni përmbushjen.
+            Review AI-detected drafts, confirm with customers, and track fulfillment.
           </p>
         </div>
         <Link
           to="/inbox"
           className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'inline-flex')}
         >
-          Hap Mesazhet
+          Open Inbox
         </Link>
       </div>
 
@@ -381,9 +381,9 @@ export default function OrdersPage() {
               setSearchInput(e.target.value);
               setPage(1);
             }}
-            placeholder="Kërko sipas emrit të klientit…"
+            placeholder="Search by customer name..."
             className="h-10 pl-9"
-            aria-label="Kërko porositë sipas klientit"
+            aria-label="Search orders by customer"
           />
           {isFetching && debouncedSearch ? (
             <Loader2 className="absolute right-2.5 top-1/2 size-4 -translate-y-1/2 animate-spin text-muted-foreground" />
@@ -392,7 +392,7 @@ export default function OrdersPage() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex flex-col gap-1">
             <label htmlFor="orders-from" className="text-xs text-muted-foreground">
-              Nga
+              From
             </label>
             <Input
               id="orders-from"
@@ -407,7 +407,7 @@ export default function OrdersPage() {
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="orders-to" className="text-xs text-muted-foreground">
-              Deri
+              To
             </label>
             <Input
               id="orders-to"
@@ -432,7 +432,7 @@ export default function OrdersPage() {
                 setPage(1);
               }}
             >
-              Pastro datat
+              Clear dates
             </Button>
           )}
         </div>
@@ -444,7 +444,7 @@ export default function OrdersPage() {
           <Skeleton className="h-64 w-full rounded-xl" />
         ) : actionRequiredQuery.isError ? (
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-            Nuk u ngarkuan porositë që kërkojnë veprim. Ju lutemi rifreskoni.
+            Orders requiring action could not be loaded. Please refresh.
           </div>
         ) : actionRequiredOrders.length === 0 && actionAlertTasks.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed py-16 text-center">
@@ -792,10 +792,10 @@ export default function OrdersPage() {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                E mëparshmja
+                Previous
               </Button>
               <span className="text-sm text-muted-foreground tabular-nums">
-                Faqja {pagination.page} nga {pagination.totalPages}
+                Page {pagination.page} of {pagination.totalPages}
               </span>
               <Button
                 type="button"
@@ -804,7 +804,7 @@ export default function OrdersPage() {
                 disabled={page >= pagination.totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >
-                Tjetra
+                Next
               </Button>
             </div>
           ) : null}

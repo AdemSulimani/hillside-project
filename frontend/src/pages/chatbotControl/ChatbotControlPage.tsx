@@ -61,13 +61,13 @@ export default function ChatbotControlPage() {
       if (ctx?.previous !== undefined) {
         queryClient.setQueryData(GLOBAL_STATUS_KEY, ctx.previous);
       }
-      toast.error(extractMessage(err, 'Përditësimi i cilësimit global të IA-së dështoi'));
+      toast.error(extractMessage(err, 'Failed to update global AI setting'));
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: GLOBAL_STATUS_KEY });
     },
     onSuccess: (isActive) => {
-      toast.success(isActive ? 'IA-ja është aktive globalisht' : 'IA-ja është në pauzë globalisht');
+      toast.success(isActive ? 'AI is globally active' : 'AI is globally paused');
     },
   });
 
@@ -86,7 +86,7 @@ export default function ChatbotControlPage() {
     },
     onError: (err, _id, context) => {
       queryClient.setQueryData(CHANNELS_KEY, context?.previous ?? []);
-      toast.error(extractMessage(err, 'Përditësimi i IA-së për kanalin dështoi'));
+      toast.error(extractMessage(err, 'Failed to update AI for channel'));
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: CHANNELS_KEY });
@@ -99,10 +99,10 @@ export default function ChatbotControlPage() {
       void queryClient.invalidateQueries({ queryKey: PAUSED_KEY });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations', result.id, 'detail'] });
-      toast.success('IA-ja u rifillua për këtë bisedë');
+      toast.success('AI resumed for this conversation');
     },
     onError: (err) => {
-      toast.error(extractMessage(err, 'Rifillimi i IA-së për bisedën dështoi'));
+      toast.error(extractMessage(err, 'Failed to resume AI for conversation'));
     },
   });
 
@@ -118,10 +118,10 @@ export default function ChatbotControlPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Kontrolli i chatbot-it</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Chatbot Control</h1>
         <p className="text-sm text-muted-foreground">
-          Fikni IA-në për gjithë biznesin, për çdo kanal, ose pezullojeni vetëm për biseda të caktuara.
-          Pauzat manuale mbeten kur e ktheni ndërprerësin global përsëri në aktiv.
+          Turn AI off for the whole business, per channel, or only for specific conversations.
+          Manual pauses remain when you switch global AI back on.
         </p>
       </div>
 
@@ -129,22 +129,22 @@ export default function ChatbotControlPage() {
         <CardHeader className="space-y-1 pb-2">
           <CardTitle className="flex items-center gap-2 text-lg">
             <Bot className="size-5" />
-            IA globale
+            Global AI
           </CardTitle>
           <CardDescription>
-            Kur është fikur, nuk dërgohen përgjigje të automatizuara askund derisa ta ndizni përsëri.
+            When off, no automated replies are sent until you enable it again.
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-2 pb-6">
           {globalQuery.isError ? (
-            <p className="text-sm text-destructive">Statusi global i IA-së nuk u ngarkua.</p>
+            <p className="text-sm text-destructive">Global AI status could not be loaded.</p>
           ) : globalQuery.isLoading ? (
             <Skeleton className="h-14 w-full max-w-xl rounded-lg" />
           ) : (
             <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-2">
                 <Label htmlFor="global-ai-switch" className="text-base font-medium">
-                  Ndërprësësi kryesor
+                  Master switch
                 </Label>
                 <p
                   className={cn(
@@ -154,12 +154,12 @@ export default function ChatbotControlPage() {
                       : 'bg-destructive/15 text-destructive',
                   )}
                 >
-                  {isGlobalActive ? 'IA aktive' : 'IA në pauzë'}
+                  {isGlobalActive ? 'AI active' : 'AI paused'}
                 </p>
               </div>
               <div className="flex items-center gap-4 sm:pr-2">
                 <span className="text-sm text-muted-foreground max-sm:hidden">
-                  {isGlobalActive ? 'Automatizimi aktiv' : 'Automatizimi fikur'}
+                  {isGlobalActive ? 'Automation enabled' : 'Automation disabled'}
                 </span>
                 <div className="flex scale-125 origin-left sm:origin-right">
                   <Switch
@@ -167,7 +167,7 @@ export default function ChatbotControlPage() {
                     checked={isGlobalActive}
                     onCheckedChange={() => toggleGlobalMutation.mutate()}
                     disabled={globalBusy}
-                    aria-label={isGlobalActive ? 'Fik IA-në globale' : 'Ndiz IA-në globale'}
+                    aria-label={isGlobalActive ? 'Turn off global AI' : 'Turn on global AI'}
                   />
                 </div>
                 {toggleGlobalMutation.isPending ? (
@@ -181,9 +181,9 @@ export default function ChatbotControlPage() {
 
       <section className="space-y-3">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight">Kanalet</h2>
+          <h2 className="text-lg font-semibold tracking-tight">Channels</h2>
           <p className="text-sm text-muted-foreground">
-            Aktivizoni ose çaktivizoni IA-në për çdo kanal të lidhur (si te faqja Kanalet).
+            Enable or disable AI for each connected channel (same as Channels page).
           </p>
         </div>
 
@@ -195,14 +195,14 @@ export default function ChatbotControlPage() {
           </div>
         ) : channelsQuery.isError ? (
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
-            Kanalet nuk u ngarkuan. Ju lutemi rifreskoni faqen.
+            Channels could not be loaded. Please refresh.
           </div>
         ) : channelsQuery.data?.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed py-12 text-center">
             <Radio className="size-9 text-muted-foreground opacity-50" />
-            <p className="text-sm text-muted-foreground">Ende nuk është lidhur asnjë kanal.</p>
+            <p className="text-sm text-muted-foreground">No channels connected yet.</p>
             <Link to="/channels" className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}>
-              Shko te Kanalet
+              Go to Channels
             </Link>
           </div>
         ) : (
@@ -221,9 +221,9 @@ export default function ChatbotControlPage() {
 
       <section className="space-y-3">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight">Biseda në pauzë</h2>
+          <h2 className="text-lg font-semibold tracking-tight">Paused conversations</h2>
           <p className="text-sm text-muted-foreground">
-            Bisedat ku IA-ja u pezullua manualisht nga Mesazhet ose nga kjo faqe.
+            Conversations where AI was manually paused from Inbox or this page.
           </p>
         </div>
 
@@ -234,10 +234,10 @@ export default function ChatbotControlPage() {
             ))}
           </div>
         ) : pausedQuery.isError ? (
-          <p className="text-sm text-destructive">Bisedat në pauzë nuk u ngarkuan.</p>
+          <p className="text-sm text-destructive">Paused conversations could not be loaded.</p>
         ) : !pausedQuery.data?.length ? (
           <p className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
-            Aktualisht nuk ka biseda të pezulluara manualisht.
+            There are currently no manually paused conversations.
           </p>
         ) : (
           <ul className="space-y-2 max-w-3xl">
@@ -257,7 +257,7 @@ export default function ChatbotControlPage() {
                         to={`/inbox?c=${encodeURIComponent(row.id)}`}
                         className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
                       >
-                        Hape në Mesazhet
+                        Open in Inbox
                       </Link>
                       <Button
                         type="button"
@@ -269,10 +269,10 @@ export default function ChatbotControlPage() {
                         resumeConversationMutation.variables === row.id ? (
                           <>
                             <Loader2 className="size-4 animate-spin" />
-                            Duke rifilluar…
+                            Resuming...
                           </>
                         ) : (
-                          'Rifillo IA-në'
+                          'Resume AI'
                         )}
                       </Button>
                     </div>

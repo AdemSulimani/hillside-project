@@ -22,19 +22,19 @@ import {
 } from 'lucide-react';
 
 const navItems = [
-  { to: '/dashboard', label: 'Paneli', icon: LayoutDashboard },
-  { to: '/inbox', label: 'Mesazhet', icon: Inbox },
-  { to: '/products', label: 'Produkte', icon: Package },
-  { to: '/channels', label: 'Kanale', icon: Radio },
-  { to: '/orders', label: 'Porositë', icon: ShoppingCart },
-  { to: '/contacts', label: 'Kontakte', icon: Users },
-  { to: '/ai-config', label: 'Konfigurimi IA', icon: BrainCircuit },
-  { to: '/chatbot-control', label: 'Kontrolli i chatbot-it', icon: Bot },
-  { to: '/statistics', label: 'Statistika', icon: BarChart3 },
-  { to: '/feedback', label: 'Komente', icon: MessageSquareHeart },
-  { to: '/ai-alerts', label: 'Alarmet IA', icon: ShieldAlert },
-  { to: '/business', label: 'Biznesi im', icon: Building2 },
-  { to: '/profile', label: 'Profili im', icon: UserCircle },
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/inbox', label: 'Inbox', icon: Inbox },
+  { to: '/products', label: 'Products', icon: Package },
+  { to: '/channels', label: 'Channels', icon: Radio },
+  { to: '/orders', label: 'Orders', icon: ShoppingCart },
+  { to: '/contacts', label: 'Contacts', icon: Users },
+  { to: '/ai-config', label: 'AI Configuration', icon: BrainCircuit },
+  { to: '/chatbot-control', label: 'Chatbot Control', icon: Bot },
+  { to: '/statistics', label: 'Statistics', icon: BarChart3 },
+  { to: '/feedback', label: 'Feedback', icon: MessageSquareHeart },
+  { to: '/ai-alerts', label: 'AI Alerts', icon: ShieldAlert },
+  { to: '/business', label: 'My Business', icon: Building2 },
+  { to: '/profile', label: 'My Profile', icon: UserCircle },
 ] as const;
 
 export default function Sidebar() {
@@ -61,7 +61,7 @@ export default function Sidebar() {
         <button
           type="button"
           className="fixed inset-0 z-40 cursor-default bg-black/40 md:hidden"
-          aria-label="Mbyll menunë e navigimit"
+          aria-label="Close navigation menu"
           onClick={() => setSidebarOpen(false)}
         />
       ) : null}
@@ -81,7 +81,7 @@ export default function Sidebar() {
             type="button"
             onClick={() => setSidebarOpen(false)}
             className="rounded-md p-1 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground md:hidden"
-            aria-label="Mbyll shiritin anësor"
+            aria-label="Close sidebar"
           >
             <X className="size-5" />
           </button>
@@ -121,7 +121,7 @@ export default function Sidebar() {
                   {to === '/orders' && ordersNavNewCount > 0 ? (
                     <span
                       className="flex min-w-5 justify-center rounded-full bg-primary px-1.5 py-0.5 text-[0.65rem] font-semibold leading-none text-primary-foreground"
-                      title="Porosi të reja që nga vizita e fundit te faqja e porosive"
+                      title="New orders since your last visit to the orders page"
                     >
                       {ordersNavNewCount > 99 ? '99+' : ordersNavNewCount}
                     </span>

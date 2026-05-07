@@ -34,7 +34,7 @@ export function ChannelCard({
             </div>
           </div>
           <Badge variant={channel.webhook_verified ? 'default' : 'secondary'}>
-            {channel.webhook_verified ? 'E lidhur' : 'Në pritje të verifikimit'}
+            {channel.webhook_verified ? 'Connected' : 'Pending verification'}
           </Badge>
         </div>
       </CardHeader>
@@ -45,7 +45,7 @@ export function ChannelCard({
           disabled={isDeletePending}
           onClick={() => onDisconnect(channel)}
         >
-          {isDeletePending ? 'Duke shkëputur…' : 'Shkëput'}
+          {isDeletePending ? 'Disconnecting…' : 'Disconnect'}
         </Button>
       </CardFooter>
     </Card>

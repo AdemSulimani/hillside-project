@@ -34,7 +34,7 @@ interface ConversationListItemProps {
 export function ConversationListItem({ conversation, selected, onSelect }: ConversationListItemProps) {
   const previewSource =
     conversation.last_message_content?.trim() ||
-    (conversation.last_message_created_at ? '(Pa tekst)' : 'Ende pa mesazhe');
+    (conversation.last_message_created_at ? '(No text)' : 'No messages yet');
   const preview = truncate(previewSource, 72);
   const timeLabel = formatRelativeShort(
     conversation.last_message_created_at ?? conversation.last_message_at,
@@ -83,8 +83,8 @@ export function ConversationListItem({ conversation, selected, onSelect }: Conve
             {conversation.has_unread_ai_alert ? (
               <span
                 className="flex size-6 items-center justify-center rounded-full bg-orange-500/15 text-orange-700 dark:text-orange-300"
-                title="Alarm cilësie IA i palexuar"
-                aria-label="Alarm cilësie IA i palexuar"
+                title="Unread AI quality alert"
+                aria-label="Unread AI quality alert"
               >
                 <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
               </span>
@@ -92,8 +92,8 @@ export function ConversationListItem({ conversation, selected, onSelect }: Conve
             {unread && (
               <span
                 className="size-2 rounded-full bg-primary"
-                title="E palexuar"
-                aria-label="E palexuar"
+                title="Unread"
+                aria-label="Unread"
               />
             )}
             {timeLabel ? (

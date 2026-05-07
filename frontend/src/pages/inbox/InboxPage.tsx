@@ -63,7 +63,7 @@ function isAiPaused(humanOverrideUntil: string | null): boolean {
 export default function InboxPage() {
   const queryClient = useQueryClient();
   const user = useAuthStore((s) => s.user);
-  const agentName = user?.name?.trim() || 'Agjenti';
+  const agentName = user?.name?.trim() || 'Agent';
   const [searchParams] = useSearchParams();
   const conversationFromUrl = searchParams.get('c') ?? searchParams.get('conversationId');
 
@@ -225,7 +225,7 @@ export default function InboxPage() {
       if (ctx?.prev) {
         queryClient.setQueryData(['conversations', id, 'detail'], ctx.prev);
       }
-      toast.error(extractMessage(err, 'Dërgimi i mesazhit dështoi'));
+      toast.error(extractMessage(err, 'Message send failed'));
     },
     onSuccess: (result: ReplyResult, { id }, ctx) => {
       ctx?.previewUrls?.forEach((u) => URL.revokeObjectURL(u));
@@ -250,7 +250,7 @@ export default function InboxPage() {
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'unread-count'] });
 
       if (!result.channelDelivered) {
-        toast.warning('Përgjigja u ruajt, por dërgimi te kanali dështoi (kontrolloni kredencialet).');
+        toast.warning('Reply was saved, but sending to the channel failed (check credentials).');
       }
     },
   });
@@ -262,9 +262,9 @@ export default function InboxPage() {
       queryClient.setQueryData<ConversationThread>(['conversations', conv.id, 'detail'], (old) =>
         old ? { ...old, conversation: { ...old.conversation, status: conv.status } } : old,
       );
-      toast.success('Biseda u mbyll');
+      toast.success('Conversation closed');
     },
-    onError: (err) => toast.error(extractMessage(err, 'Mbyllja e bisedës dështoi')),
+    onError: (err) => toast.error(extractMessage(err, 'Failed to close conversation')),
   });
 
   const reopenMutation = useMutation({
@@ -274,9 +274,9 @@ export default function InboxPage() {
       queryClient.setQueryData<ConversationThread>(['conversations', conv.id, 'detail'], (old) =>
         old ? { ...old, conversation: { ...old.conversation, status: conv.status } } : old,
       );
-      toast.success('Biseda u rihap');
+      toast.success('Conversation reopened');
     },
-    onError: (err) => toast.error(extractMessage(err, 'Rihapja e bisedës dështoi')),
+    onError: (err) => toast.error(extractMessage(err, 'Failed to reopen conversation')),
   });
 
   const resolveQualityAlertMutation = useMutation({
@@ -289,11 +289,11 @@ export default function InboxPage() {
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
       void queryClient.invalidateQueries({ queryKey: ['ai-alerts'] });
       toast.success(
-        resume_ai ? 'IA-ja u rifillua për këtë bisedë' : 'Alarmi u pastrua — IA-ja mbetet e ndalur',
+        resume_ai ? 'AI resumed for this conversation' : 'Alert cleared — AI stays paused',
       );
     },
     onError: (err) =>
-      toast.error(extractMessage(err, 'Nuk u përditësua alarmi ose gjendja e ndalimit të IA-së')),
+      toast.error(extractMessage(err, 'Failed to update alert or AI pause state')),
   });
 
   const toggleConversationAiMutation = useMutation({
@@ -331,7 +331,7 @@ export default function InboxPage() {
           ctx.prev,
         );
       }
-      toast.error(extractMessage(err, 'Ndalimi i IA-së për këtë bisedë nuk u përditësua'));
+      toast.error(extractMessage(err, 'Failed to update AI pause state for this conversation'));
     },
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ['chatbot', 'paused-conversations'] });
@@ -340,7 +340,7 @@ export default function InboxPage() {
         queryKey: ['conversations', result.id, 'detail'],
       });
       toast.success(
-        result.ai_paused ? 'IA-ja u ndal për këtë bisedë' : 'IA-ja u rifillua për këtë bisedë',
+        result.ai_paused ? 'AI paused for this conversation' : 'AI resumed for this conversation',
       );
     },
   });
@@ -395,7 +395,7 @@ export default function InboxPage() {
         pagination: more.pagination,
       });
     } catch (err) {
-      toast.error(extractMessage(err, 'Ngarkimi i mesazheve më të vjetër dështoi'));
+      toast.error(extractMessage(err, 'Failed to load older messages'));
     } finally {
       setOlderLoading(false);
     }
@@ -423,7 +423,7 @@ export default function InboxPage() {
   });
 
   const channelTabs: { key: ChannelType | 'all'; label: string }[] = [
-    { key: 'all', label: 'Të gjitha' },
+    { key: 'all', label: 'All' },
     { key: 'facebook', label: 'Facebook' },
     { key: 'instagram', label: 'Instagram' },
     { key: 'whatsapp', label: 'WhatsApp' },
@@ -432,9 +432,9 @@ export default function InboxPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="mb-4">
-        <h1 className="text-xl font-semibold tracking-tight">Mesazhet</h1>
+        <h1 className="text-xl font-semibold tracking-tight">Inbox</h1>
         <p className="text-sm text-muted-foreground">
-          Lexoni dhe përgjigjuni bisedave në të gjitha kanalet e lidhura.
+          Read and reply to conversations across all connected channels.
         </p>
       </div>
 
@@ -449,7 +449,7 @@ export default function InboxPage() {
           <div className="border-b border-border p-3 space-y-3">
             <div className="relative">
               <Input
-                placeholder="Kërko biseda…"
+                placeholder="Search conversations…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pr-3"
@@ -475,7 +475,7 @@ export default function InboxPage() {
                 variant={statusFilter === 'open' ? 'default' : 'outline'}
                 onClick={() => setStatusFilter('open')}
               >
-                E hapur
+                Open
               </Button>
               <Button
                 type="button"
@@ -483,7 +483,7 @@ export default function InboxPage() {
                 variant={statusFilter === 'closed' ? 'default' : 'outline'}
                 onClick={() => setStatusFilter('closed')}
               >
-                E mbyllur
+                Closed
               </Button>
             </div>
           </div>
@@ -496,9 +496,9 @@ export default function InboxPage() {
                 ))}
               </div>
             ) : listQuery.isError ? (
-              <p className="p-3 text-sm text-destructive">Nuk u ngarkuan bisedat.</p>
+              <p className="p-3 text-sm text-destructive">Conversations could not be loaded.</p>
             ) : filteredConversations.length === 0 ? (
-              <p className="p-3 text-sm text-muted-foreground">Asnjë bisedë nuk përputhet me filtrat.</p>
+              <p className="p-3 text-sm text-muted-foreground">No conversations match the filters.</p>
             ) : (
               <ul className="flex flex-col gap-1">
                 {filteredConversations.map((c) => (
@@ -515,7 +515,7 @@ export default function InboxPage() {
             {listQuery.isFetchingNextPage ? (
               <div className="flex justify-center py-2" aria-live="polite">
                 <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
-                <span className="sr-only">Duke ngarkuar më shumë biseda</span>
+                <span className="sr-only">Loading more conversations</span>
               </div>
             ) : null}
             {listQuery.hasNextPage || flatConversations.length > 0 ? (
@@ -532,9 +532,9 @@ export default function InboxPage() {
                 <Inbox className="size-10 opacity-50" />
               </div>
               <div>
-                <p className="font-medium text-foreground">Zgjidhni një bisedë</p>
+                <p className="font-medium text-foreground">Select a conversation</p>
                 <p className="mt-1 max-w-sm text-sm">
-                  Zgjidhni një bisedë në të majtë për të parë historikun dhe për të dërguar përgjigje.
+                  Choose a conversation on the left to view history and send replies.
                 </p>
               </div>
             </div>
@@ -546,7 +546,7 @@ export default function InboxPage() {
             </div>
           ) : threadQuery.isError || !thread ? (
             <div className="flex flex-1 items-center justify-center p-6 text-sm text-destructive">
-              Nuk u ngarkua kjo bisedë.
+              This conversation could not be loaded.
             </div>
           ) : (
             <>
@@ -557,7 +557,7 @@ export default function InboxPage() {
                     {thread.conversation.channel_name} ·{' '}
                     <span className="capitalize">{thread.conversation.channel_type}</span>
                     {thread.conversation.status === 'closed' ? (
-                      <span className="ml-2 rounded-md bg-muted px-1.5 py-0.5">E mbyllur</span>
+                      <span className="ml-2 rounded-md bg-muted px-1.5 py-0.5">Closed</span>
                     ) : null}
                   </p>
                 </div>
@@ -571,7 +571,7 @@ export default function InboxPage() {
                       onClick={() => closeMutation.mutate(thread.conversation.id)}
                     >
                       <Lock className="size-4" />
-                      Mbyll
+                      Close
                     </Button>
                   ) : (
                     <Button
@@ -582,7 +582,7 @@ export default function InboxPage() {
                       onClick={() => reopenMutation.mutate(thread.conversation.id)}
                     >
                       <Unlock className="size-4" />
-                      Rihap
+                      Reopen
                     </Button>
                   )}
                 </div>
@@ -592,8 +592,8 @@ export default function InboxPage() {
                 <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
                   <div className="space-y-2">
                     <p className="text-sm font-medium text-foreground">
-                      Klienti bëri një pyetje përdorimi që nuk mundëm ta përgjigjemi. IA-ja është ndalur. Ju lutemi
-                      përgjigjuni manualisht ose përditësoni udhëzimet e përdorimit të produktit.
+                      The customer asked a usage question we could not answer. AI is paused. Please reply manually
+                      or update the product usage guidance.
                     </p>
                     <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
                   </div>
@@ -608,8 +608,8 @@ export default function InboxPage() {
                 <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
                   <div className="space-y-2">
                     <p className="text-sm font-medium text-foreground">
-                      Klienti ka problem me dërgesën/produktin. IA-ja është ndalur dhe klienti mori një mesazh
-                      pritjeje. Ju lutemi vazhdoni manualisht.
+                      The customer has a delivery/product issue. AI is paused and the customer received a waiting
+                      message. Please continue manually.
                     </p>
                     <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
                   </div>
@@ -647,9 +647,9 @@ export default function InboxPage() {
                         <ShoppingBag className="size-5" aria-hidden />
                       </div>
                       <div className="min-w-0">
-                        <p className="font-semibold text-foreground">Porosia u krijua</p>
+                        <p className="font-semibold text-foreground">Order created</p>
                         <p className="text-sm text-muted-foreground">
-                          Ekziston një porosi skicë për këtë bisedë:{' '}
+                          There is a draft order for this conversation:{' '}
                           <span className="font-medium text-foreground">
                             {draftOrderForThread.product_name}
                           </span>
@@ -667,7 +667,7 @@ export default function InboxPage() {
                         'shrink-0 self-start sm:self-auto',
                       )}
                     >
-                      Shqyrto te porositë
+                      Review in Orders
                     </Link>
                   </div>
                 </div>
@@ -681,12 +681,12 @@ export default function InboxPage() {
                 {olderLoading ? (
                   <div className="mb-2 flex justify-center" aria-live="polite">
                     <Loader2 className="size-5 animate-spin text-muted-foreground" aria-hidden />
-                    <span className="sr-only">Duke ngarkuar mesazhe më të vjetër</span>
+                    <span className="sr-only">Loading older messages</span>
                   </div>
                 ) : null}
                 {thread.pagination.hasMore && !olderLoading ? (
                   <p className="mb-2 text-center text-xs text-muted-foreground">
-                    Lëvizni lart për të ngarkuar mesazhe më të vjetër
+                    Scroll up to load older messages
                   </p>
                 ) : null}
                 <div className="flex flex-col gap-3">
@@ -712,7 +712,7 @@ export default function InboxPage() {
 
               <ReplyBox
                 disabled={thread.conversation.status === 'closed'}
-                disabledReason="Kjo bisedë është e mbyllur. Rihapeni për të dërguar mesazhe."
+                disabledReason="This conversation is closed. Reopen it to send messages."
                 aiPaused={isAiPaused(thread.conversation.human_override_until)}
                 sending={sendMutation.isPending}
                 onSend={async ({ text, files }) => {
