@@ -67,7 +67,9 @@ These map to the workflow jobs in `.github/workflows/deploy.yml`.
 - `PROD_SSH_HOST`
 - `PROD_SSH_USER`
 - `PROD_SSH_PRIVATE_KEY`
+- `PROD_SSH_PASSPHRASE` (required if the private key is passphrase-protected)
 - `PROD_APP_DIR` (example: `/opt/hillside-prod`)
+- `PROD_REPO_ACCESS_TOKEN` (GitHub token with repository read access for clone/pull on droplet)
 - `PROD_BACKEND_ENV_B64` (base64-encoded backend `.env`)
 - `PROD_FRONTEND_ENV_B64` (base64-encoded frontend `.env`)
 - `PROD_HEALTHCHECK_URL` (example: `https://api.yourdomain.com/api/health`)
