@@ -1,7 +1,7 @@
 import { Pool, type PoolConfig } from 'pg';
 
 function isLocalHost(host: string) {
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === 'postgres';
 }
 
 function isDigitalOceanPostgres(host: string) {

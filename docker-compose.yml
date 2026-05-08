@@ -4,7 +4,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -38,7 +38,9 @@ services:
     environment:
       NODE_ENV: development
       PORT: '8000'
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hillside
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hillside?sslmode=disable
+      PGSSLMODE: disable
+      DB_SSL: 'false'
       REDIS_URL: redis://redis:6379
       FRONTEND_URL: http://localhost:3000
       BACKEND_URL: http://localhost:8000
