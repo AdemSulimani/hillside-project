@@ -11,15 +11,15 @@ This project now includes GitHub Actions workflows for:
 
 Recommended setup:
 
-- **Staging**: separate VM or container host, separate DB and Redis, staging domain
-- **Production**: isolated VM/cluster, production DB and Redis, production domain
+- **Staging**: frontend on Vercel and backend on Render
+- **Production**: DigitalOcean droplet (Docker Compose), production domain
 - Keep staging and production credentials fully separate
 
 ## 2) Required runtime prerequisites
 
-- Docker Engine + Docker Compose plugin on each host
-- Git installed on each host
-- Public GitHub repository access from hosts (or deploy key/token if private)
+- Staging on Vercel + Render with deploy hooks enabled
+- Docker Engine + Docker Compose plugin on the production droplet
+- Git installed on the production droplet
 - PostgreSQL 16+ and Redis 7+ reachable from backend
 
 ## 3) Configure environment files
@@ -58,12 +58,8 @@ These map to the workflow jobs in `.github/workflows/deploy.yml`.
 
 ### Staging secrets
 
-- `STAGING_SSH_HOST`
-- `STAGING_SSH_USER`
-- `STAGING_SSH_PRIVATE_KEY`
-- `STAGING_APP_DIR` (example: `/opt/hillside-staging`)
-- `STAGING_BACKEND_ENV_B64` (base64-encoded backend `.env`)
-- `STAGING_FRONTEND_ENV_B64` (base64-encoded frontend `.env`)
+- `STAGING_RENDER_DEPLOY_HOOK_URL`
+- `STAGING_VERCEL_DEPLOY_HOOK_URL`
 - `STAGING_HEALTHCHECK_URL` (example: `https://staging-api.yourdomain.com/api/health`)
 
 ### Production secrets
@@ -76,7 +72,7 @@ These map to the workflow jobs in `.github/workflows/deploy.yml`.
 - `PROD_FRONTEND_ENV_B64` (base64-encoded frontend `.env`)
 - `PROD_HEALTHCHECK_URL` (example: `https://api.yourdomain.com/api/health`)
 
-You can generate base64 values locally (Linux/macOS):
+You can generate base64 values locally (Linux/macOS) for production:
 
 ```bash
 base64 -w 0 backend/.env
@@ -112,18 +108,18 @@ Recommended promotion flow:
 
 ### Deploy (`.github/workflows/deploy.yml`)
 
-- `main` push -> staging deploy
-- tag push `v*` -> production deploy
+- `main` push -> staging deploy (triggers Render + Vercel deploy hooks)
+- tag push `v*` -> production deploy over SSH (DigitalOcean droplet)
 - manual deploy supported for both environments
 - post-deploy health gate validates public `/api/health` URL before job is marked successful
 
-Deployment runs `scripts/deploy.sh`, which:
+Production deployment runs `scripts/deploy.sh`, which:
 
 1. writes `backend/.env` and `frontend/.env` from GitHub secrets
 2. runs `docker compose up -d --build`
 3. prunes dangling images
 
-## 8) Host bootstrap (first time only)
+## 8) Production host bootstrap (first time only)
 
 On each host:
 
