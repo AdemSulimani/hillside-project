@@ -74,6 +74,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       FRONTEND_URL: http://localhost:3000
       BACKEND_URL: http://localhost:8000
+      BACKBLAZE_REGION: ${{ secrets.CI_BACKBLAZE_REGION || 'us-east-1' }}
       JWT_SECRET: ${{ secrets.CI_JWT_SECRET || 'ci-jwt-secret' }}
       JWT_REFRESH_SECRET: ${{ secrets.CI_JWT_REFRESH_SECRET || 'ci-refresh-secret' }}
       OPENAI_API_KEY: ${{ secrets.CI_OPENAI_API_KEY || 'ci-placeholder-key' }}
