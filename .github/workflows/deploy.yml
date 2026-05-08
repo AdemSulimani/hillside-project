@@ -92,8 +92,12 @@ jobs:
             cd "$APP_DIR"
             git remote set-url origin "$REPO_URL"
             git fetch --all --tags
-            git checkout "$REF_NAME"
-            git pull --ff-only origin "$REF_NAME" || true
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              git checkout --force "tags/$REF_NAME"
+            else
+              git checkout --force "$REF_NAME"
+              git reset --hard "origin/$REF_NAME"
+            fi
             bash "$APP_DIR/scripts/deploy.sh" production
 
       - name: Verify production health endpoint
