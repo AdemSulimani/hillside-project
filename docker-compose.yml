@@ -36,14 +36,12 @@ services:
     ports:
       - '8000:8000'
     environment:
-      NODE_ENV: development
+      NODE_ENV: ${NODE_ENV:-development}
       PORT: '8000'
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hillside?sslmode=disable
       PGSSLMODE: disable
       DB_SSL: 'false'
       REDIS_URL: redis://redis:6379
-      FRONTEND_URL: http://localhost:3000
-      BACKEND_URL: http://localhost:8000
     env_file:
       - ./backend/.env
     depends_on:
@@ -57,8 +55,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: http://localhost:8000/api
-        VITE_WS_URL: ws://localhost:8000
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000}
     ports:
       - '3000:80'
     depends_on:
