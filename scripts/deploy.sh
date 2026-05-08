@@ -19,14 +19,8 @@ echo "[deploy] Writing environment files for $ENVIRONMENT"
 printf "%s" "$BACKEND_ENV_B64" | base64 -d > backend/.env
 printf "%s" "$FRONTEND_ENV_B64" | base64 -d > frontend/.env
 
-# Export frontend build vars so docker compose uses production API/WS URLs.
-set -a
-source backend/.env
-source frontend/.env
-set +a
-
 echo "[deploy] Building and starting containers"
-docker compose up -d --build
+docker compose --env-file backend/.env --env-file frontend/.env up -d --build
 
 echo "[deploy] Cleaning old images"
 docker image prune -f
