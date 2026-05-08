@@ -136,7 +136,7 @@ export default function OrdersPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTab = searchParams.get('tab') === 'action_required' ? 'action_required' : 'all';
 
-  const [statusTab, setStatusTab] = useState<OrdersTabKey>(initialTab);
+  const [statusTabState, setStatusTab] = useState<OrdersTabKey>(initialTab);
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebouncedValue(searchInput, 300);
   const [dateFrom, setDateFrom] = useState('');
@@ -162,14 +162,12 @@ export default function OrdersPage() {
     setSearchParams(next, { replace: true });
   }, [openFromQuery, searchParams, setSearchParams]);
 
-  useEffect(() => {
+  const statusTab = useMemo<OrdersTabKey>(() => {
     const tabFromUrl = searchParams.get('tab') === 'action_required' ? 'action_required' : null;
-    setStatusTab((prev) => {
-      if (tabFromUrl === 'action_required') return 'action_required';
-      if (prev === 'action_required') return 'all';
-      return prev;
-    });
-  }, [searchParams]);
+    if (tabFromUrl === 'action_required') return 'action_required';
+    if (statusTabState === 'action_required') return 'all';
+    return statusTabState;
+  }, [searchParams, statusTabState]);
 
   const statusFilter = useMemo(() => {
     const tab = STATUS_TABS.find((t) => t.key === statusTab);
