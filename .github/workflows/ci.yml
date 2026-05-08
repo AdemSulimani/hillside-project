@@ -97,7 +97,7 @@ jobs:
         run: npm run build
 
       - name: Run migrations
-        run: node dist/db/migrate.js
+        run: npm run migrate
 
       - name: Start API
         run: node dist/server.js > /tmp/backend.log 2>&1 &
