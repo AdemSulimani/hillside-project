@@ -78,6 +78,7 @@ jobs:
             export APP_DIR="${{ secrets.PROD_APP_DIR }}"
             export REPOSITORY="${{ github.repository }}"
             export REF_NAME="${{ github.ref_name }}"
+            export TARGET_SHA="${{ github.sha }}"
             export BACKEND_ENV_B64="${{ secrets.PROD_BACKEND_ENV_B64 }}"
             export FRONTEND_ENV_B64="${{ secrets.PROD_FRONTEND_ENV_B64 }}"
             export REPO_ACCESS_TOKEN="${{ secrets.PROD_REPO_ACCESS_TOKEN }}"
@@ -92,12 +93,8 @@ jobs:
             cd "$APP_DIR"
             git remote set-url origin "$REPO_URL"
             git fetch --all --tags
-            if [ "${{ github.ref_type }}" = "tag" ]; then
-              git checkout --force "tags/$REF_NAME"
-            else
-              git checkout --force "$REF_NAME"
-              git reset --hard "origin/$REF_NAME"
-            fi
+            git checkout --force main || git checkout -B main origin/main
+            git reset --hard "$TARGET_SHA"
             bash "$APP_DIR/scripts/deploy.sh" production
 
       - name: Verify production health endpoint
