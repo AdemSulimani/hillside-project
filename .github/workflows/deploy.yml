@@ -74,6 +74,9 @@ jobs:
           key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
           passphrase: ${{ secrets.PROD_SSH_PASSPHRASE }}
           script_stop: true
+          # Build on a 1 vCPU droplet (npm ci + tsc + sharp/tesseract) plus the in-script
+          # health wait can take longer than the SSH action's default 10 minutes.
+          command_timeout: 30m
           script: |
             export APP_DIR="${{ secrets.PROD_APP_DIR }}"
             export REPOSITORY="${{ github.repository }}"
