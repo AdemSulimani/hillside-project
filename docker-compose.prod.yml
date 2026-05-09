@@ -1,0 +1,81 @@
+# Production overlay for the DigitalOcean droplet (1 vCPU / 2 GB RAM).
+#
+# Usage (also wired in scripts/deploy.sh):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Notes:
+# - Memory limits prevent any single service from triggering the kernel OOM killer
+#   and silently taking another container down with it.
+# - Postgres/Redis are bound to 127.0.0.1 (already in base compose); the only public
+#   listeners are the backend (8000) and the frontend (3000), which a host nginx /
+#   reverse proxy then terminates TLS for at api.byhillside.com / app.byhillside.com.
+
+services:
+  postgres:
+    shm_size: '256mb'
+    command:
+      - postgres
+      - -c
+      - max_connections=80
+      - -c
+      - shared_buffers=192MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - wal_compression=on
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+        reservations:
+          memory: 256M
+
+  redis:
+    command:
+      - redis-server
+      - --save
+      - '60'
+      - '1'
+      - --appendonly
+      - 'yes'
+      - --maxmemory
+      - 192mb
+      - --maxmemory-policy
+      - allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 224M
+        reservations:
+          memory: 96M
+
+  backend:
+    environment:
+      NODE_ENV: production
+      # Worker concurrency tuned down so HTTP requests don't starve on a 1 vCPU box.
+      # Override these in backend/.env if you scale up the droplet.
+      WEBHOOK_WORKER_CONCURRENCY: ${WEBHOOK_WORKER_CONCURRENCY:-3}
+      AI_WORKER_CONCURRENCY: ${AI_WORKER_CONCURRENCY:-2}
+      NOTIFICATIONS_WORKER_CONCURRENCY: ${NOTIFICATIONS_WORKER_CONCURRENCY:-1}
+      DEFAULT_WORKER_CONCURRENCY: ${DEFAULT_WORKER_CONCURRENCY:-1}
+      FINETUNING_WORKER_CONCURRENCY: ${FINETUNING_WORKER_CONCURRENCY:-1}
+      # Cap Node heap so it cannot exceed the container limit (which itself is below host RAM).
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=768}
+    deploy:
+      resources:
+        limits:
+          memory: 900M
+        reservations:
+          memory: 384M
+
+  frontend:
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+        reservations:
+          memory: 32M

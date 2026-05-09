@@ -117,9 +117,10 @@ Recommended promotion flow:
 
 Production deployment runs `scripts/deploy.sh`, which:
 
-1. writes `backend/.env` and `frontend/.env` from GitHub secrets
-2. runs `docker compose up -d --build`
-3. prunes dangling images
+1. writes `backend/.env` and `frontend/.env` from GitHub secrets **atomically** (decode to a temp file, fail if empty, then `mv` into place — so a half-decoded env can never reach the running container)
+2. runs `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans` (the prod overlay adds restart policies, log rotation, memory limits, Postgres tuning, and tunable worker concurrency)
+3. waits up to 150 s for `GET /api/health` to return 200 from inside the backend container before exiting non-zero
+4. prunes dangling images and old build cache (`--keep-storage 1GB`) so the droplet disk does not silently fill up
 
 ## 8) Production host bootstrap (first time only)
 
@@ -154,3 +155,85 @@ Then re-login.
 - Re-deploy previous known-good tag to production
 - Keep DB migrations forward-safe; avoid destructive migrations without backup
 - Maintain automated DB backups + restore drills
+
+## 11) Production stability (DigitalOcean droplet)
+
+If you previously saw the site go down on its own and only come back after you SSH'd in
+and ran something, the cause was almost always one of these. They are all fixed in the
+current `docker-compose.yml`, `docker-compose.prod.yml`, `scripts/deploy.sh` and
+`backend/src/db/pool.ts`:
+
+1. **Postgres pool was calling `process.exit(-1)` on idle errors.** Any transient blip
+   (Postgres restart, brief OOM, network hiccup) killed the entire Node process. Now
+   the pool just logs and `pg` recreates the broken client on the next acquire.
+
+2. **No `restart` policy on any container.** When something crashed, Docker did not
+   bring it back. Every service now uses `restart: unless-stopped`.
+
+3. **No memory caps on Postgres / Redis / Node.** On a 2 GB droplet that means the
+   kernel OOM killer eventually fires and silently kills a container. The prod overlay
+   pins each container to a hard limit (Postgres 640M, Redis 224M, Node 900M with
+   `NODE_OPTIONS=--max-old-space-size=768`, frontend 96M) so they all fit comfortably
+   under 2 GB with room for the host.
+
+4. **Worker concurrency was hard-coded** (10 webhook + 5 ai + 3 notif + 3 default + 1
+   finetune = 22 concurrent jobs). On 1 vCPU that starves HTTP requests and they
+   time out. The prod overlay drops them to 3/2/1/1/1 and exposes them as env
+   variables (`WEBHOOK_WORKER_CONCURRENCY` etc.) so you can scale up later.
+
+5. **Postgres + Redis ports were exposed to the public internet** (`5432:5432`,
+   `6379:6379`). Now they're bound to `127.0.0.1` only — backend reaches them via
+   the internal Docker network.
+
+6. **Logs grew unbounded** until they filled the 47 GB droplet disk and froze
+   everything. Compose now applies `json-file` with `max-size=10m`, `max-file=5` per
+   container.
+
+7. **No container-level healthcheck on the backend.** Docker now restarts it if
+   `/api/health` stays unreachable.
+
+### One-time droplet hardening (recommended)
+
+```bash
+# 1. Add a swap file so a memory spike does not instantly OOM-kill a service.
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# 2. Set the kernel to prefer killing the most memory-hungry container, not Postgres.
+echo 'vm.overcommit_memory=1' | sudo tee /etc/sysctl.d/99-hillside.conf
+sudo sysctl --system
+
+# 3. Lock down the firewall so only 22, 80, 443 are public.
+sudo ufw allow OpenSSH && sudo ufw allow 80 && sudo ufw allow 443
+sudo ufw --force enable
+
+# 4. Bind the host nginx (the one terminating TLS for app.byhillside.com /
+#    api.byhillside.com) to proxy to 127.0.0.1:3000 (frontend) and
+#    127.0.0.1:8000 (backend). The Compose ports already publish on those.
+```
+
+### Diagnosing the "login returns 500" symptom
+
+The 500 from `POST /api/auth/login` and `POST /api/auth/refresh` is almost always one
+of these — check in this order from the droplet:
+
+```bash
+cd ~/hillside-project
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=200 backend
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=100 postgres
+```
+
+Things to look for:
+
+- `relation "refresh_tokens" does not exist` → the migration step in the backend
+  Dockerfile failed (e.g. Postgres wasn't ready). Just `docker compose ... up -d`
+  again — the backend container's CMD re-runs `node dist/db/migrate.js`.
+- `column "persistent" of relation "refresh_tokens" does not exist` → same fix.
+- `ECONNREFUSED 172.x.x.x:5432` → Postgres container is not up; check
+  `docker compose ... ps` for an exited Postgres and inspect its logs (often OOM
+  before the memory limits were applied).
+- `OPENAI_API_KEY is not configured` or `[env] Missing required environment
+  variables` → the env file on disk is empty/corrupt; redeploy so the atomic write
+  in `scripts/deploy.sh` rewrites it.

@@ -1,46 +1,73 @@
 # Local full stack: Postgres, Redis, API, SPA (Nginx).
+# Dev:  docker compose up --build
+# Prod: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 # Requires backend/.env (copy from backend/.env.example) with JWT_*, OPENAI_API_KEY, ENCRYPTION_KEY, etc.
-# From repo root: docker compose up --build
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: hillside
     ports:
-      - '5432:5432'
+      - "127.0.0.1:5432:5432"
     volumes:
       - hillside_pg:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d hillside']
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hillside"]
+      interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--save",
+        "60",
+        "1",
+        "--appendonly",
+        "yes",
+        "--maxmemory-policy",
+        "allkeys-lru",
+      ]
     ports:
-      - '6379:6379'
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - hillside_redis:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
       timeout: 3s
       retries: 10
+      start_period: 10s
+    logging: *default-logging
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
-      - '8000:8000'
+      - "8000:8000"
     environment:
       NODE_ENV: ${NODE_ENV:-development}
-      PORT: '8000'
+      PORT: "8000"
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hillside?sslmode=disable
       PGSSLMODE: disable
-      DB_SSL: 'false'
+      DB_SSL: "false"
       REDIS_URL: redis://redis:6379
     env_file:
       - ./backend/.env
@@ -49,6 +76,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:8000/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
 
   frontend:
     build:
@@ -57,10 +97,19 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api}
         VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000}
+    restart: unless-stopped
     ports:
-      - '3000:80'
+      - "3000:80"
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *default-logging
 
 volumes:
   hillside_pg:
+  hillside_redis:

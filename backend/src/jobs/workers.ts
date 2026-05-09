@@ -32,12 +32,30 @@ function createWorkerConnection(): IORedis {
   return new IORedis(redisUrl, bullMqRedisConnectionOptions);
 }
 
+/**
+ * Allows operators to dial worker concurrency down on small hosts (e.g. the 1 vCPU droplet)
+ * so that BullMQ jobs cannot starve the HTTP request loop. Defaults preserve historical
+ * behaviour on hosts large enough to handle them.
+ */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const WEBHOOK_CONCURRENCY = envInt('WEBHOOK_WORKER_CONCURRENCY', 10);
+const AI_CONCURRENCY = envInt('AI_WORKER_CONCURRENCY', 5);
+const NOTIFICATIONS_CONCURRENCY = envInt('NOTIFICATIONS_WORKER_CONCURRENCY', 3);
+const FINETUNING_CONCURRENCY = envInt('FINETUNING_WORKER_CONCURRENCY', 1);
+const DEFAULT_CONCURRENCY = envInt('DEFAULT_WORKER_CONCURRENCY', 3);
+
 export const webhookWorker = new Worker<InboundWebhookJobData>(
   'webhook',
   async (job) => {
     await processInboundMessage(job.data);
   },
-  { connection: createWorkerConnection(), concurrency: 10, ...redisOptimizedWorkerOptions },
+  { connection: createWorkerConnection(), concurrency: WEBHOOK_CONCURRENCY, ...redisOptimizedWorkerOptions },
 );
 
 export const aiWorker = new Worker<AIReplyJobData>(
@@ -47,7 +65,7 @@ export const aiWorker = new Worker<AIReplyJobData>(
   },
   {
     connection: createWorkerConnection(),
-    concurrency: 5,
+    concurrency: AI_CONCURRENCY,
     ...redisOptimizedWorkerOptions,
   },
 );
@@ -57,7 +75,7 @@ export const notificationsWorker = new Worker(
   async (job) => {
     await processNotificationJob(job);
   },
-  { connection: createWorkerConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
+  { connection: createWorkerConnection(), concurrency: NOTIFICATIONS_CONCURRENCY, ...redisOptimizedWorkerOptions },
 );
 
 export const finetuningWorker = new Worker(
@@ -79,7 +97,7 @@ export const finetuningWorker = new Worker(
   },
   {
     connection: createWorkerConnection(),
-    concurrency: 1,
+    concurrency: FINETUNING_CONCURRENCY,
     ...redisOptimizedWorkerOptions,
     stalledInterval: 300_000,
     lockDuration: 300_000,
@@ -95,7 +113,7 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
     }
     await processGenerateProductEmbedding(job.data);
   },
-  { connection: createWorkerConnection(), concurrency: 3, ...redisOptimizedWorkerOptions },
+  { connection: createWorkerConnection(), concurrency: DEFAULT_CONCURRENCY, ...redisOptimizedWorkerOptions },
 );
 
 attachWorkerFailureHandler(webhookWorker, { queueName: 'webhook' });

@@ -50,11 +50,21 @@ function buildPoolConfig(): PoolConfig {
   return { connectionString, ssl: true };
 }
 
-const pool = new Pool(buildPoolConfig());
+const pool = new Pool({
+  ...buildPoolConfig(),
+  max: parseInt(process.env.PG_POOL_MAX || '10', 10),
+  idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10),
+  connectionTimeoutMillis: parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '10000', 10),
+});
 
+/**
+ * `pg` emits 'error' for transient failures on idle clients (network blip, Postgres restart,
+ * brief OOM, etc.). Killing the process here is unsafe in production: combined with a missing
+ * container restart policy it leaves the API permanently down until a human SSHes in. The
+ * Pool will discard the broken client and create a new one on the next acquire, so we just log.
+ */
 pool.on('error', (err) => {
-  console.error('Unexpected error on idle database client', err);
-  process.exit(-1);
+  console.error('[db] Idle client error (pool will recover automatically):', err);
 });
 
 export default pool;
