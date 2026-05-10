@@ -11,8 +11,25 @@ interface State {
   error: Error | null;
 }
 
+const CHUNK_RELOAD_FLAG = 'lazy-retry:__error_boundary__';
+
+function isChunkLoadError(error: Error): boolean {
+  const message = error.message || '';
+  return (
+    /Failed to fetch dynamically imported module/i.test(message) ||
+    /Importing a module script failed/i.test(message) ||
+    /error loading dynamically imported module/i.test(message) ||
+    /ChunkLoadError/i.test(error.name)
+  );
+}
+
 /**
  * Catches render errors in the subtree and shows a friendly fallback instead of a blank screen.
+ *
+ * If the error looks like a stale-deploy chunk load failure (browser had an old tab open
+ * while we shipped a new build), perform a one-shot full reload to fetch the new index.html
+ * and the matching new bundle hashes. The session-storage flag prevents a reload loop on
+ * genuine network failures.
  */
 export class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {
@@ -21,6 +38,11 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   static getDerivedStateFromError(error: Error): State {
+    if (isChunkLoadError(error) && sessionStorage.getItem(CHUNK_RELOAD_FLAG) !== '1') {
+      sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
+      window.location.reload();
+      return { hasError: false, error: null };
+    }
     return { hasError: true, error };
   }
 
@@ -69,6 +91,9 @@ export class ErrorBoundary extends Component<Props, State> {
       );
     }
 
+    if (sessionStorage.getItem(CHUNK_RELOAD_FLAG) === '1') {
+      sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+    }
     return this.props.children;
   }
 }

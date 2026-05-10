@@ -48,15 +48,59 @@ app.use(
   }),
 );
 
-app.use(
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: process.env.NODE_ENV !== 'production' ? 1000 : 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, message: 'Too many requests, please try again later.' },
-  }),
-);
+/**
+ * Rate limiting strategy
+ *
+ * The previous setup applied a single 100 req / 15 min limit to every endpoint, which
+ * was orders of magnitude too low for a real SPA: a single user opening the app fires
+ * 5–10 calls (`/auth/refresh`, `/auth/me`, `/onboarding/status`, `/business`, dashboard
+ * widgets, ...) and each navigation adds more. Worse, `/api/auth/refresh` shared the
+ * bucket with everything else, so once exhausted no one could log in or stay signed in.
+ *
+ * We now apply:
+ *  - a strict limiter only on the abuse-prone endpoints (login, register)
+ *  - a generous global limiter on everything else
+ *  - explicit exemption of `/api/health`, `/api/auth/refresh`, and `/api/webhooks/*`
+ *    because they're called frequently or come from servers we don't want to rate-limit.
+ *
+ * Defaults can be tuned via env vars without redeploying code.
+ */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+const generalLimiter = rateLimit({
+  windowMs: envInt('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envInt('RATE_LIMIT_MAX', isProduction ? 1500 : 5000),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests, please try again later.' },
+  skip: (req) => {
+    const url = req.originalUrl || req.url;
+    return (
+      url.startsWith('/api/health') ||
+      url.startsWith('/api/auth/refresh') ||
+      url.startsWith('/api/webhooks')
+    );
+  },
+});
+
+const authLimiter = rateLimit({
+  windowMs: envInt('AUTH_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envInt('AUTH_RATE_LIMIT_MAX', isProduction ? 30 : 200),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many login attempts, please try again later.' },
+});
+
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use(generalLimiter);
 
 app.use(
   express.json({

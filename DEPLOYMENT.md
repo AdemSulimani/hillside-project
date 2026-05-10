@@ -213,6 +213,75 @@ sudo ufw --force enable
 #    127.0.0.1:8000 (backend). The Compose ports already publish on those.
 ```
 
+## 12) Two further production failure modes (fixed in this branch)
+
+After the initial stability pass we saw a second incident where users got a flood of
+`429 Too Many Requests` on `/api/auth/refresh` plus
+`Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"`
+errors for chunks like `LoginPage-BTcUI8O8.js`. Both are now structurally fixed:
+
+### A. Rate limit cascade (the 429)
+
+The previous setup applied a single 100 req / 15 min limit to **every** endpoint, with
+`/api/auth/refresh` sharing the same bucket. A normal SPA session burns 100 in minutes,
+and once the bucket is exhausted *no one can log in or stay logged in* (the auth
+interceptor retries 401 with a refresh, which then 429s).
+
+It's now split:
+
+- `/api/auth/login` and `/api/auth/register` — strict limiter (default 30 req / 15 min)
+- everything else — generous limiter (default 1500 req / 15 min)
+- `/api/health`, `/api/auth/refresh`, `/api/webhooks/*` — exempt entirely
+
+Both limits are tunable via env vars without touching code:
+
+- `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`
+- `AUTH_RATE_LIMIT_WINDOW_MS`, `AUTH_RATE_LIMIT_MAX`
+
+If the host nginx in front of the API is **not** sending `X-Forwarded-For`, the
+`app.set('trust proxy', 1)` in `app.ts` falls back to the proxy's loopback IP and every
+user shares one bucket. Make sure the host nginx site for `api.byhillside.com` includes:
+
+```nginx
+proxy_set_header Host              $host;
+proxy_set_header X-Real-IP         $remote_addr;
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+### B. Stale chunk MIME error (the "text/html" module script error)
+
+Vite hashes every chunk by content. After a deploy:
+
+1. Browser tab that was already open still references the **old** hash, e.g. `LoginPage-BTcUI8O8.js`.
+2. The new container's `/usr/share/nginx/html/assets/` does not contain that file.
+3. The previous nginx config did `try_files $uri $uri/ /index.html`, so the missing
+   `.js` request *fell back to `index.html`*, which the browser then refused to execute
+   ("expected JavaScript module, got HTML").
+
+Fix is multi-layered:
+
+- `frontend/docker/nginx.conf` now serves `/assets/*` with `try_files $uri =404;`
+  (no SPA fallback for hashed assets) and adds:
+  - `Cache-Control: public, max-age=31536000, immutable` for `/assets/*`
+  - `Cache-Control: no-cache, no-store, must-revalidate` for `index.html`
+  - explicit MIME types for `.js`, `.mjs`, `.wasm`
+- `frontend/src/lib/lazyWithRetry.ts` wraps every `lazy()` so a chunk load failure
+  triggers a one-shot full reload (sessionStorage flag prevents a reload loop).
+- `frontend/src/components/ErrorBoundary.tsx` does the same for non-route lazy imports.
+- `frontend/vite.config.ts` now splits `react`, `@tanstack`, `lucide-react`, and
+  `sonner` into stable vendor chunks so a normal app deploy doesn't invalidate the
+  whole bundle.
+
+### Operational guidance
+
+- After a frontend deploy, users with stale tabs will reload **once** automatically
+  and pick up the new bundle. No action needed.
+- If you ever want to be extra safe, you can also keep the previous deploy's
+  `/assets/*` files around for ~15 minutes by mounting a host directory and copying
+  rather than rebuilding the image — but with the lazyWithRetry helper this is
+  generally unnecessary.
+
 ### Diagnosing the "login returns 500" symptom
 
 The 500 from `POST /api/auth/login` and `POST /api/auth/refresh` is almost always one
