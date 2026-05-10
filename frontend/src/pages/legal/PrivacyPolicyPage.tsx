@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 
 const EFFECTIVE_DATE = 'April 14, 2026';
-const LAST_UPDATED = 'May 3, 2026';
+const LAST_UPDATED = 'May 10, 2026';
 
 export default function PrivacyPolicyPage() {
   return (
