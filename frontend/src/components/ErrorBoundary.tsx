@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { hardReloadSpa, LAZY_RETRY_ERROR_BOUNDARY_FLAG } from '@/lib/hardReload';
 
 interface Props {
   children: ReactNode;
@@ -10,8 +11,6 @@ interface State {
   hasError: boolean;
   error: Error | null;
 }
-
-const CHUNK_RELOAD_FLAG = 'lazy-retry:__error_boundary__';
 
 function isChunkLoadError(error: Error): boolean {
   const message = error.message || '';
@@ -38,9 +37,9 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   static getDerivedStateFromError(error: Error): State {
-    if (isChunkLoadError(error) && sessionStorage.getItem(CHUNK_RELOAD_FLAG) !== '1') {
-      sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
-      window.location.reload();
+    if (isChunkLoadError(error) && sessionStorage.getItem(LAZY_RETRY_ERROR_BOUNDARY_FLAG) !== '1') {
+      sessionStorage.setItem(LAZY_RETRY_ERROR_BOUNDARY_FLAG, '1');
+      hardReloadSpa();
       return { hasError: false, error: null };
     }
     return { hasError: true, error };
@@ -51,11 +50,12 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   handleRetry = (): void => {
-    this.setState({ hasError: false, error: null });
+    // Re-rendering alone does not refetch missing lazy chunks; force a fresh document.
+    hardReloadSpa({ clearErrorBoundaryFlag: true });
   };
 
   handleReload = (): void => {
-    window.location.reload();
+    hardReloadSpa({ clearErrorBoundaryFlag: true });
   };
 
   render(): ReactNode {
@@ -91,8 +91,8 @@ export class ErrorBoundary extends Component<Props, State> {
       );
     }
 
-    if (sessionStorage.getItem(CHUNK_RELOAD_FLAG) === '1') {
-      sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+    if (sessionStorage.getItem(LAZY_RETRY_ERROR_BOUNDARY_FLAG) === '1') {
+      sessionStorage.removeItem(LAZY_RETRY_ERROR_BOUNDARY_FLAG);
     }
     return this.props.children;
   }

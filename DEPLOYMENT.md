@@ -265,7 +265,10 @@ Fix is multi-layered:
   (no SPA fallback for hashed assets) and adds:
   - `Cache-Control: public, max-age=31536000, immutable` for `/assets/*`
   - `Cache-Control: no-cache, no-store, must-revalidate` for `index.html`
-  - explicit MIME types for `.js`, `.mjs`, `.wasm`
+  - **Do not** add a bare `types { ... }` block in that `server { }` — in nginx it
+    replaces the inherited `mime.types`, so `.html` loses `text/html` and the browser
+    may **download** `index.html` instead of rendering it (looks like “Rifresko faqen
+    downloads a file”). Rely on the image’s default `include mime.types` at `http` level.
 - `frontend/src/lib/lazyWithRetry.ts` wraps every `lazy()` so a chunk load failure
   triggers a one-shot full reload (sessionStorage flag prevents a reload loop).
 - `frontend/src/components/ErrorBoundary.tsx` does the same for non-route lazy imports.

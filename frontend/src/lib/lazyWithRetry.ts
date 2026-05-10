@@ -1,4 +1,5 @@
 import { lazy, type ComponentType } from 'react';
+import { hardReloadSpa } from '@/lib/hardReload';
 
 /**
  * Wraps `React.lazy` so that a failed dynamic import (almost always caused by a deploy
@@ -44,7 +45,7 @@ export function lazyWithRetry<T extends ComponentType<unknown>>(
         const alreadyTried = sessionStorage.getItem(flag) === '1';
         if (!alreadyTried) {
           sessionStorage.setItem(flag, '1');
-          window.location.reload();
+          hardReloadSpa();
           return new Promise(() => {});
         }
       }
