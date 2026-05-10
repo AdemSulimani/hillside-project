@@ -1,5 +1,6 @@
 import api from '@/lib/api';
 import { queryClient } from '@/lib/query-client';
+import { clearPerRouteLazyRetryFlags } from '@/lib/hardReload';
 import { useAuthStore } from '@/store/authStore';
 import type { ApiResponse, Tenant, User } from '@/types';
 
@@ -55,6 +56,9 @@ export function restoreSessionOnce(): Promise<boolean> {
       } catch {
         // Onboarding status check failed — default to not onboarded
       }
+
+      // Drop stale chunk-retry flags from an older deploy/tab so first sidebar navigation works.
+      clearPerRouteLazyRetryFlags();
 
       return true;
     } catch {

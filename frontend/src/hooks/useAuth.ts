@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
 import { queryClient } from '@/lib/query-client';
 import api from '@/lib/api';
+import { clearPerRouteLazyRetryFlags } from '@/lib/hardReload';
 import type { User, Tenant, ApiResponse } from '@/types';
 
 interface AuthResponse {
@@ -34,6 +35,7 @@ export function useAuth() {
       const { user: newUser, accessToken } = data.data!;
       queryClient.clear();
       setAuth(newUser, accessToken);
+      clearPerRouteLazyRetryFlags();
       useAuthStore.getState().setOnboarded(false);
       navigate('/onboarding');
     },
@@ -50,6 +52,7 @@ export function useAuth() {
       const { user: loggedInUser, accessToken } = data.data!;
       queryClient.clear();
       setAuth(loggedInUser, accessToken);
+      clearPerRouteLazyRetryFlags();
 
       const completed = await fetchOnboardingStatus();
       useAuthStore.getState().setOnboarded(completed);
@@ -78,6 +81,7 @@ export function useAuth() {
     } finally {
       queryClient.clear();
       clearAuth();
+      clearPerRouteLazyRetryFlags();
       navigate('/login');
     }
   }, [clearAuth, navigate]);
