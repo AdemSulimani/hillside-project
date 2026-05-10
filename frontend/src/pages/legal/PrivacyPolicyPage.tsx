@@ -69,11 +69,7 @@ export default function PrivacyPolicyPage() {
             <li>business and account holder identifiers: name, email address, business name, and profile details;</li>
             <li>
               onboarding and configuration data: platform setup preferences, business settings, and feature
-              configurations; and
-            </li>
-            <li>
-              billing and payment information: as necessary to process fees, including payment method details handled
-              via our payment processors.
+              configurations.
             </li>
           </ul>
 
@@ -112,7 +108,7 @@ export default function PrivacyPolicyPage() {
           </ul>
 
           <h3 className="text-base font-semibold">2.5 Billing Event and Commission Data</h3>
-          <p>For usage-based and commission-based billing, we generate and retain:</p>
+          <p>For commission arrangements, we generate and retain:</p>
           <ul className="list-disc space-y-1 pl-5">
             <li>
               system-generated records of billable events, including confirmed order completions and resolved support
@@ -289,8 +285,10 @@ export default function PrivacyPolicyPage() {
               automation, and related features.
             </li>
             <li>
-              Billing and fee calculation: calculating subscription, usage-based, and commission fees; generating
-              invoices; and processing payments.
+              Commission calculation and settlement support: calculating commission amounts from billable events (such
+              as confirmed orders); maintaining commission and billing records; and preparing or sharing invoicing
+              information as agreed. The platform does not process payments; commission is settled outside the platform
+              (for example, via cash or bank transfer).
             </li>
             <li>
               Security and fraud prevention: authenticating users, monitoring for unauthorized access, and maintaining
@@ -425,8 +423,9 @@ export default function PrivacyPolicyPage() {
           </p>
           <h3 className="text-base font-semibold">10.4 Billing Records</h3>
           <p>
-            Billing event records, invoices, and commission calculation data are retained for the period required by
-            applicable tax, accounting, and commercial law, or as otherwise required by applicable legal obligations.
+            Records of billing events, commission calculations, and related invoicing or settlement documentation are
+            retained for the period required by applicable tax, accounting, and commercial law, or as otherwise required
+            by applicable legal obligations.
           </p>
         </section>
 
