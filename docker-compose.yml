@@ -1,7 +1,10 @@
 # Local full stack: Postgres, Redis, API, SPA (Nginx).
 # Dev:  docker compose up --build
 # Prod: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-# Requires backend/.env (copy from backend/.env.example) with JWT_*, OPENAI_API_KEY, ENCRYPTION_KEY, etc.
+#
+# Interpolation (${...}): add a .env next to this file with POSTGRES_USER, POSTGRES_PASSWORD,
+# POSTGRES_DB, DATABASE_URL (gitignored). backend/.env is still loaded into the backend container
+# for JWT_*, OPENAI_API_KEY, ENCRYPTION_KEY, etc. (copy from backend/.env.example).
 
 x-logging: &default-logging
   driver: json-file
@@ -14,15 +17,16 @@ services:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: hillside
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-hillside}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - hillside_pg:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d hillside"]
+      test:
+        ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -65,7 +69,7 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: "8000"
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hillside?sslmode=disable
+      DATABASE_URL: ${DATABASE_URL}
       PGSSLMODE: disable
       DB_SSL: "false"
       REDIS_URL: redis://redis:6379
