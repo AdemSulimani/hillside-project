@@ -270,9 +270,11 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
     );
   } catch (err) {
     if (axios.isAxiosError(err)) {
+      const body = err.response?.data as { error?: { message?: string } } | undefined;
+      const metaMsg = body?.error?.message?.trim();
       sendError(
         res,
-        'WhatsApp Embedded Signup failed',
+        metaMsg || 'WhatsApp Embedded Signup failed',
         400,
         err.response?.data ?? err.message,
       );

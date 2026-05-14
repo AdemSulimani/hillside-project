@@ -6,10 +6,14 @@ import { connectWhatsAppEmbeddedSignup, getWhatsAppSignupState } from '@/api/cha
 
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError) {
-    const data = err.response?.data as { message?: unknown; error?: unknown } | undefined;
+    const data = err.response?.data as
+      | { message?: unknown; error?: unknown }
+      | undefined;
     if (data?.message != null) return String(data.message);
     if (data?.error != null && typeof data.error === 'string') return data.error;
     if (data?.error != null && typeof data.error === 'object' && data.error !== null) {
+      const nested = data.error as { message?: unknown };
+      if (nested.message != null) return String(nested.message);
       try {
         return JSON.stringify(data.error);
       } catch {
@@ -97,9 +101,14 @@ export function useWhatsAppEmbeddedSignup(): {
       }
 
       const { state } = await getWhatsAppSignupState();
+      // Lock redirect_uri before FB.login so it still matches Meta if the URL changes during the dialog
+      // (e.g. SPA replaceState / query cleanup). Must match WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI and Meta Valid OAuth redirect URIs.
+      const envRedirect = (import.meta.env.VITE_WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI as string | undefined)?.trim();
+      const redirectUri =
+        envRedirect ||
+        `${window.location.origin}${window.location.pathname}${window.location.search}`;
       await waitForFacebookSdk();
       const code = await requestAuthorizationCode();
-      const redirectUri = `${window.location.origin}${window.location.pathname}${window.location.search}`;
       await connectWhatsAppEmbeddedSignup({ code, state, redirect_uri: redirectUri });
       await queryClient.invalidateQueries({ queryKey: ['channels'] });
       return true;
