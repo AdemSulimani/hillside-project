@@ -28,6 +28,38 @@ function requireMetaApp(): { appId: string; appSecret: string } {
   return { appId, appSecret };
 }
 
+/** Comma-separated in WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI; each entry must match Meta Valid OAuth Redirect URIs exactly. */
+function getAllowedEmbeddedSignupRedirectUris(): string[] {
+  const raw = process.env.WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI?.trim();
+  if (!raw) {
+    throw new Error('WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI is not configured');
+  }
+  return raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/**
+ * Prefer the redirect_uri observed in the browser so the token exchange matches Meta's OAuth dialog.
+ * When omitted, only allowed if the env lists a single redirect URI (backward compatible).
+ */
+function resolveRedirectUriForTokenExchange(clientRedirectUri: string | undefined): string {
+  const allowed = getAllowedEmbeddedSignupRedirectUris();
+  const client = clientRedirectUri?.trim();
+  if (client) {
+    if (!allowed.includes(client)) {
+      throw new Error(
+        'redirect_uri is not allowed. Add this exact URL to WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI on the server (comma-separated for multiple), and to Meta Facebook Login for Business → Valid OAuth redirect URIs.',
+      );
+    }
+    return client;
+  }
+  if (allowed.length === 1) {
+    return allowed[0]!;
+  }
+  throw new Error(
+    'redirect_uri is required in the request when WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI lists more than one URL.',
+  );
+}
+
 function graphManagementBase(): string {
   const fromEnv = process.env.WHATSAPP_BUSINESS_MANAGEMENT_API?.trim();
   if (fromEnv) {
@@ -51,12 +83,8 @@ export async function generateSignupState(req: Request, res: Response): Promise<
   }
 }
 
-async function exchangeCodeForUserAccessToken(code: string): Promise<string> {
+async function exchangeCodeForUserAccessToken(code: string, redirectUri: string): Promise<string> {
   const { appId, appSecret } = requireMetaApp();
-  const redirectUri = process.env.WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI?.trim();
-  if (!redirectUri) {
-    throw new Error('WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI is not configured');
-  }
 
   const { data } = await axios.post<{ access_token?: string }>(
     OAUTH_ACCESS_TOKEN_URL,
@@ -169,7 +197,7 @@ async function fetchPrimaryPhoneNumber(
 export async function handleEmbeddedSignup(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = req.user!.tenantId!;
-    const input = req.body as { code: string; state: string };
+    const input = req.body as { code: string; state: string; redirect_uri?: string };
 
     const storedState = await redisConnection.get(signupStateKey(tenantId));
     if (!storedState || storedState !== input.state) {
@@ -178,7 +206,18 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
     }
     await redisConnection.del(signupStateKey(tenantId));
 
-    const userAccessToken = await exchangeCodeForUserAccessToken(input.code);
+    let redirectUriForExchange: string;
+    try {
+      redirectUriForExchange = resolveRedirectUriForTokenExchange(input.redirect_uri);
+    } catch (resolveErr) {
+      if (resolveErr instanceof Error && resolveErr.message.startsWith('redirect_uri')) {
+        sendError(res, resolveErr.message, 400);
+        return;
+      }
+      throw resolveErr;
+    }
+
+    const userAccessToken = await exchangeCodeForUserAccessToken(input.code, redirectUriForExchange);
     const systemUserToken = await exchangeUserForSystemUserToken(userAccessToken);
     const wabaId = await resolveWabaId(userAccessToken);
     const { phoneNumberId, displayPhoneNumber } = await fetchPrimaryPhoneNumber(

@@ -60,6 +60,8 @@ export async function getWhatsAppSignupState(): Promise<{ state: string }> {
 export async function connectWhatsAppEmbeddedSignup(body: {
   code: string;
   state: string;
+  /** Same URL Meta used in the OAuth dialog (typically current page, no hash). */
+  redirect_uri?: string;
 }): Promise<Channel> {
   const { data } = await api.post<ApiResponse<{ channel: Record<string, unknown> }>>(
     '/channels/whatsapp/embedded-signup',

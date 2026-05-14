@@ -99,7 +99,8 @@ export function useWhatsAppEmbeddedSignup(): {
       const { state } = await getWhatsAppSignupState();
       await waitForFacebookSdk();
       const code = await requestAuthorizationCode();
-      await connectWhatsAppEmbeddedSignup({ code, state });
+      const redirectUri = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+      await connectWhatsAppEmbeddedSignup({ code, state, redirect_uri: redirectUri });
       await queryClient.invalidateQueries({ queryKey: ['channels'] });
       return true;
     } catch (err) {
