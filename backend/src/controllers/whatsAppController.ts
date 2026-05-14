@@ -36,10 +36,6 @@ function graphManagementBase(): string {
   return `https://graph.facebook.com/${GRAPH_OAUTH_VERSION}`;
 }
 
-function appSecretProof(appSecret: string, accessToken: string): string {
-  return crypto.createHmac('sha256', appSecret).update(accessToken).digest('hex');
-}
-
 export async function generateSignupState(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = req.user!.tenantId!;
@@ -52,12 +48,12 @@ export async function generateSignupState(req: Request, res: Response): Promise<
 }
 
 /**
- * Exchange Embedded Signup auth code for a user access token.
- * Do not send `redirect_uri`: FB.login + response_type code uses Meta's internal dialog redirect
- * (not your SPA URL). Sending https://…/channels causes OAuthException 36008 ("redirect_uri is identical…").
- * @see https://stackoverflow.com/questions/79231881
+ * Embedded Signup (Tech Provider): exchange the short-lived code for the customer's
+ * [business integration / system user access token](https://developers.facebook.com/docs/whatsapp/access-tokens#business-integration-system-user-access-tokens)
+ * via GET/POST `oauth/access_token` — only `client_id`, `client_secret`, and `code` (no `redirect_uri`).
+ * Do not call `/{business-id}/system_user_access_tokens` with this token; that edge is a different flow and returns #33 / unknown errors for Embedded Signup.
  */
-async function exchangeCodeForUserAccessToken(code: string): Promise<string> {
+async function exchangeEmbeddedSignupCodeForBusinessToken(code: string): Promise<string> {
   const { appId, appSecret } = requireMetaApp();
 
   const { data } = await axios.post<{ access_token?: string }>(
@@ -78,42 +74,14 @@ async function exchangeCodeForUserAccessToken(code: string): Promise<string> {
   return data.access_token;
 }
 
-async function exchangeUserForSystemUserToken(userAccessToken: string): Promise<string> {
-  const { appSecret } = requireMetaApp();
-  const businessId = process.env.WHATSAPP_BUSINESS_ID?.trim();
-  const systemUserId = process.env.WHATSAPP_SYSTEM_USER_ID?.trim();
-  if (!businessId) {
-    throw new Error('WHATSAPP_BUSINESS_ID is not configured');
-  }
-  if (!systemUserId) {
-    throw new Error('WHATSAPP_SYSTEM_USER_ID is not configured');
-  }
-
-  const url = `${graphManagementBase()}/${businessId}/system_user_access_tokens`;
-  const proof = appSecretProof(appSecret, userAccessToken);
-
-  const { data } = await axios.post<{ access_token?: string }>(url, null, {
-    params: {
-      appsecret_proof: proof,
-      access_token: userAccessToken,
-      system_user_id: systemUserId,
-    },
-  });
-
-  if (!data.access_token) {
-    throw new Error('system_user_access_tokens did not return access_token');
-  }
-  return data.access_token;
-}
-
-async function resolveWabaId(userAccessToken: string): Promise<string> {
+async function resolveWabaId(businessToken: string): Promise<string> {
   const { appId, appSecret } = requireMetaApp();
   const debugUrl = `${graphManagementBase()}/debug_token`;
   const { data } = await axios.get<{
     data?: { granular_scopes?: Array<{ scope?: string; target_ids?: string[] }> };
   }>(debugUrl, {
     params: {
-      input_token: userAccessToken,
+      input_token: businessToken,
       access_token: `${appId}|${appSecret}`,
     },
   });
@@ -137,7 +105,7 @@ async function resolveWabaId(userAccessToken: string): Promise<string> {
 
   const listUrl = `${graphManagementBase()}/${businessId}/client_whatsapp_business_accounts`;
   const list = await axios.get<{ data?: Array<{ id?: string }> }>(listUrl, {
-    headers: { Authorization: `Bearer ${userAccessToken}` },
+    headers: { Authorization: `Bearer ${businessToken}` },
   });
   const firstId = list.data.data?.[0]?.id;
   if (!firstId) {
@@ -148,14 +116,14 @@ async function resolveWabaId(userAccessToken: string): Promise<string> {
 
 async function fetchPrimaryPhoneNumber(
   wabaId: string,
-  systemUserToken: string,
+  businessToken: string,
 ): Promise<{ phoneNumberId: string; displayPhoneNumber: string }> {
   const url = `${graphManagementBase()}/${wabaId}/phone_numbers`;
   const { data } = await axios.get<{
     data?: Array<{ id?: string; display_phone_number?: string }>;
   }>(url, {
     params: { fields: 'id,display_phone_number' },
-    headers: { Authorization: `Bearer ${systemUserToken}` },
+    headers: { Authorization: `Bearer ${businessToken}` },
   });
 
   const row = data.data?.[0];
@@ -179,15 +147,14 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
     }
     await redisConnection.del(signupStateKey(tenantId));
 
-    const userAccessToken = await exchangeCodeForUserAccessToken(input.code);
-    const systemUserToken = await exchangeUserForSystemUserToken(userAccessToken);
-    const wabaId = await resolveWabaId(userAccessToken);
+    const businessToken = await exchangeEmbeddedSignupCodeForBusinessToken(input.code);
+    const wabaId = await resolveWabaId(businessToken);
     const { phoneNumberId, displayPhoneNumber } = await fetchPrimaryPhoneNumber(
       wabaId,
-      systemUserToken,
+      businessToken,
     );
 
-    const encryptedToken = cryptoService.encrypt(systemUserToken);
+    const encryptedToken = cryptoService.encrypt(businessToken);
     const metadata = {
       waba_id: wabaId,
       phone_number_id: phoneNumberId,
