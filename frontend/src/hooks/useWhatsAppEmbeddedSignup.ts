@@ -101,15 +101,9 @@ export function useWhatsAppEmbeddedSignup(): {
       }
 
       const { state } = await getWhatsAppSignupState();
-      // Lock redirect_uri before FB.login so it still matches Meta if the URL changes during the dialog
-      // (e.g. SPA replaceState / query cleanup). Must match WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI and Meta Valid OAuth redirect URIs.
-      const envRedirect = (import.meta.env.VITE_WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI as string | undefined)?.trim();
-      const redirectUri =
-        envRedirect ||
-        `${window.location.origin}${window.location.pathname}${window.location.search}`;
       await waitForFacebookSdk();
       const code = await requestAuthorizationCode();
-      await connectWhatsAppEmbeddedSignup({ code, state, redirect_uri: redirectUri });
+      await connectWhatsAppEmbeddedSignup({ code, state });
       await queryClient.invalidateQueries({ queryKey: ['channels'] });
       return true;
     } catch (err) {
