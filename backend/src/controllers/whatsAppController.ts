@@ -232,11 +232,20 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
     );
   } catch (err) {
     if (axios.isAxiosError(err)) {
-      const body = err.response?.data as { error?: { message?: string } } | undefined;
+      const body = err.response?.data as { error?: { message?: string; code?: number } } | undefined;
       const metaMsg = body?.error?.message?.trim();
+      let graphPath = '';
+      if (err.config?.url) {
+        try {
+          graphPath = new URL(err.config.url).pathname;
+        } catch {
+          graphPath = err.config.url;
+        }
+      }
+      const hint = graphPath ? ` (${graphPath})` : '';
       sendError(
         res,
-        metaMsg || 'WhatsApp Embedded Signup failed',
+        metaMsg ? `${metaMsg}${hint}` : `WhatsApp Embedded Signup failed${hint}`,
         400,
         err.response?.data ?? err.message,
       );
