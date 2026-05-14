@@ -101,6 +101,8 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api}
         VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000}
+        VITE_META_APP_ID: ${VITE_META_APP_ID:-}
+        VITE_WHATSAPP_CONFIGURATION_ID: ${VITE_WHATSAPP_CONFIGURATION_ID:-}
     restart: unless-stopped
     ports:
       - "3000:80"
