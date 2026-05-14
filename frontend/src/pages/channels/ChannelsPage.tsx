@@ -1,29 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Loader2, Plus, Radio } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import {
-  connectWhatsApp,
-  deleteChannel,
-  fetchChannels,
-  getInstagramRedirectUrl,
-  getMetaRedirectUrl,
-} from '@/api/channelsApi';
+import { deleteChannel, fetchChannels, getInstagramRedirectUrl, getMetaRedirectUrl } from '@/api/channelsApi';
 import { ChannelCard } from '@/components/channels/ChannelCard';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useWhatsAppEmbeddedSignup } from '@/hooks/useWhatsAppEmbeddedSignup';
+
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError && err.response?.data?.message) {
     return String(err.response.data.message);
@@ -35,11 +21,7 @@ export default function ChannelsPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-
-  const [whatsAppOpen, setWhatsAppOpen] = useState(false);
-  const [phoneNumberId, setPhoneNumberId] = useState('');
-  const [accessToken, setAccessToken] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  const { startSignup, isPending: whatsAppSignupPending } = useWhatsAppEmbeddedSignup();
 
   const { data: channels = [], isLoading, isError } = useQuery({
     queryKey: ['channels'],
@@ -63,21 +45,6 @@ export default function ChannelsPage() {
     },
     onError: (err) => {
       toast.error(extractMessage(err, 'Could not start Instagram OAuth connection'));
-    },
-  });
-
-  const connectWhatsAppMutation = useMutation({
-    mutationFn: connectWhatsApp,
-    onSuccess: () => {
-      setWhatsAppOpen(false);
-      setPhoneNumberId('');
-      setAccessToken('');
-      setDisplayName('');
-      queryClient.invalidateQueries({ queryKey: ['channels'] });
-      toast.success('WhatsApp channel connected');
-    },
-    onError: (err) => {
-      toast.error(extractMessage(err, 'WhatsApp channel connection failed'));
     },
   });
 
@@ -115,20 +82,11 @@ export default function ChannelsPage() {
     [deleteMutation.isPending, deleteMutation.variables],
   );
 
-  function submitWhatsAppConnect() {
-    const phone = phoneNumberId.trim();
-    const token = accessToken.trim();
-
-    if (!phone || !token) {
-      toast.error('Phone Number ID and Access Token are required');
-      return;
+  async function handleConnectWhatsApp(): Promise<void> {
+    const ok = await startSignup();
+    if (ok) {
+      toast.success('WhatsApp connected successfully');
     }
-
-    connectWhatsAppMutation.mutate({
-      phoneNumberId: phone,
-      accessToken: token,
-      name: displayName.trim() || undefined,
-    });
   }
 
   return (
@@ -168,7 +126,12 @@ export default function ChannelsPage() {
             <Plus className="size-4" />
             Connect Instagram
           </Button>
-          <Button type="button" onClick={() => setWhatsAppOpen(true)}>
+          <Button
+            type="button"
+            onClick={() => void handleConnectWhatsApp()}
+            disabled={whatsAppSignupPending}
+          >
+            {whatsAppSignupPending && <Loader2 className="animate-spin" />}
             <Plus className="size-4" />
             Connect WhatsApp
           </Button>
@@ -202,60 +165,6 @@ export default function ChannelsPage() {
           ))}
         </div>
       )}
-
-      <Dialog open={whatsAppOpen} onOpenChange={setWhatsAppOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Connect WhatsApp Cloud API</DialogTitle>
-            <DialogDescription>
-              Paste your WhatsApp Cloud API credentials to verify and connect this channel.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="mt-4 space-y-3">
-            <div className="space-y-2">
-              <Label htmlFor="whatsapp-phone-id">Phone Number ID</Label>
-              <Input
-                id="whatsapp-phone-id"
-                value={phoneNumberId}
-                onChange={(e) => setPhoneNumberId(e.target.value)}
-                placeholder="e.g. 123456789012345"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="whatsapp-access-token">Access Token</Label>
-              <Input
-                id="whatsapp-access-token"
-                value={accessToken}
-                onChange={(e) => setAccessToken(e.target.value)}
-                placeholder="Paste your permanent token"
-                type="password"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="whatsapp-display-name">Channel name (optional)</Label>
-              <Input
-                id="whatsapp-display-name"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Support WhatsApp"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setWhatsAppOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={submitWhatsAppConnect}
-              disabled={connectWhatsAppMutation.isPending}
-            >
-              {connectWhatsAppMutation.isPending && <Loader2 className="animate-spin" />}
-              {connectWhatsAppMutation.isPending ? 'Connecting…' : 'Connect'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

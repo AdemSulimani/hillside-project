@@ -11,6 +11,18 @@
       rel="stylesheet"
     />
     <title>Hillside</title>
+    <!-- Meta JS SDK: %VITE_META_APP_ID% is replaced at build/dev time (see Vite HTML env). -->
+    <script>
+      window.fbAsyncInit = function () {
+        FB.init({
+          appId: '%VITE_META_APP_ID%',
+          autoLogAppEvents: true,
+          xfbml: true,
+          version: 'v25.0',
+        });
+      };
+    </script>
+    <script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script>
   </head>
   <body>
     <div id="root"></div>
