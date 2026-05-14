@@ -1,6 +1,6 @@
 import api from '@/lib/api';
 import type { ApiResponse } from '@/types';
-import type { Channel, WhatsAppConnectBody } from '@/types/channel';
+import type { Channel } from '@/types/channel';
 
 function normalizeChannel(raw: Record<string, unknown>): Channel {
   return {
@@ -48,10 +48,26 @@ export async function getInstagramRedirectUrl(): Promise<string> {
   return data.data!.url;
 }
 
-export async function connectWhatsApp(body: WhatsAppConnectBody): Promise<{ channelId: string }> {
-  const { data } = await api.post<ApiResponse<{ channelId: string }>>(
-    '/channels/whatsapp/connect',
+export async function getWhatsAppSignupState(): Promise<{ state: string }> {
+  const { data } = await api.get<ApiResponse<{ state: string }>>('/channels/whatsapp/signup-state');
+  const state = data.data?.state;
+  if (!state) {
+    throw new Error('Signup state was not returned by the server.');
+  }
+  return { state };
+}
+
+export async function connectWhatsAppEmbeddedSignup(body: {
+  code: string;
+  state: string;
+}): Promise<Channel> {
+  const { data } = await api.post<ApiResponse<{ channel: Record<string, unknown> }>>(
+    '/channels/whatsapp/embedded-signup',
     body,
   );
-  return { channelId: data.data!.channelId };
+  const raw = data.data?.channel;
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Channel was not returned by the server.');
+  }
+  return normalizeChannel(raw as Record<string, unknown>);
 }

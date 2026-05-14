@@ -1,7 +1,11 @@
 import pool from '../pool';
 
 export type ChannelType = 'facebook' | 'instagram' | 'whatsapp';
-export type ChannelConnectionMethod = 'oauth_meta' | 'oauth_instagram' | 'manual';
+export type ChannelConnectionMethod =
+  | 'oauth_meta'
+  | 'oauth_instagram'
+  | 'manual'
+  | 'embedded_signup';
 
 export interface Channel {
   id: string;

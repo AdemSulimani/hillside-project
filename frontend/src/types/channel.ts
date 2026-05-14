@@ -1,5 +1,9 @@
 export type ChannelType = 'facebook' | 'instagram' | 'whatsapp';
-export type ChannelConnectionMethod = 'oauth_meta' | 'oauth_instagram' | 'manual';
+export type ChannelConnectionMethod =
+  | 'oauth_meta'
+  | 'oauth_instagram'
+  | 'manual'
+  | 'embedded_signup';
 
 export interface Channel {
   id: string;
@@ -13,10 +17,4 @@ export interface Channel {
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
-}
-
-export interface WhatsAppConnectBody {
-  phoneNumberId: string;
-  accessToken: string;
-  name?: string;
 }
