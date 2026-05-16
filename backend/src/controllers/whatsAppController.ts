@@ -5,6 +5,10 @@ import { createChannel, findChannelByExternalId, updateChannel } from '../db/mod
 import type { Channel } from '../db/models/channel';
 import { redisConnection } from '../jobs/redisConnection';
 import { cryptoService } from '../services/cryptoService';
+import {
+  buildWhatsAppChannelMetadata,
+  ensureCloudApiRegistration,
+} from '../services/whatsAppRegistrationService';
 import { sendError, sendSuccess } from '../utils/response';
 
 const GRAPH_OAUTH_VERSION = 'v25.0';
@@ -154,15 +158,24 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
       businessToken,
     );
 
-    const encryptedToken = cryptoService.encrypt(businessToken);
-    const metadata = {
-      waba_id: wabaId,
-      phone_number_id: phoneNumberId,
-      display_phone_number: displayPhoneNumber,
-      source: 'whatsapp_embedded_signup',
-    };
-
     const existing = await findChannelByExternalId(tenantId, 'whatsapp', phoneNumberId);
+    const registration = await ensureCloudApiRegistration(
+      phoneNumberId,
+      businessToken,
+      existing?.metadata ?? null,
+    );
+
+    const encryptedToken = cryptoService.encrypt(businessToken);
+    const metadata = buildWhatsAppChannelMetadata(
+      {
+        waba_id: wabaId,
+        phone_number_id: phoneNumberId,
+        display_phone_number: displayPhoneNumber,
+        source: 'whatsapp_embedded_signup',
+      },
+      registration,
+    );
+
     if (existing) {
       const updated = await updateChannel(existing.id, tenantId, {
         name: displayPhoneNumber,
