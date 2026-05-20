@@ -7,6 +7,8 @@ export interface AIConfig {
   tone: string;
   personality_description: string | null;
   restrictions: string[];
+  /** Operator-managed policies appended after guideline blocks (admin-only edits). */
+  platform_restrictions: string[];
   sales_strategy: string | null;
   objection_handling: string | null;
   qa_pairs: { question: string; answer: string }[];
@@ -50,6 +52,7 @@ export interface UpdateAIConfigInput {
   tone?: string;
   personality_description?: string | null;
   restrictions?: string[];
+  platform_restrictions?: string[];
   sales_strategy?: string | null;
   objection_handling?: string | null;
   qa_pairs?: { question: string; answer: string }[];
@@ -76,16 +79,19 @@ export async function incrementFeedbackCount(
 export async function updateAIConfig(
   tenantId: string,
   fields: UpdateAIConfigInput,
+  client?: PoolClient,
 ): Promise<AIConfig | null> {
   const keys = Object.keys(fields) as (keyof UpdateAIConfigInput)[];
   if (keys.length === 0) return findAIConfigByTenant(tenantId);
+
+  const executor = client ?? pool;
 
   const setClauses: string[] = [];
   const values: unknown[] = [tenantId];
 
   keys.forEach((key, i) => {
     const paramIdx = i + 2;
-    if (key === 'restrictions' || key === 'qa_pairs') {
+    if (key === 'restrictions' || key === 'qa_pairs' || key === 'platform_restrictions') {
       setClauses.push(`${key} = $${paramIdx}::jsonb`);
       values.push(JSON.stringify(fields[key]));
     } else {
@@ -96,7 +102,7 @@ export async function updateAIConfig(
 
   setClauses.push('updated_at = now()');
 
-  const { rows } = await pool.query<AIConfig>(
+  const { rows } = await executor.query<AIConfig>(
     `UPDATE ai_configs SET ${setClauses.join(', ')} WHERE tenant_id = $1 RETURNING *`,
     values,
   );

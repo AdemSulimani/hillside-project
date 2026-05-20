@@ -9,7 +9,7 @@ import {
   ShoppingCart,
   Sparkles,
 } from 'lucide-react';
-import { fetchAIConfig } from '@/api/aiConfigApi';
+import { fetchTenantAIConfigPublic } from '@/api/aiConfigApi';
 import { fetchStatisticsSummary } from '@/api/statisticsApi';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -101,7 +101,7 @@ export default function StatisticsPage() {
 
   const aiConfigQuery = useQuery({
     queryKey: ['ai-config'],
-    queryFn: fetchAIConfig,
+    queryFn: fetchTenantAIConfigPublic,
     enabled: Boolean(tenantId),
   });
 

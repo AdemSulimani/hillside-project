@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import pool from '../db/pool';
 import { createTenant } from '../db/models/tenant';
 import { createAIConfig } from '../db/models/aiConfig';
+import { seedTenantPromptBlocksFromCatalog } from '../db/models/promptBlock';
 import { toPublicUser } from '../db/models/user';
 import { generateAccessToken } from '../services/tokenService';
 import { sendSuccess, sendError } from '../utils/response';
@@ -56,6 +57,7 @@ export async function complete(req: Request, res: Response): Promise<void> {
     );
 
     await createAIConfig(tenant.id, client);
+    await seedTenantPromptBlocksFromCatalog(tenant.id, client);
 
     const { rows: updatedUsers } = await client.query<User>(
       `UPDATE users SET tenant_id = $1, updated_at = now() WHERE id = $2 RETURNING *`,

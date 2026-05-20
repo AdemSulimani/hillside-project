@@ -180,3 +180,139 @@ export async function patchAdminCommissionReport(
 export async function deleteAdminCommissionReport(reportId: string) {
   await adminApi.delete(`/admin/commission-reports/${reportId}`);
 }
+
+// —— Admin AI (per business) ——
+
+export interface AdminTenantAiConfig {
+  id: string;
+  tenant_id: string;
+  tone: string;
+  personality_description: string | null;
+  restrictions: string[];
+  platform_restrictions: string[];
+  sales_strategy: string | null;
+  objection_handling: string | null;
+  qa_pairs: { question: string; answer: string }[];
+  is_active: boolean;
+  custom_model_id: string | null;
+  feedback_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminTenantPromptBlockRow {
+  id: string;
+  tenant_id: string;
+  prompt_block_id: string | null;
+  block_key: string;
+  enabled: boolean;
+  content: string;
+  sort_order: number;
+  is_platform_locked: boolean | null;
+  catalog_title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminAiConfigVersionRow {
+  id: string;
+  tenant_id: string;
+  note: string | null;
+  snapshot: Record<string, unknown>;
+  created_by_email: string | null;
+  created_at: string;
+}
+
+export async function fetchAdminTenantAiConfig(tenantId: string) {
+  const { data } = await adminApi.get<ApiResponse<AdminTenantAiConfig>>(
+    `/admin/businesses/${tenantId}/ai/config`,
+  );
+  return data.data!;
+}
+
+export async function fetchAdminTenantPromptBlocks(tenantId: string) {
+  const { data } = await adminApi.get<ApiResponse<{ rows: AdminTenantPromptBlockRow[] }>>(
+    `/admin/businesses/${tenantId}/ai/prompt-blocks`,
+  );
+  return data.data!.rows;
+}
+
+export async function putAdminTenantAiConfig(
+  tenantId: string,
+  body: Partial<{
+    tone: string;
+    personality_description: string | null;
+    restrictions: string[];
+    platform_restrictions: string[];
+    sales_strategy: string | null;
+    objection_handling: string | null;
+    qa_pairs: { question: string; answer: string }[];
+    is_active: boolean;
+    custom_model_id: string | null;
+  }>,
+) {
+  const { data } = await adminApi.put<ApiResponse<AdminTenantAiConfig>>(
+    `/admin/businesses/${tenantId}/ai/config`,
+    body,
+  );
+  return data.data!;
+}
+
+export async function patchAdminTenantPromptBlock(
+  tenantId: string,
+  blockRowId: string,
+  body: { enabled?: boolean; content?: string; sort_order?: number },
+) {
+  const { data } = await adminApi.patch<ApiResponse<AdminTenantPromptBlockRow>>(
+    `/admin/businesses/${tenantId}/ai/prompt-blocks/${blockRowId}`,
+    body,
+  );
+  return data.data!;
+}
+
+export async function postAdminTenantPromptBlockReset(tenantId: string, blockRowId: string) {
+  const { data } = await adminApi.post<ApiResponse<AdminTenantPromptBlockRow>>(
+    `/admin/businesses/${tenantId}/ai/prompt-blocks/${blockRowId}/reset`,
+  );
+  return data.data!;
+}
+
+export async function postAdminTenantPromptBlockCustom(
+  tenantId: string,
+  body: { block_key: string; title: string; content: string; sort_order: number },
+) {
+  const { data } = await adminApi.post<ApiResponse<AdminTenantPromptBlockRow>>(
+    `/admin/businesses/${tenantId}/ai/prompt-blocks`,
+    body,
+  );
+  return data.data!;
+}
+
+export async function deleteAdminTenantPromptBlockCustom(tenantId: string, blockRowId: string) {
+  await adminApi.delete(`/admin/businesses/${tenantId}/ai/prompt-blocks/${blockRowId}`);
+}
+
+export async function fetchAdminAiVersions(tenantId: string) {
+  const { data } = await adminApi.get<ApiResponse<{ rows: AdminAiConfigVersionRow[] }>>(
+    `/admin/businesses/${tenantId}/ai/versions`,
+  );
+  return data.data!.rows;
+}
+
+export async function postAdminRestoreAiVersion(tenantId: string, versionId: string) {
+  const { data } = await adminApi.post<
+    ApiResponse<{ restored_from: string }>
+  >(`/admin/businesses/${tenantId}/ai/versions/${versionId}/restore`);
+  return data.data!;
+}
+
+export async function postAdminTenantAiTest(
+  tenantId: string,
+  body: { testMessage: string; language?: 'sq' | 'en'; include_vision_block?: boolean },
+) {
+  const { data } = await adminApi.post<
+    ApiResponse<{ reply: string; model_used: string }>
+  >(`/admin/businesses/${tenantId}/ai/test`, body);
+  return data.data!;
+}
+

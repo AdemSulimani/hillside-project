@@ -20,7 +20,6 @@ const BusinessPage = lazyWithRetry(() => import('@/pages/business/BusinessPage')
 const ProductsPage = lazyWithRetry(() => import('@/pages/products/ProductsPage'), 'ProductsPage');
 const ChannelsPage = lazyWithRetry(() => import('@/pages/channels/ChannelsPage'), 'ChannelsPage');
 const InboxPage = lazyWithRetry(() => import('@/pages/inbox/InboxPage'), 'InboxPage');
-const AIConfigPage = lazyWithRetry(() => import('@/pages/aiConfig/AIConfigPage'), 'AIConfigPage');
 const OrdersPage = lazyWithRetry(() => import('@/pages/orders/OrdersPage'), 'OrdersPage');
 const ContactsPage = lazyWithRetry(() => import('@/pages/contacts/ContactsPage'), 'ContactsPage');
 const ContactDetailPage = lazyWithRetry(() => import('@/pages/contacts/ContactDetailPage'), 'ContactDetailPage');
@@ -72,7 +71,7 @@ export default function App() {
               <Route path="/orders" element={<OrdersPage />} />
               <Route path="/contacts" element={<ContactsPage />} />
               <Route path="/contacts/:id" element={<ContactDetailPage />} />
-              <Route path="/ai-config" element={<AIConfigPage />} />
+              <Route path="/ai-config" element={<Navigate to="/statistics" replace />} />
               <Route path="/chatbot-control" element={<ChatbotControlPage />} />
               <Route path="/statistics" element={<StatisticsPage />} />
               <Route path="/feedback" element={<FeedbackPage />} />

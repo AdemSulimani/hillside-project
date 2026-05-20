@@ -16,9 +16,18 @@ import {
   adminReportIdParamsSchema,
   adminReportStatusPatchBodySchema,
 } from '../validators/admin';
+import {
+  adminAiTestBodySchema,
+  adminAiVersionIdParamsSchema,
+  adminCreateCustomPromptBlockSchema,
+  adminPatchTenantPromptBlockSchema,
+  adminTenantPromptBlockIdParamsSchema,
+  adminUpdateTenantAiConfigSchema,
+} from '../validators/adminAi';
 import * as adminTenantController from '../controllers/adminTenantController';
 import * as adminAuthController from '../controllers/adminAuthController';
 import * as adminCommissionController from '../controllers/adminCommissionController';
+import * as adminAiController from '../controllers/adminAiController';
 
 const router = Router();
 
@@ -95,6 +104,61 @@ ownerRoutes.patch(
   validateParams(adminOrderIdParamsSchema),
   validateBody(adminCommissionStatusPatchBodySchema),
   adminCommissionController.patchOrderCommissionStatus,
+);
+
+ownerRoutes.get(
+  '/businesses/:tenantId/ai/config',
+  validateParams(adminTenantIdParamsSchema),
+  adminAiController.getTenantAiConfig,
+);
+ownerRoutes.get(
+  '/businesses/:tenantId/ai/prompt-blocks',
+  validateParams(adminTenantIdParamsSchema),
+  adminAiController.listTenantPromptBlocks,
+);
+ownerRoutes.put(
+  '/businesses/:tenantId/ai/config',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminUpdateTenantAiConfigSchema),
+  adminAiController.updateTenantAiConfig,
+);
+ownerRoutes.patch(
+  '/businesses/:tenantId/ai/prompt-blocks/:blockRowId',
+  validateParams(adminTenantPromptBlockIdParamsSchema),
+  validateBody(adminPatchTenantPromptBlockSchema),
+  adminAiController.patchTenantPromptBlock,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/ai/prompt-blocks/:blockRowId/reset',
+  validateParams(adminTenantPromptBlockIdParamsSchema),
+  adminAiController.postTenantPromptBlockReset,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/ai/prompt-blocks',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminCreateCustomPromptBlockSchema),
+  adminAiController.postTenantPromptBlockCustom,
+);
+ownerRoutes.delete(
+  '/businesses/:tenantId/ai/prompt-blocks/:blockRowId',
+  validateParams(adminTenantPromptBlockIdParamsSchema),
+  adminAiController.deleteTenantPromptBlockCustom,
+);
+ownerRoutes.get(
+  '/businesses/:tenantId/ai/versions',
+  validateParams(adminTenantIdParamsSchema),
+  adminAiController.listTenantAiVersions,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/ai/versions/:versionId/restore',
+  validateParams(adminAiVersionIdParamsSchema),
+  adminAiController.postRestoreTenantAiVersion,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/ai/test',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminAiTestBodySchema),
+  adminAiController.postTenantAiTest,
 );
 
 router.use(ownerRoutes);
