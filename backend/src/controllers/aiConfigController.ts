@@ -1,166 +1,35 @@
 import type { Request, Response } from 'express';
-import { ensureAIConfigForTenant, updateAIConfig } from '../db/models/aiConfig';
-import { findTenantById } from '../db/models/tenant';
-import { searchProducts, type Product } from '../db/models/product';
-import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
-import { formatBusinessProfileForPrompt } from '../services/aiService';
+import { ensureAIConfigForTenant } from '../db/models/aiConfig';
 import { sendSuccess, sendError } from '../utils/response';
-import type { TestAIConfigInput } from '../validators/aiConfig';
-import { redisConnection } from '../jobs/redisConnection';
 
+/** Narrow fields exposed to CRM tenants — prompt text and mutable AI settings are admin-only. */
 export async function show(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = req.user!.tenantId!;
     const config = await ensureAIConfigForTenant(tenantId);
 
-    sendSuccess(res, config);
+    sendSuccess(res, {
+      is_active: config.is_active,
+      custom_model_id: config.custom_model_id,
+      feedback_count: config.feedback_count,
+    });
   } catch (err) {
     sendError(res, 'Failed to fetch AI configuration', 500, err);
   }
 }
 
 export async function update(req: Request, res: Response): Promise<void> {
-  try {
-    const tenantId = req.user!.tenantId!;
-
-    await ensureAIConfigForTenant(tenantId);
-
-    const updated = await updateAIConfig(tenantId, req.body);
-    await redisConnection.del(`ai_config:${tenantId}`);
-    sendSuccess(res, updated, 'AI configuration updated successfully');
-  } catch (err) {
-    sendError(res, 'Failed to update AI configuration', 500, err);
-  }
+  sendError(
+    res,
+    'AI configuration is managed by the platform administrator. Contact support if you need changes.',
+    403,
+  );
 }
 
 export async function test(req: Request, res: Response): Promise<void> {
-  try {
-    const tenantId = req.user!.tenantId!;
-    const body = req.body as TestAIConfigInput;
-
-    const tenant = await findTenantById(tenantId);
-    if (!tenant) {
-      sendError(res, 'Tenant not found', 404);
-      return;
-    }
-
-    const products = await searchProducts(tenantId, '', 5);
-
-    const config = {
-      tone: body.tone ?? 'professional',
-      personality_description: body.personality_description ?? null,
-      restrictions: body.restrictions ?? [],
-      sales_strategy: body.sales_strategy ?? null,
-      objection_handling: body.objection_handling ?? null,
-      qa_pairs: body.qa_pairs ?? [],
-      custom_model_id: body.custom_model_id ?? null,
-    };
-
-    const systemPrompt = buildTestSystemPrompt(
-      tenant.name,
-      tenant.niche,
-      tenant.description,
-      config,
-      products,
-    );
-    const model = config.custom_model_id || OPENAI_CHAT_MODEL;
-
-    const completion = await openai.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: body.testMessage },
-      ],
-      temperature: 0.7,
-      max_tokens: 1024,
-    });
-
-    const reply = completion.choices[0]?.message?.content;
-    if (!reply) {
-      sendError(res, 'AI returned an empty response', 500);
-      return;
-    }
-
-    sendSuccess(res, { reply: reply.trim() }, 'Test reply generated');
-  } catch (err) {
-    sendError(res, 'Failed to generate test reply', 500, err);
-  }
-}
-
-interface TestConfig {
-  tone: string;
-  personality_description: string | null;
-  restrictions: string[];
-  sales_strategy: string | null;
-  objection_handling: string | null;
-  qa_pairs: { question: string; answer: string }[];
-}
-
-function buildTestSystemPrompt(
-  businessName: string,
-  tenantNiche: string | null | undefined,
-  tenantDescription: string | null | undefined,
-  config: TestConfig,
-  products: Product[],
-): string {
-  const lines: string[] = [
-    `You are the AI sales assistant for "${businessName}".`,
-    `Your tone should be: ${config.tone}.`,
-  ];
-
-  if (config.personality_description) {
-    lines.push(`Personality: ${config.personality_description}`);
-  }
-
-  if (config.sales_strategy) {
-    lines.push('', `Sales strategy: ${config.sales_strategy}`);
-  }
-
-  if (config.objection_handling) {
-    lines.push('', `Objection handling approach: ${config.objection_handling}`);
-  }
-
-  const businessProfile = formatBusinessProfileForPrompt(tenantNiche, tenantDescription);
-  if (businessProfile) {
-    lines.push('', businessProfile);
-  }
-
-  if (config.restrictions.length > 0) {
-    lines.push('', `RESTRICTIONS — you MUST follow these rules:\n${config.restrictions.map((r) => `- ${r}`).join('\n')}`);
-  }
-
-  if (products.length > 0) {
-    const catalog = products
-      .map((p) => {
-        const parts = [`- ${p.name}: $${Number(p.price).toFixed(2)}`];
-        if (p.description) parts.push(`  ${p.description}`);
-        if (p.category) parts.push(`  Category: ${p.category}`);
-        parts.push(`  Stock status: ${p.in_stock === false ? 'out of stock' : 'in stock'}`);
-        return parts.join('\n');
-      })
-      .join('\n');
-    lines.push('', 'Product catalog:', catalog);
-  }
-
-  if (config.qa_pairs.length > 0) {
-    const qa = config.qa_pairs
-      .map((pair) => `Q: ${pair.question}\nA: ${pair.answer}`)
-      .join('\n\n');
-    lines.push('', `Frequently Asked Questions:\n${qa}`);
-  }
-
-  lines.push(
-    '',
-    'Guidelines:',
-    '- Default to short replies: lead with the answer, avoid long intros and filler, and skip unnecessary bullet lists — messaging-app style.',
-    '- If more detail is needed, stay tight and structured; no essay-length or cluttered answers.',
-    '- Keep tone conversational — this is a chat, not an email.',
-    '- If the customer asks about a product you don\'t have, say so honestly.',
-    '- Never fabricate product details, prices, or availability.',
-    '- For business location, address, or general "about the business" questions: use only the Business profile section when present. If the answer is not there, do not invent it.',
-    '- If a question is outside your scope, politely let the customer know a human agent can help.',
-    '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
+  sendError(
+    res,
+    'AI testing is available from the admin dashboard. Business users cannot run test prompts.',
+    403,
   );
-
-  return lines.join('\n');
 }

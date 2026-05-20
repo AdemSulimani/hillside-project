@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Loader2, MessageSquareHeart } from 'lucide-react';
 import { feedbackReasonDisplay } from '@/components/inbox/feedbackOptions';
-import { fetchAIConfig } from '@/api/aiConfigApi';
+import { fetchTenantAIConfigPublic } from '@/api/aiConfigApi';
 import { fetchFeedbackLogs } from '@/api/feedbackApi';
 import { FEEDBACK_FINETUNING_COLLECTION_TARGET } from '@/constants/feedbackFinetuning';
 import { Badge } from '@/components/ui/badge';
@@ -59,7 +59,7 @@ export default function FeedbackPage() {
 
   const configQuery = useQuery({
     queryKey: ['ai-config'],
-    queryFn: fetchAIConfig,
+    queryFn: fetchTenantAIConfigPublic,
     enabled: Boolean(tenantId),
   });
 

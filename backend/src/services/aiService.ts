@@ -8,6 +8,12 @@ import {
   type Product,
 } from '../db/models/product';
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
+import {
+  countTenantPromptBlocks,
+  listTenantPromptBlocksRuntime,
+  seedTenantPromptBlocksFromCatalog,
+} from '../db/models/promptBlock';
+import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
 import { redisConnection } from '../jobs/redisConnection';
@@ -86,11 +92,20 @@ function inboundNeedsSharedContentInstruction(content: string): boolean {
 
 const DEFAULT_AI_CONFIG: Pick<
   AIConfig,
-  'tone' | 'personality_description' | 'restrictions' | 'sales_strategy' | 'objection_handling' | 'qa_pairs' | 'is_active' | 'custom_model_id'
+  | 'tone'
+  | 'personality_description'
+  | 'restrictions'
+  | 'platform_restrictions'
+  | 'sales_strategy'
+  | 'objection_handling'
+  | 'qa_pairs'
+  | 'is_active'
+  | 'custom_model_id'
 > = {
   tone: 'friendly and professional',
   personality_description: null,
   restrictions: [],
+  platform_restrictions: [],
   sales_strategy: 'Be helpful, answer questions accurately, and gently guide towards a purchase when appropriate.',
   objection_handling: null,
   qa_pairs: [],
@@ -103,7 +118,13 @@ async function loadAIConfig(tenantId: string) {
   const cached = await redisConnection.get(cacheKey);
   if (cached) {
     try {
-      return JSON.parse(cached) as AIConfig | typeof DEFAULT_AI_CONFIG;
+      const parsed = JSON.parse(cached) as AIConfig | typeof DEFAULT_AI_CONFIG;
+      return {
+        ...parsed,
+        platform_restrictions: Array.isArray(parsed.platform_restrictions)
+          ? parsed.platform_restrictions
+          : [],
+      };
     } catch {
       await redisConnection.del(cacheKey);
     }
@@ -111,8 +132,38 @@ async function loadAIConfig(tenantId: string) {
 
   const config = await findAIConfigByTenant(tenantId);
   const resolved = config ?? DEFAULT_AI_CONFIG;
-  await redisConnection.set(cacheKey, JSON.stringify(resolved), 'EX', 900);
-  return resolved;
+  const normalized = {
+    ...resolved,
+    platform_restrictions: Array.isArray(resolved.platform_restrictions)
+      ? resolved.platform_restrictions
+      : [],
+  };
+  await redisConnection.set(cacheKey, JSON.stringify(normalized), 'EX', 900);
+  return normalized;
+}
+
+async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
+  const n = await countTenantPromptBlocks(tenantId);
+  if (n === 0) {
+    await seedTenantPromptBlocksFromCatalog(tenantId);
+    await redisConnection.del(`tenant_prompt_blocks:${tenantId}`);
+  }
+}
+
+async function loadTenantPromptBlocksCached(tenantId: string) {
+  const cacheKey = `tenant_prompt_blocks:${tenantId}`;
+  const cached = await redisConnection.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached) as Awaited<ReturnType<typeof listTenantPromptBlocksRuntime>>;
+    } catch {
+      await redisConnection.del(cacheKey);
+    }
+  }
+
+  const rows = await listTenantPromptBlocksRuntime(tenantId);
+  await redisConnection.set(cacheKey, JSON.stringify(rows), 'EX', 900);
+  return rows;
 }
 
 async function loadTenant(tenantId: string) {
@@ -1076,48 +1127,15 @@ export function formatBusinessProfileForPrompt(
   return parts.join('\n');
 }
 
-function buildSystemPrompt(
+/** Core CRM assistant prompt body (guidelines assembled separately from tenant prompt_blocks). */
+export function buildRetailAISystemPrompt(
   businessName: string,
-  config: typeof DEFAULT_AI_CONFIG,
+  config: typeof DEFAULT_AI_CONFIG & { platform_restrictions?: string[] },
   productCatalogContext: string,
-  hasImages: boolean,
-  customerAskedPrice: boolean,
-  orderClosingAlreadyAskedInConversation: boolean,
-  customerAskedDiscount: boolean,
-  discountAlreadyAddressedInConversation: boolean,
-  language: ReplyLocale,
+  assembledGuidelines: string,
   tenantNiche?: string | null,
   tenantDescription?: string | null,
 ): string {
-  const isSq = language === 'sq';
-  const orderClosingExample = isSq ? 'A doni ta porosisni?' : 'Would you like to order it?';
-  const orderClosingFallback = isSq
-    ? 'Produkti është në dispozicion nëse doni ta porosisni'
-    : 'The product is available if you would like to order it';
-  const discountOfferExample = isSq
-    ? 'Mund t\'jua ofrojmë me [discounted_price].'
-    : 'We can offer it for [discounted_price].';
-  const noFurtherDiscountSentence = isSq
-    ? 'Më vjen keq, nuk mund të aplikohet zbritje shtesë. Çmimi që ju ofruam është final.'
-    : 'I am sorry, no additional discount can be applied. The price we offered is final.';
-  const noDiscountAvailableSentence = isSq
-    ? 'Për këtë produkt nuk është e mundur asnjë zbritje, çmimi aktual është final.'
-    : 'No discount is available for this product; the current price is final.';
-  const orderConfirmationFollowUp = isSq
-    ? 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t\u2019ju ndihmuar.'
-    : 'If you have any other questions or would like to place another order, I am here to help.';
-  const postPurchaseIssueSentence = isSq
-    ? 'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t\u2019ju përgjigjet.'
-    : 'Hello, we are sorry for the issue. A member of our team will get back to you shortly.';
-  const languageName = isSq ? 'Albanian (shqip)' : 'English';
-  const otherLanguageName = isSq ? 'English' : 'Albanian';
-  const fixedPhraseLanguageDirective = isSq ? 'In Albanian use exactly' : 'In English use exactly';
-  const orderConfirmationLanguageDirective = isSq
-    ? 'in Albanian only (this is the ONLY follow-up allowed in an order-confirmation reply, and it must appear exactly once)'
-    : 'in English only (this is the ONLY follow-up allowed in an order-confirmation reply, and it must appear exactly once)';
-  const postPurchaseLanguageDirective = isSq
-    ? 'reply with exactly one Albanian sentence and nothing else'
-    : 'reply with exactly one English sentence and nothing else';
   const lines: string[] = [
     `You are the AI sales assistant for "${businessName}".`,
     `Your tone should be: ${config.tone}.`,
@@ -1140,103 +1158,29 @@ function buildSystemPrompt(
     lines.push('', businessProfile);
   }
 
-  if (config.restrictions.length > 0) {
-    lines.push(
-      '',
-      `RESTRICTIONS — you MUST follow these rules:\n${config.restrictions.map((r) => `- ${r}`).join('\n')}`,
-    );
-  }
-
   lines.push('', 'Product catalog:', productCatalogContext);
 
   const qa = formatQAPairs(config.qa_pairs);
   if (qa) lines.push(qa);
 
-  lines.push(
-    '',
-    'Guidelines:',
-    `- LANGUAGE LOCK (very important): the customer's current language is ${languageName}. Reply ONLY in ${languageName}. Do NOT include any ${otherLanguageName} words, sentences, or phrases. Never mix the two languages in the same reply — keep the entire message in ${languageName} from greeting to closing.`,
-    `- If a RESTRICTION above, a Q&A pair, or any other instruction is written in ${otherLanguageName} (or specifies a fixed sentence in ${otherLanguageName}), apply the rule's intent in ${languageName}. When the rule pins an exact sentence to send, translate it cleanly into ${languageName} while preserving the meaning, tone, and any product/value placeholders. Never echo a fixed sentence in a language other than ${languageName} in the customer-facing reply.`,
-    '- Brevity (very important): default to the shortest reply that fully answers — usually a few clear sentences. Lead with the direct answer; avoid long introductions, filler, repeating the customer\'s whole question, essay-length blocks, and unnecessary bullet lists.',
-    '- If a topic truly needs more explanation, stay structured and tight: add only what is necessary, no padding or redundancy — it should still feel easy to skim in a chat thread.',
-    '- Tone stays warm and conversational, but this is a messaging app, not email — scannable beats wordy.',
-    '- When another guideline in this prompt requires exact fixed wording or verbatim catalog text (usage instructions, discount phrases, order confirmation footer, etc.), follow that rule even if the result is longer.',
-    '- If the customer asks about a product you don\'t have, say so honestly.',
-    '- When the requested product is unavailable or not an exact match, clearly say that exact product is not available, then immediately suggest 1-2 similar alternatives from the same category in the catalog (never more than two).',
-    '- For unavailable-product cases, keep the sequence: (1) unavailable acknowledgement, (2) relevant alternatives from same category, (3) short order-oriented follow-up question.',
-    '- Never fabricate product details, prices, or availability.',
-    '- For business location, physical address, pickup point, hours, or general "about the business" questions: use only the Business profile section when it is present above. If it does not contain the answer, do not invent one — offer to have a team member help.',
-    '- Strict rule: never mention product price or stock availability unless the customer explicitly asks for price/stock in their current message.',
-    '- Currency rule: whenever you mention any product price amount, use the Euro symbol (€), never the dollar sign ($).',
-    '- If a question is outside your scope, politely let the customer know a human agent can help.',
-    '- Do not use markdown formatting — reply in plain text suitable for a messaging app.',
-    '- If the customer sends an image, describe what you see and relate it to the available product catalog.',
-    customerAskedPrice
-      ? '- The customer asked about price in this message. You may include pricing only if it matches the catalog exactly.'
-      : '- Do not mention any product price unless the customer explicitly asks for the price/cost in their message.',
-    '- Discount handling rules:',
-    '  1) If the customer asks for a discount/lower price/promotion/offer, look up the matched product in the catalog above and check the "Discounted price" line.',
-    `  2) If a "Discounted price" value is configured for that product, offer it explicitly using the EXACT amount from the catalog. Reply with one short sentence such as: "${discountOfferExample}". Do not invent or round the value.`,
-    '  3) The configured "Discounted price" is the MAXIMUM available discount. Never propose a value lower than the catalog discounted price, and never offer multiple progressively smaller prices.',
-    `  4) If the customer keeps insisting on a further/extra discount AFTER you have already offered the catalog discounted price (or after a previous assistant message in this conversation has already addressed the discount), reply that no additional discount can be applied. ${fixedPhraseLanguageDirective}: "${noFurtherDiscountSentence}"`,
-    `  5) If the matched product has NO discounted price configured (the catalog shows "Discounted price: not configured" or no Discounted price line), inform the customer that no discount is available and that the current price is final. ${fixedPhraseLanguageDirective}: "${noDiscountAvailableSentence}" (you may include the regular catalog price if helpful).`,
-    '  6) Never reveal a discounted price unless the customer is asking for a discount. Do not volunteer discount info in normal product replies.',
-    '  7) Never invent, estimate, or negotiate a discount value that is not explicitly listed as "Discounted price" in the catalog above.',
-    customerAskedDiscount
-      ? '- The customer is asking for a discount in their current message. Apply the discount handling rules above strictly.'
-      : '- The customer is not asking for a discount in their current message. Do not bring up discounts unsolicited.',
-    discountAlreadyAddressedInConversation
-      ? '- A previous assistant reply in this conversation already addressed the discount question (offered the discounted price or stated none is available). If the customer keeps insisting on a further discount, follow rule (4): no additional discount can be applied.'
-      : '- No prior assistant reply has addressed a discount yet in this conversation.',
-    '- Never volunteer stock or availability in normal replies.',
-    '- Treat "Stock status" in the catalog as internal information. Mention availability only when the customer explicitly asks about stock/availability in their current message.',
-    '- When a customer asks how to use a product, how to take it, dosage, application instructions, or anything related to product usage, you must return the usage description for that product EXACTLY as written, word for word, without modifying, summarizing, paraphrasing, or adding anything to it. Do not change a single word. If the usage description answers the customer\'s question, return it verbatim and nothing else.',
-    '- STRICT FOLLOW-UP / CLOSING POLICY (very important): only include a follow-up question, invitation, or closing prompt in EXACTLY two cases:',
-    `  (a) The very first product-related reply in this conversation (only when an order-closing question has not yet been asked in this conversation) may end with exactly ONE short order-oriented follow-up question — e.g., "${orderClosingExample}".`,
-    '  (b) When you are confirming that an order has been placed/confirmed, end with the exact order-confirmation follow-up sentence specified later in these rules.',
-    '- In ALL OTHER CASES — including product recommendations, product explanations, product comparisons, follow-up product replies after the first one, price answers, stock answers, post-recommendation messages, ambiguous short answers, and general chat — DO NOT include ANY follow-up question, invitation, "let me know" prompt, "tell me if you want more details" phrasing, or any closing prompt. End the reply naturally right after delivering the requested information.',
-    '- Forbidden trailing patterns when the strict policy applies (in any language; not exhaustive): "më tregoni", "më shkruani", "më kontaktoni", "doni më shumë informacion", "nëse dëshironi detaje më tregoni", "nëse dëshironi të porosisni më tregoni", "let me know", "feel free to ask", "anything else", "if you want more info just ask", or any equivalent. Do not produce them.',
-    '- Strict anti-repetition rule: never repeat the same order-closing question in two consecutive assistant replies for the same product context.',
-    '- After you ask an order-closing question once in a conversation, do not ask another order-closing question (or any other follow-up question or invitation) again in later replies.',
-    orderClosingAlreadyAskedInConversation
-      ? '- An order-closing question has already been asked earlier in this conversation. For THIS reply, do NOT include any follow-up question, order-closing question, invitation, or "let me know" prompt of any kind. End the reply naturally with the answer only.'
-      : '- If the customer is asking about any product in this very first product turn (availability, details, comparison, or alternatives), end this reply with exactly ONE short order-oriented follow-up question. Do not add any other follow-up, invitation, or "let me know" prompt.',
-    '- If the latest customer messages repeat or paraphrase the same question, combine them and answer once without repeating the same information.',
-    '- Do not wrap product names in quotation marks when answering normally. Mention product names naturally in the sentence, or use a generic reference like "produkti" when the exact name is unnecessary.',
-    '- Exception — when the customer asks for recommendations, which product to choose/compare, or product suggestions for a specific situation or need: suggest only 1-2 products from the catalog (never more than two).',
-    '- For each of those products, add a very short description using only what appears in that product\'s catalog entry (one tight phrase or sentence per product; trim the catalog text if needed — do not invent details).',
-    '- For recommendation, explanation, or comparison replies: end with the recommendation itself; do NOT add a follow-up question, invitation, "let me know" prompt, or any closing prompt — the only exception is the single allowed order-oriented follow-up question on the very first product turn (at most one short sentence).',
-    '- In these recommendation cases, explicitly mention the relevant product names clearly (still without quotation marks).',
-    '- In customer-facing text, refer to items by product name only; do not include the brand name unless the customer explicitly asks for brand details.',
-    '- Avoid robotic closings like "anything else I can help with?" — they violate the strict follow-up policy above.',
-    '- For non-product/general chat, end naturally without forcing a question.',
-    orderClosingAlreadyAskedInConversation
-      ? '- For this turn, do not include any order-focused closing question, follow-up question, invitation, or "let me know" prompt, because the order closing was already asked earlier in the conversation.'
-      : `- For this turn (first product reply), include exactly one order-focused follow-up question at the end (e.g., "${orderClosingExample}" or "${orderClosingFallback}"). Do not add any additional invitations.`,
-    '- If the message is detected as an end-of-conversation signal by the closing-intent classifier, respond with exactly one short polite closing sentence in the customer language.',
-    '- For classifier-detected closing replies, do not ask follow-up questions and do not introduce new topics.',
-    '- When collecting delivery details for an order, ask ONLY for: (1) contact phone number and (2) full delivery address. Do not ask for name, surname, ID number, birthday, or any other personal data.',
-    `- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence ${orderConfirmationLanguageDirective}: "${orderConfirmationFollowUp}"`,
-    `- When the business has configured a delivery-time window in the CRM, the platform inserts one ${languageName} sentence with that ETA immediately before that follow-up; do not add your own separate delivery-arrival time line in order-confirmation replies (avoid duplicating it).`,
-    '- For ambiguous short customer replies (e.g., "po", "ok", "yes", "po ju lutem"), rely on conversation context and classifier signals to decide intent. Do not classify based only on keywords. If classifier/context indicates order affirmation, continue order flow; escalate only when classifier/context indicates a real post-purchase issue.',
-    '- Draft/confirm order behavior must be triggered only when classifier + conversation context indicate explicit order affirmation. Product inquiries alone (price, stock, details, comparison, availability) are not order confirmation.',
-    '- If the assistant has already asked to proceed with an order (or requested delivery details), and the customer then provides BOTH required details (phone number and full delivery address), treat that as valid order-confirmation context even without an explicit "yes" in the latest message.',
-    '- Never treat an order as complete/ready for creation unless BOTH required delivery details are present: a contact phone number and a full delivery/shipping address. If either detail is missing, ask specifically for the missing detail and do not confirm order placement yet.',
-    `- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, ${postPurchaseLanguageDirective}: "${postPurchaseIssueSentence}"`,
-  );
+  const gl = assembledGuidelines.trim();
+  if (gl) {
+    lines.push('', 'Guidelines:', gl);
+  }
 
-  if (hasImages) {
+  const restrictions = config.restrictions ?? [];
+  if (restrictions.length > 0) {
     lines.push(
       '',
-      'When a customer sends an image of a product, you must follow this exact process in order:',
-      'Step 1 - Identify the product in the image as specifically as possible. Extract: the brand name, product name, flavor or variant, size or weight, and any other distinguishing details visible on the packaging.',
-      'Step 2 - Search the provided product catalog for an exact or near-exact match. A match is only valid if the brand name AND product type match. A different brand of the same product type is NOT a match.',
-      'Step 3 - Apply one of these three responses only:',
-      'Response A - Exact match found: You have that exact product or a version of it from the same brand. Confirm availability with details from your catalog.',
-      'Response B - Similar product, different brand: You have a similar product but a different brand. Be honest - say you do not carry that exact brand but offer your alternative. Example: "We do not carry [Brand X] specifically, but we do have [Your Brand] which is a similar mass gainer - would you like details on that?"',
-      'Response C - No match at all: You do not have anything similar. Tell the customer honestly and ask if they are looking for something specific you might be able to help with.',
-      'Never confirm you have a product just because the product category matches. Brand accuracy matters.',
-      'Use the steps above for your own reasoning only. In the customer-facing message, give a short, clean answer — do not narrate the steps or produce a long structured report.',
+      `OPERATOR BUSINESS RULES — you MUST follow:\n${restrictions.map((r) => `- ${r}`).join('\n')}`,
+    );
+  }
+
+  const platformRestrictions = config.platform_restrictions ?? [];
+  if (platformRestrictions.length > 0) {
+    lines.push(
+      '',
+      `PLATFORM POLICY — follow strictly:\n${platformRestrictions.map((r) => `- ${r}`).join('\n')}`,
     );
   }
 
@@ -2248,20 +2192,15 @@ export async function generateReply(
     };
   }
 
-  const orderClosingAlreadyAskedInConversation =
-    hasAssistantAskedForOrderInConversation(conversationHistory);
-  const discountAlreadyAddressedInConversation =
-    customerAskedDiscount && assistantAlreadyAddressedDiscount(conversationHistory);
-  let systemPrompt = buildSystemPrompt(
+  await ensureTenantPromptBlocksSeeded(tenantId);
+  const tenantPromptBlocks = await loadTenantPromptBlocksCached(tenantId);
+  const assembledGuidelines = assembleGuidelinesFromBlocks(tenantPromptBlocks, { language }, { hasImages });
+
+  let systemPrompt = buildRetailAISystemPrompt(
     tenant.name,
     config,
     resolvedProductCatalogContext,
-    hasImages,
-    customerAskedPrice,
-    orderClosingAlreadyAskedInConversation,
-    customerAskedDiscount,
-    discountAlreadyAddressedInConversation,
-    language,
+    assembledGuidelines,
     tenant.niche,
     tenant.description,
   );

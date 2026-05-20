@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import AdminBusinessAiPanel from '@/pages/admin/AdminBusinessAiPanel';
 import {
   fetchAdminBusinessOverview,
   fetchAdminBusinessPeriodStats,
@@ -18,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { formatCurrency } from '@/lib/formatCurrency';
 import { cn } from '@/lib/utils';
 
@@ -154,219 +156,232 @@ export default function AdminBusinessDetailPage() {
         </div>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Commissionable AI orders (period)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {statsQuery.isLoading ? (
-              <Loader2 className="size-5 animate-spin text-muted-foreground" />
-            ) : (
-              <p className="text-2xl font-bold tabular-nums">{stats?.commissionable_ai_orders ?? '—'}</p>
-            )}
-          </CardContent>
-        </Card>
-        <Card className="border-amber-500/30 bg-amber-500/5">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-amber-900 dark:text-amber-200">
-              Commission owed (unpaid, period)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {statsQuery.isLoading ? (
-              <Loader2 className="size-5 animate-spin text-muted-foreground" />
-            ) : (
-              <p className="text-2xl font-bold tabular-nums text-amber-800 dark:text-amber-300">
-                {formatCurrency(stats?.commission_unpaid ?? 0)}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Commission paid (period)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {statsQuery.isLoading ? (
-              <Loader2 className="size-5 animate-spin text-muted-foreground" />
-            ) : (
-              <p className="text-2xl font-bold tabular-nums">{formatCurrency(stats?.commission_paid ?? 0)}</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Period & report</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Choose the date range for the table below. Set each order&apos;s commission status with the dropdown
-            (Unpaid → Billed → Paid, or back to Unpaid if you need to fix a mistake). Use{' '}
-            <span className="font-medium text-foreground">Generate report</span> when you want a saved snapshot for
-            invoicing.
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-end gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="period-start">From</Label>
-              <Input
-                id="period-start"
-                type="date"
-                value={periodStart}
-                onChange={(e) => {
-                  setPeriod((p) => ({ ...p, start: e.target.value }));
-                  setOrdersPage(1);
-                }}
-              />
+      {tenant?.id ? (
+        <Tabs defaultValue="ai" className="w-full">
+          <TabsList className="w-fit">
+            <TabsTrigger value="ai">AI assistant</TabsTrigger>
+            <TabsTrigger value="commissions">Commissions</TabsTrigger>
+          </TabsList>
+          <TabsContent value="ai" className="mt-4 space-y-6">
+            <AdminBusinessAiPanel tenantId={tenant.id} />
+          </TabsContent>
+          <TabsContent value="commissions" className="mt-4 space-y-6">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Commissionable AI orders (period)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {statsQuery.isLoading ? (
+                    <Loader2 className="size-5 animate-spin text-muted-foreground" />
+                  ) : (
+                    <p className="text-2xl font-bold tabular-nums">{stats?.commissionable_ai_orders ?? '—'}</p>
+                  )}
+                </CardContent>
+              </Card>
+              <Card className="border-amber-500/30 bg-amber-500/5">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium text-amber-900 dark:text-amber-200">
+                    Commission owed (unpaid, period)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {statsQuery.isLoading ? (
+                    <Loader2 className="size-5 animate-spin text-muted-foreground" />
+                  ) : (
+                    <p className="text-2xl font-bold tabular-nums text-amber-800 dark:text-amber-300">
+                      {formatCurrency(stats?.commission_unpaid ?? 0)}
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Commission paid (period)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {statsQuery.isLoading ? (
+                    <Loader2 className="size-5 animate-spin text-muted-foreground" />
+                  ) : (
+                    <p className="text-2xl font-bold tabular-nums">{formatCurrency(stats?.commission_paid ?? 0)}</p>
+                  )}
+                </CardContent>
+              </Card>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="period-end">To</Label>
-              <Input
-                id="period-end"
-                type="date"
-                value={periodEnd}
-                onChange={(e) => {
-                  setPeriod((p) => ({ ...p, end: e.target.value }));
-                  setOrdersPage(1);
-                }}
-              />
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              className="mt-auto"
-              disabled={!periodValid || generateReportMutation.isPending}
-              onClick={() => generateReportMutation.mutate()}
-            >
-              {generateReportMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
-              Generate report
-            </Button>
-          </div>
-          {!periodValid ? (
-            <p className="text-sm text-destructive">&quot;To&quot; must be on or after &quot;From&quot;.</p>
-          ) : null}
-        </CardContent>
-      </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Commissionable orders</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Orders placed by AI while no human had replied in the thread (5% commission). Edit status per row.
-          </p>
-        </CardHeader>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[880px] text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/40 text-left">
-                  <th className="px-4 py-3 font-medium">Order ID</th>
-                  <th className="px-4 py-3 font-medium">Customer</th>
-                  <th className="px-4 py-3 font-medium">Product</th>
-                  <th className="px-4 py-3 font-medium text-right">Order total</th>
-                  <th className="px-4 py-3 font-medium text-right">Commission</th>
-                  <th className="px-4 py-3 font-medium">Date</th>
-                  <th className="px-4 py-3 font-medium">Commission status</th>
-                </tr>
-              </thead>
-              <tbody>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Period & report</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Choose the date range for the table below. Set each order&apos;s commission status with the dropdown
+                  (Unpaid → Billed → Paid, or back to Unpaid if you need to fix a mistake). Use{' '}
+                  <span className="font-medium text-foreground">Generate report</span> when you want a saved snapshot for
+                  invoicing.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex flex-wrap items-end gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="period-start">From</Label>
+                    <Input
+                      id="period-start"
+                      type="date"
+                      value={periodStart}
+                      onChange={(e) => {
+                        setPeriod((p) => ({ ...p, start: e.target.value }));
+                        setOrdersPage(1);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="period-end">To</Label>
+                    <Input
+                      id="period-end"
+                      type="date"
+                      value={periodEnd}
+                      onChange={(e) => {
+                        setPeriod((p) => ({ ...p, end: e.target.value }));
+                        setOrdersPage(1);
+                      }}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-auto"
+                    disabled={!periodValid || generateReportMutation.isPending}
+                    onClick={() => generateReportMutation.mutate()}
+                  >
+                    {generateReportMutation.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
+                    Generate report
+                  </Button>
+                </div>
                 {!periodValid ? (
-                  <tr>
-                    <td className="px-4 py-8 text-center text-muted-foreground" colSpan={7}>
-                      Select a valid date range.
-                    </td>
-                  </tr>
-                ) : ordersQuery.isLoading ? (
-                  <tr>
-                    <td className="px-4 py-8" colSpan={7}>
-                      <Skeleton className="h-8 w-full" />
-                    </td>
-                  </tr>
-                ) : orders.length === 0 ? (
-                  <tr>
-                    <td className="px-4 py-8 text-center text-muted-foreground" colSpan={7}>
-                      No commissionable orders in this period.
-                    </td>
-                  </tr>
-                ) : (
-                  orders.map((o) => (
-                    <tr key={o.id} className="border-b border-border last:border-0">
-                      <td className="px-4 py-3 font-mono text-xs">{o.id}</td>
-                      <td className="px-4 py-3">{o.customer_name}</td>
-                      <td className="px-4 py-3">{o.product_name}</td>
-                      <td className="px-4 py-3 text-right tabular-nums">{formatCurrency(o.total_price)}</td>
-                      <td className="px-4 py-3 text-right tabular-nums font-medium">
-                        {formatCurrency(o.commission_amount)}
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {new Date(o.created_at).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <select
-                            className={selectClass}
-                            value={o.commission_status}
-                            disabled={updatingOrderId === o.id}
-                            aria-label={`Commission status for order ${o.id}`}
-                            onChange={(e) => {
-                              const commission_status = e.target.value as CommissionableOrderRow['commission_status'];
-                              if (commission_status !== o.commission_status) {
-                                patchCommissionMutation.mutate({ orderId: o.id, commission_status });
-                              }
-                            }}
-                          >
-                            {COMMISSION_STATUS_OPTIONS.map((s) => (
-                              <option key={s} value={s}>
-                                {s.charAt(0).toUpperCase() + s.slice(1)}
-                              </option>
-                            ))}
-                          </select>
-                          {updatingOrderId === o.id ? (
-                            <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden />
-                          ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+                  <p className="text-sm text-destructive">&quot;To&quot; must be on or after &quot;From&quot;.</p>
+                ) : null}
+              </CardContent>
+            </Card>
 
-      {ordersPagination && ordersPagination.totalPages > 1 ? (
-        <div className="flex items-center justify-between text-sm text-muted-foreground">
-          <span>
-            Page {ordersPagination.page} of {ordersPagination.totalPages}
-          </span>
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={ordersPagination.page <= 1}
-              onClick={() => setOrdersPage((p) => Math.max(1, p - 1))}
-            >
-              Previous
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={ordersPagination.page >= ordersPagination.totalPages}
-              onClick={() => setOrdersPage((p) => p + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Commissionable orders</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Orders placed by AI while no human had replied in the thread (5% commission). Edit status per row.
+                </p>
+              </CardHeader>
+              <CardContent className="p-0">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[880px] text-sm">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/40 text-left">
+                        <th className="px-4 py-3 font-medium">Order ID</th>
+                        <th className="px-4 py-3 font-medium">Customer</th>
+                        <th className="px-4 py-3 font-medium">Product</th>
+                        <th className="px-4 py-3 font-medium text-right">Order total</th>
+                        <th className="px-4 py-3 font-medium text-right">Commission</th>
+                        <th className="px-4 py-3 font-medium">Date</th>
+                        <th className="px-4 py-3 font-medium">Commission status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {!periodValid ? (
+                        <tr>
+                          <td className="px-4 py-8 text-center text-muted-foreground" colSpan={7}>
+                            Select a valid date range.
+                          </td>
+                        </tr>
+                      ) : ordersQuery.isLoading ? (
+                        <tr>
+                          <td className="px-4 py-8" colSpan={7}>
+                            <Skeleton className="h-8 w-full" />
+                          </td>
+                        </tr>
+                      ) : orders.length === 0 ? (
+                        <tr>
+                          <td className="px-4 py-8 text-center text-muted-foreground" colSpan={7}>
+                            No commissionable orders in this period.
+                          </td>
+                        </tr>
+                      ) : (
+                        orders.map((o) => (
+                          <tr key={o.id} className="border-b border-border last:border-0">
+                            <td className="px-4 py-3 font-mono text-xs">{o.id}</td>
+                            <td className="px-4 py-3">{o.customer_name}</td>
+                            <td className="px-4 py-3">{o.product_name}</td>
+                            <td className="px-4 py-3 text-right tabular-nums">{formatCurrency(o.total_price)}</td>
+                            <td className="px-4 py-3 text-right tabular-nums font-medium">
+                              {formatCurrency(o.commission_amount)}
+                            </td>
+                            <td className="px-4 py-3 text-muted-foreground">
+                              {new Date(o.created_at).toLocaleString()}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2">
+                                <select
+                                  className={selectClass}
+                                  value={o.commission_status}
+                                  disabled={updatingOrderId === o.id}
+                                  aria-label={`Commission status for order ${o.id}`}
+                                  onChange={(e) => {
+                                    const commission_status = e.target.value as CommissionableOrderRow['commission_status'];
+                                    if (commission_status !== o.commission_status) {
+                                      patchCommissionMutation.mutate({ orderId: o.id, commission_status });
+                                    }
+                                  }}
+                                >
+                                  {COMMISSION_STATUS_OPTIONS.map((s) => (
+                                    <option key={s} value={s}>
+                                      {s.charAt(0).toUpperCase() + s.slice(1)}
+                                    </option>
+                                  ))}
+                                </select>
+                                {updatingOrderId === o.id ? (
+                                  <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden />
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+
+            {ordersPagination && ordersPagination.totalPages > 1 ? (
+              <div className="flex items-center justify-between text-sm text-muted-foreground">
+                <span>
+                  Page {ordersPagination.page} of {ordersPagination.totalPages}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={ordersPagination.page <= 1}
+                    onClick={() => setOrdersPage((p) => Math.max(1, p - 1))}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={ordersPagination.page >= ordersPagination.totalPages}
+                    onClick={() => setOrdersPage((p) => p + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </TabsContent>
+        </Tabs>
       ) : null}
     </div>
   );
