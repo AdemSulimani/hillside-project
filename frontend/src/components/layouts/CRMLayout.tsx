@@ -20,12 +20,12 @@ export default function CRMLayout() {
   return (
     <CrmSocketProvider>
       <CrmRealtimeListeners />
-      <div className="flex h-screen overflow-hidden bg-background">
+      <div className="flex min-h-svh bg-background">
         <Sidebar />
 
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex min-w-0 flex-1 flex-col">
           <Header />
-          <main className="flex flex-1 flex-col overflow-y-auto p-4 md:p-6">
+          <main className="flex flex-1 flex-col p-4 md:p-6">
             <Suspense fallback={<CRMRouteFallback />}>
               <Outlet />
             </Suspense>

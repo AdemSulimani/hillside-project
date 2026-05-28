@@ -326,7 +326,7 @@ export default function CreditsPage() {
     : 0;
 
   return (
-    <div className="flex flex-col gap-6 p-4 md:p-6">
+    <div className="flex flex-col gap-6">
       <ConversationPreviewSheet
         useCase={selectedUseCase}
         onClose={() => setSelectedUseCase(null)}
