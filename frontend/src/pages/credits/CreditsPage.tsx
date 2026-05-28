@@ -37,7 +37,6 @@ import {
   SheetDescription,
   SheetFooter,
 } from '@/components/ui/sheet';
-import { Button } from '@/components/ui/button';
 import { fetchConversationThread } from '@/api/conversationsApi';
 import {
   fetchCreditsSummary,
@@ -497,11 +496,14 @@ export default function CreditsPage() {
                   width={52}
                 />
                 <Tooltip
-                  formatter={(value: number, name: string) => [
-                    formatEur(value),
-                    name === 'commission' ? 'Commission' : 'Use Case Fees',
-                  ]}
-                  labelFormatter={formatMonthKey}
+                  formatter={(value, name) => {
+                    const n = typeof value === 'number' ? value : Number(value);
+                    return [
+                      formatEur(Number.isFinite(n) ? n : 0),
+                      name === 'commission' ? 'Commission' : 'Use Case Fees',
+                    ];
+                  }}
+                  labelFormatter={(label) => formatMonthKey(String(label ?? ''))}
                 />
                 <Legend
                   formatter={(value) =>
@@ -548,8 +550,11 @@ export default function CreditsPage() {
                   width={28}
                 />
                 <Tooltip
-                  formatter={(value: number) => [value, 'Cases']}
-                  labelFormatter={formatDay}
+                  formatter={(value) => {
+                    const n = typeof value === 'number' ? value : Number(value);
+                    return [Number.isFinite(n) ? n : 0, 'Cases'];
+                  }}
+                  labelFormatter={(label) => formatDay(String(label ?? ''))}
                 />
                 <Line
                   type="monotone"
