@@ -10,12 +10,14 @@ import {
   fetchAdminTenantPromptBlocks,
   patchAdminTenantPromptBlock,
   postAdminRestoreAiVersion,
+  postAdminSyncTenantCatalogBlocks,
   postAdminTenantAiTest,
   postAdminTenantPromptBlockCustom,
   postAdminTenantPromptBlockReset,
   putAdminTenantAiConfig,
   type AdminTenantPromptBlockRow,
 } from '@/api/platformAdminApi';
+import { CheckCircle2, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -181,6 +183,22 @@ export default function AdminBusinessAiPanel({ tenantId }: { tenantId: string })
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin', 'tenant', tenantId] });
       toast.success('Restored snapshot');
+    },
+    onError: (e: unknown) => toast.error(extractErr(e)),
+  });
+
+  const [syncResult, setSyncResult] = useState<{ added_count: number; added_block_keys: string[] } | null>(null);
+
+  const syncMutation = useMutation({
+    mutationFn: () => postAdminSyncTenantCatalogBlocks(tenantId),
+    onSuccess: (d) => {
+      setSyncResult(d);
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'tenant', tenantId] });
+      if (d.added_count > 0) {
+        toast.success(`${d.added_count} new platform guideline(s) added`);
+      } else {
+        toast.success('Already up to date — no new guidelines found');
+      }
     },
     onError: (e: unknown) => toast.error(extractErr(e)),
   });
@@ -397,6 +415,51 @@ export default function AdminBusinessAiPanel({ tenantId }: { tenantId: string })
               </table>
             )}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Sync platform guidelines</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            If new AI guidelines have been added to the platform catalog after this business was
+            onboarded, use this to push only the missing ones. Existing guidelines — including any
+            customised content — are never overwritten.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => { setSyncResult(null); syncMutation.mutate(); }}
+            disabled={syncMutation.isPending}
+          >
+            {syncMutation.isPending
+              ? <Loader2 className="mr-2 size-4 animate-spin" />
+              : <RefreshCw className="mr-2 size-4" />}
+            Sync missing platform guidelines
+          </Button>
+
+          {syncResult !== null ? (
+            <div className={cn(
+              'flex items-start gap-2 rounded-md border px-3 py-2 text-sm',
+              syncResult.added_count > 0
+                ? 'border-green-500/30 bg-green-500/5 text-green-800 dark:text-green-300'
+                : 'border-border bg-muted/30 text-muted-foreground',
+            )}>
+              <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+              <div>
+                {syncResult.added_count > 0 ? (
+                  <>
+                    <p className="font-medium">{syncResult.added_count} new guideline(s) added</p>
+                    <p className="text-xs mt-0.5 font-mono">{syncResult.added_block_keys.join(', ')}</p>
+                  </>
+                ) : (
+                  <p>Already up to date — no new guidelines were found.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

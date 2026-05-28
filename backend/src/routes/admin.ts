@@ -15,13 +15,20 @@ import {
   adminPeriodQueryRequiredSchema,
   adminReportIdParamsSchema,
   adminReportStatusPatchBodySchema,
+  adminUseCaseIdParamsSchema,
+  adminUseCaseBillingStatusPatchBodySchema,
+  adminMarkUseCasePeriodBodySchema,
 } from '../validators/admin';
 import {
   adminAiTestBodySchema,
   adminAiVersionIdParamsSchema,
+  adminCatalogBlockIdParamsSchema,
+  adminCreateCatalogBlockSchema,
   adminCreateCustomPromptBlockSchema,
   adminPatchTenantPromptBlockSchema,
+  adminSyncAllCatalogBlocksBodySchema,
   adminTenantPromptBlockIdParamsSchema,
+  adminUpdateCatalogBlockSchema,
   adminUpdateTenantAiConfigSchema,
 } from '../validators/adminAi';
 import * as adminTenantController from '../controllers/adminTenantController';
@@ -107,6 +114,42 @@ ownerRoutes.patch(
 );
 
 ownerRoutes.get(
+  '/businesses/:tenantId/use-cases',
+  validateParams(adminTenantIdParamsSchema),
+  validateQuery(adminBusinessListQuerySchema),
+  adminCommissionController.listBusinessUseCases,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/use-cases/mark-billed',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminMarkUseCasePeriodBodySchema),
+  adminCommissionController.markUseCasesBilledForPeriod,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/use-cases/mark-paid',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminMarkUseCasePeriodBodySchema),
+  adminCommissionController.markUseCasesPaidForPeriod,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/generate-full-report',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminGenerateReportBodySchema),
+  adminCommissionController.generateFullReport,
+);
+ownerRoutes.patch(
+  '/use-cases/:useCaseId/billing-status',
+  validateParams(adminUseCaseIdParamsSchema),
+  validateBody(adminUseCaseBillingStatusPatchBodySchema),
+  adminCommissionController.patchUseCaseBillingStatus,
+);
+ownerRoutes.post(
+  '/use-cases/:useCaseId/void',
+  validateParams(adminUseCaseIdParamsSchema),
+  adminCommissionController.voidUseCase,
+);
+
+ownerRoutes.get(
   '/businesses/:tenantId/ai/config',
   validateParams(adminTenantIdParamsSchema),
   adminAiController.getTenantAiConfig,
@@ -159,6 +202,30 @@ ownerRoutes.post(
   validateParams(adminTenantIdParamsSchema),
   validateBody(adminAiTestBodySchema),
   adminAiController.postTenantAiTest,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/ai/sync-catalog-blocks',
+  validateParams(adminTenantIdParamsSchema),
+  adminAiController.postSyncTenantCatalogBlocks,
+);
+ownerRoutes.post(
+  '/ai/sync-catalog-blocks',
+  validateBody(adminSyncAllCatalogBlocksBodySchema),
+  adminAiController.postSyncAllCatalogBlocks,
+);
+
+// Platform catalog block management
+ownerRoutes.get('/ai/catalog-blocks', adminAiController.listCatalogBlocks);
+ownerRoutes.post(
+  '/ai/catalog-blocks',
+  validateBody(adminCreateCatalogBlockSchema),
+  adminAiController.createCatalogBlock,
+);
+ownerRoutes.patch(
+  '/ai/catalog-blocks/:blockId',
+  validateParams(adminCatalogBlockIdParamsSchema),
+  validateBody(adminUpdateCatalogBlockSchema),
+  adminAiController.updateCatalogBlock,
 );
 
 router.use(ownerRoutes);

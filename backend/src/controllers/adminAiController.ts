@@ -4,10 +4,15 @@ import { ensureAIConfigForTenant, updateAIConfig } from '../db/models/aiConfig';
 import {
   deleteCustomTenantPromptBlock,
   findTenantPromptBlockForAdmin,
+  insertCatalogPromptBlock,
   insertCustomTenantPromptBlock,
+  listAllCatalogPromptBlocks,
   listTenantPromptBlocksRuntime,
   listTenantPromptBlocksWithMeta,
   resetTenantPromptBlockContent,
+  syncNewCatalogBlocksForTenant,
+  syncNewCatalogBlocksForTenants,
+  updateCatalogPromptBlock,
   updateTenantPromptBlock,
 } from '../db/models/promptBlock';
 import { invalidateTenantAiCaches } from '../services/invalidateTenantAiCaches';
@@ -140,6 +145,18 @@ export async function postTenantPromptBlockReset(req: Request, res: Response): P
 export async function postTenantPromptBlockCustom(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = String(req.params.tenantId);
+
+    // Normalise the key the same way the model will before checking for duplicates.
+    const rawKey: string = req.body.block_key ?? '';
+    const normalisedKey = rawKey.startsWith('custom_') ? rawKey : `custom_${rawKey}`;
+
+    const existingBlocks = await listTenantPromptBlocksWithMeta(tenantId);
+    const duplicate = existingBlocks.find((b) => b.block_key === normalisedKey);
+    if (duplicate) {
+      sendError(res, `A prompt block with key "${normalisedKey}" already exists for this tenant`, 409);
+      return;
+    }
+
     const row = await insertCustomTenantPromptBlock(tenantId, req.body);
     await invalidateTenantAiCaches(tenantId);
     await recordAiVersion(tenantId, req.admin?.email);
@@ -211,12 +228,51 @@ export async function postRestoreTenantAiVersion(req: Request, res: Response): P
       client,
     );
 
+    const snapshotKeys = new Set(snap.prompt_blocks.map((b) => b.block_key));
+
+    // Update blocks that exist in both the snapshot and the DB.
     for (const b of snap.prompt_blocks) {
       await client.query(
         `UPDATE tenant_prompt_blocks
          SET content = $1, enabled = $2, sort_order = $3, updated_at = now()
          WHERE tenant_id = $4 AND block_key = $5`,
         [b.content, b.enabled, b.sort_order, tenantId, b.block_key],
+      );
+    }
+
+    // Re-insert custom blocks that were in the snapshot but no longer exist in the DB.
+    // Catalog-linked blocks (prompt_block_id IS NOT NULL) are managed by the platform and
+    // are intentionally skipped here — they will already exist or get re-seeded separately.
+    const customInSnapshot = snap.prompt_blocks.filter((b) => b.prompt_block_id === null);
+    for (const b of customInSnapshot) {
+      await client.query(
+        `INSERT INTO tenant_prompt_blocks (tenant_id, prompt_block_id, block_key, enabled, content, sort_order)
+         VALUES ($1, NULL, $2, $3, $4, $5)
+         ON CONFLICT (tenant_id, block_key) DO NOTHING`,
+        [tenantId, b.block_key, b.enabled, b.content, b.sort_order],
+      );
+    }
+
+    // Remove custom blocks that exist in the DB but were NOT in the snapshot — these
+    // were added after the snapshot was taken and must be removed to fully restore state.
+    // Catalog-linked blocks (prompt_block_id IS NOT NULL) are intentionally preserved.
+    const placeholders = [...snapshotKeys]
+      .map((_, i) => `$${i + 2}`)
+      .join(', ');
+    if (snapshotKeys.size > 0) {
+      await client.query(
+        `DELETE FROM tenant_prompt_blocks
+         WHERE tenant_id = $1
+           AND prompt_block_id IS NULL
+           AND block_key NOT IN (${placeholders})`,
+        [tenantId, ...snapshotKeys],
+      );
+    } else {
+      // Snapshot had no custom blocks — remove all custom blocks for this tenant.
+      await client.query(
+        `DELETE FROM tenant_prompt_blocks
+         WHERE tenant_id = $1 AND prompt_block_id IS NULL`,
+        [tenantId],
       );
     }
 
@@ -286,5 +342,171 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
     sendSuccess(res, { reply, model_used: model });
   } catch (err) {
     sendError(res, 'Test request failed', 500, err);
+  }
+}
+
+// ——————————————————————————————————————————
+// Platform catalog block management
+// ——————————————————————————————————————————
+
+export async function listCatalogBlocks(req: Request, res: Response): Promise<void> {
+  try {
+    const rows = await listAllCatalogPromptBlocks(true);
+    sendSuccess(res, { rows });
+  } catch (err) {
+    sendError(res, 'Failed to load catalog blocks', 500, err);
+  }
+}
+
+export async function createCatalogBlock(req: Request, res: Response): Promise<void> {
+  try {
+    const { sync_to_existing, ...blockInput } = req.body as {
+      key: string;
+      title: string;
+      description?: string | null;
+      default_content: string;
+      category: string;
+      sort_order: number;
+      is_platform_locked: boolean;
+      is_active: boolean;
+      sync_to_existing?: boolean;
+    };
+
+    const created = await insertCatalogPromptBlock(blockInput);
+
+    let syncSummary: { tenants_updated: number; total_blocks_added: number } | null = null;
+    if (sync_to_existing && created.is_active) {
+      const results = await syncNewCatalogBlocksForTenants();
+      await Promise.all(
+        results.map(async ({ tenant_id, added_block_keys }) => {
+          await invalidateTenantAiCaches(tenant_id);
+          await recordAiVersion(
+            tenant_id,
+            req.admin?.email,
+            `catalog-sync:${added_block_keys.length}-blocks-added`,
+          );
+        }),
+      );
+      syncSummary = {
+        tenants_updated: results.length,
+        total_blocks_added: results.reduce((s, r) => s + r.added_block_keys.length, 0),
+      };
+    }
+
+    sendSuccess(res, { block: created, sync: syncSummary }, 'Platform guideline created');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg.includes('duplicate key') || msg.includes('unique constraint')) {
+      sendError(res, 'A catalog block with that key already exists', 409);
+      return;
+    }
+    sendError(res, 'Failed to create catalog block', 500, err);
+  }
+}
+
+export async function updateCatalogBlock(req: Request, res: Response): Promise<void> {
+  try {
+    const blockId = String(req.params.blockId);
+    const { sync_to_existing, ...updateInput } = req.body as {
+      title?: string;
+      description?: string | null;
+      default_content?: string;
+      category?: string;
+      sort_order?: number;
+      is_platform_locked?: boolean;
+      is_active?: boolean;
+      sync_to_existing?: boolean;
+    };
+
+    const updated = await updateCatalogPromptBlock(blockId, updateInput);
+    if (!updated) {
+      sendError(res, 'Catalog block not found', 404);
+      return;
+    }
+
+    let syncSummary: { tenants_updated: number; total_blocks_added: number } | null = null;
+    if (sync_to_existing && updated.is_active) {
+      const results = await syncNewCatalogBlocksForTenants();
+      await Promise.all(
+        results.map(async ({ tenant_id, added_block_keys }) => {
+          await invalidateTenantAiCaches(tenant_id);
+          await recordAiVersion(
+            tenant_id,
+            req.admin?.email,
+            `catalog-sync:${added_block_keys.length}-blocks-added`,
+          );
+        }),
+      );
+      syncSummary = {
+        tenants_updated: results.length,
+        total_blocks_added: results.reduce((s, r) => s + r.added_block_keys.length, 0),
+      };
+    }
+
+    sendSuccess(res, { block: updated, sync: syncSummary }, 'Platform guideline updated');
+  } catch (err) {
+    sendError(res, 'Failed to update catalog block', 500, err);
+  }
+}
+
+/**
+ * Syncs missing platform catalog blocks into a single tenant.
+ * Existing blocks (even customised ones) are never overwritten.
+ */
+export async function postSyncTenantCatalogBlocks(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = String(req.params.tenantId);
+    const addedKeys = await syncNewCatalogBlocksForTenant(tenantId);
+    if (addedKeys.length > 0) {
+      await invalidateTenantAiCaches(tenantId);
+      await recordAiVersion(tenantId, req.admin?.email, `catalog-sync:${addedKeys.length}-blocks-added`);
+    }
+    sendSuccess(res, {
+      added_count: addedKeys.length,
+      added_block_keys: addedKeys,
+    }, addedKeys.length > 0
+      ? `${addedKeys.length} new platform guideline(s) added`
+      : 'Already up to date — no new guidelines found');
+  } catch (err) {
+    sendError(res, 'Failed to sync catalog blocks', 500, err);
+  }
+}
+
+/**
+ * Syncs missing platform catalog blocks across all tenants (or a specified subset).
+ * Accepts an optional { tenantIds: string[] } body — omit or send an empty array
+ * to target every tenant in the system.
+ */
+export async function postSyncAllCatalogBlocks(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantIds: string[] | undefined = Array.isArray(req.body?.tenantIds)
+      ? (req.body.tenantIds as string[])
+      : undefined;
+
+    const results = await syncNewCatalogBlocksForTenants(tenantIds);
+
+    // Invalidate AI caches and record a version snapshot only for tenants that
+    // actually received new blocks — skip clean tenants to avoid noise.
+    await Promise.all(
+      results.map(async ({ tenant_id, added_block_keys }) => {
+        await invalidateTenantAiCaches(tenant_id);
+        await recordAiVersion(
+          tenant_id,
+          req.admin?.email,
+          `catalog-sync:${added_block_keys.length}-blocks-added`,
+        );
+      }),
+    );
+
+    const totalAdded = results.reduce((sum, r) => sum + r.added_block_keys.length, 0);
+    sendSuccess(res, {
+      tenants_updated: results.length,
+      total_blocks_added: totalAdded,
+      details: results,
+    }, totalAdded > 0
+      ? `${totalAdded} new platform guideline(s) distributed across ${results.length} business(es)`
+      : 'All businesses are already up to date');
+  } catch (err) {
+    sendError(res, 'Failed to sync catalog blocks', 500, err);
   }
 }

@@ -32,11 +32,73 @@ export type TenantPromptBlockWithMeta = TenantPromptBlockRow & {
   catalog_title: string | null;
 };
 
-export async function listAllCatalogPromptBlocks(): Promise<PromptBlockCatalog[]> {
+export async function listAllCatalogPromptBlocks(includeInactive = false): Promise<PromptBlockCatalog[]> {
   const { rows } = await pool.query<PromptBlockCatalog>(
-    `SELECT * FROM prompt_blocks WHERE is_active = true ORDER BY sort_order ASC, key ASC`,
+    includeInactive
+      ? `SELECT * FROM prompt_blocks ORDER BY sort_order ASC, key ASC`
+      : `SELECT * FROM prompt_blocks WHERE is_active = true ORDER BY sort_order ASC, key ASC`,
   );
   return rows;
+}
+
+export type InsertCatalogPromptBlockInput = {
+  key: string;
+  title: string;
+  description?: string | null;
+  default_content: string;
+  category: string;
+  sort_order: number;
+  is_platform_locked: boolean;
+  is_active: boolean;
+};
+
+export async function insertCatalogPromptBlock(
+  input: InsertCatalogPromptBlockInput,
+): Promise<PromptBlockCatalog> {
+  const { rows } = await pool.query<PromptBlockCatalog>(
+    `INSERT INTO prompt_blocks (key, title, description, default_content, category, sort_order, is_platform_locked, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      input.key,
+      input.title,
+      input.description ?? null,
+      input.default_content,
+      input.category,
+      input.sort_order,
+      input.is_platform_locked,
+      input.is_active,
+    ],
+  );
+  return rows[0];
+}
+
+export type UpdateCatalogPromptBlockInput = Partial<{
+  title: string;
+  description: string | null;
+  default_content: string;
+  category: string;
+  sort_order: number;
+  is_platform_locked: boolean;
+  is_active: boolean;
+}>;
+
+export async function updateCatalogPromptBlock(
+  id: string,
+  input: UpdateCatalogPromptBlockInput,
+): Promise<PromptBlockCatalog | null> {
+  const keys = Object.keys(input) as (keyof UpdateCatalogPromptBlockInput)[];
+  if (keys.length === 0) return null;
+
+  const setClauses = keys.map((k, i) => `${k} = $${i + 2}`);
+  setClauses.push('updated_at = now()');
+  const values = keys.map((k) => input[k]);
+
+  const { rows } = await pool.query<PromptBlockCatalog>(
+    `UPDATE prompt_blocks SET ${setClauses.join(', ')} WHERE id = $1 RETURNING *`,
+    [id, ...values],
+  );
+  return rows[0] ?? null;
 }
 
 export async function countTenantPromptBlocks(
@@ -190,4 +252,86 @@ export async function deleteCustomTenantPromptBlock(
     [tenantId, id],
   );
   return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Inserts catalog blocks that are active but not yet present for a tenant.
+ * Existing blocks (even customised ones) are untouched (ON CONFLICT DO NOTHING).
+ * Returns the keys of every newly added block so callers can report the delta.
+ */
+export async function syncNewCatalogBlocksForTenant(
+  tenantId: string,
+): Promise<string[]> {
+  const { rows } = await pool.query<{ block_key: string }>(
+    `INSERT INTO tenant_prompt_blocks (tenant_id, prompt_block_id, block_key, enabled, content, sort_order)
+     SELECT $1::uuid, pb.id, pb.key, true, pb.default_content, pb.sort_order
+     FROM prompt_blocks pb
+     WHERE pb.is_active = true
+       AND NOT EXISTS (
+         SELECT 1 FROM tenant_prompt_blocks tpb
+         WHERE tpb.tenant_id = $1 AND tpb.block_key = pb.key
+       )
+     ON CONFLICT (tenant_id, block_key) DO NOTHING
+     RETURNING block_key`,
+    [tenantId],
+  );
+  return rows.map((r) => r.block_key);
+}
+
+export interface CatalogSyncTenantResult {
+  tenant_id: string;
+  added_block_keys: string[];
+}
+
+/**
+ * Syncs active catalog blocks into the specified tenants (or all tenants when
+ * tenantIds is empty / omitted). Each tenant only receives blocks it does not
+ * already have — existing customisations are never touched.
+ *
+ * Returns one entry per tenant that had at least one block added.
+ */
+export async function syncNewCatalogBlocksForTenants(
+  tenantIds?: string[],
+): Promise<CatalogSyncTenantResult[]> {
+  // Resolve the target tenant list.
+  let resolvedIds: string[];
+  if (!tenantIds || tenantIds.length === 0) {
+    const { rows } = await pool.query<{ id: string }>('SELECT id FROM tenants ORDER BY created_at ASC');
+    resolvedIds = rows.map((r) => r.id);
+  } else {
+    resolvedIds = tenantIds;
+  }
+
+  if (resolvedIds.length === 0) return [];
+
+  // Single bulk INSERT for all target tenants — far more efficient than N
+  // separate queries. The RETURNING clause gives us per-tenant attribution.
+  const placeholders = resolvedIds.map((_, i) => `$${i + 1}::uuid`).join(', ');
+  const { rows } = await pool.query<{ tenant_id: string; block_key: string }>(
+    `INSERT INTO tenant_prompt_blocks (tenant_id, prompt_block_id, block_key, enabled, content, sort_order)
+     SELECT t.id, pb.id, pb.key, true, pb.default_content, pb.sort_order
+     FROM (SELECT unnest(ARRAY[${placeholders}]::uuid[]) AS id) t
+     CROSS JOIN prompt_blocks pb
+     WHERE pb.is_active = true
+       AND NOT EXISTS (
+         SELECT 1 FROM tenant_prompt_blocks tpb
+         WHERE tpb.tenant_id = t.id AND tpb.block_key = pb.key
+       )
+     ON CONFLICT (tenant_id, block_key) DO NOTHING
+     RETURNING tenant_id, block_key`,
+    resolvedIds,
+  );
+
+  // Group results by tenant.
+  const map = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = map.get(row.tenant_id) ?? [];
+    list.push(row.block_key);
+    map.set(row.tenant_id, list);
+  }
+
+  return [...map.entries()].map(([tenant_id, added_block_keys]) => ({
+    tenant_id,
+    added_block_keys,
+  }));
 }

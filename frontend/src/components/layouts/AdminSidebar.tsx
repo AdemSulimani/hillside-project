@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Building2, FileSpreadsheet, X } from 'lucide-react';
+import { LayoutDashboard, Building2, FileSpreadsheet, BookOpen, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app';
 
@@ -7,6 +7,7 @@ const items = [
   { to: '/admin/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/admin/businesses', label: 'Businesses', icon: Building2 },
   { to: '/admin/commission-reports', label: 'Commission Reports', icon: FileSpreadsheet },
+  { to: '/admin/ai-catalog', label: 'AI Guidelines', icon: BookOpen },
 ] as const;
 
 export default function AdminSidebar() {
