@@ -143,10 +143,15 @@ export default function AdminAiCatalogPage() {
   const updateMutation = useMutation({
     mutationFn: () => {
       if (!editingBlock) throw new Error('No block selected');
-      const { key: _key, ...updateFields } = form;
       return patchAdminCatalogBlock(editingBlock.id, {
-        ...updateFields,
+        title: form.title,
         description: form.description.trim() || null,
+        default_content: form.default_content,
+        category: form.category,
+        sort_order: form.sort_order,
+        is_platform_locked: form.is_platform_locked,
+        is_active: form.is_active,
+        sync_to_existing: form.sync_to_existing,
       });
     },
     onSuccess: (d) => {

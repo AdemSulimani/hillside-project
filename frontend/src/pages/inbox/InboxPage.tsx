@@ -122,7 +122,7 @@ export default function InboxPage() {
     if (listQuery.hasNextPage && !listQuery.isFetchingNextPage) {
       void listQuery.fetchNextPage();
     }
-  }, [listQuery.fetchNextPage, listQuery.hasNextPage, listQuery.isFetchingNextPage]);
+  }, [listQuery]);
 
   useIntersectionObserver(listSentinelRef, loadMoreConversations, {
     root: listScrollRef,
@@ -350,7 +350,7 @@ export default function InboxPage() {
   }, [selectedId]);
 
   const thread = threadQuery.data;
-  const messages = thread?.messages ?? [];
+  const messages = useMemo(() => thread?.messages ?? [], [thread?.messages]);
   const openQualityAlert = thread?.conversation.open_ai_alert ?? null;
   const hasCancellationOrRefundAlert =
     openQualityAlert?.reason === 'cancellation_request' ||

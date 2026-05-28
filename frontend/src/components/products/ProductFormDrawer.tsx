@@ -117,7 +117,7 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
       setValues(emptyValues());
       setExistingUrls([]);
     }
-  }, [open, mode, product?.id]);
+  }, [open, mode, product]);
 
   const setField = useCallback(<K extends keyof ProductFormValues>(key: K, v: ProductFormValues[K]) => {
     setValues((prev) => ({ ...prev, [key]: v }));
