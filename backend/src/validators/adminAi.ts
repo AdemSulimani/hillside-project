@@ -41,6 +41,48 @@ export const adminAiTestBodySchema = z.object({
   include_vision_block: z.boolean().optional(),
 });
 
+export const adminCatalogBlockIdParamsSchema = z.object({
+  blockId: z.string().uuid('Invalid block ID'),
+});
+
+export const adminCreateCatalogBlockSchema = z.object({
+  key: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9_.]+$/, 'Use lowercase letters, numbers, dots, and underscores only'),
+  title: z.string().min(1).max(255),
+  description: z.string().max(1000).nullable().optional(),
+  default_content: z.string().min(1).max(50000),
+  category: z.enum(['guidelines', 'vision']),
+  sort_order: z.coerce.number().int().min(0).max(100000).default(1000),
+  is_platform_locked: z.boolean().default(false),
+  is_active: z.boolean().default(true),
+  /** When true, immediately sync this new block to all existing businesses. */
+  sync_to_existing: z.boolean().default(false),
+});
+
+export const adminUpdateCatalogBlockSchema = z
+  .object({
+    title: z.string().min(1).max(255).optional(),
+    description: z.string().max(1000).nullable().optional(),
+    default_content: z.string().min(1).max(50000).optional(),
+    category: z.enum(['guidelines', 'vision']).optional(),
+    sort_order: z.coerce.number().int().min(0).max(100000).optional(),
+    is_platform_locked: z.boolean().optional(),
+    is_active: z.boolean().optional(),
+    /** When true, immediately sync any new/updated content to businesses missing this block. */
+    sync_to_existing: z.boolean().optional(),
+  })
+  .refine((b) => Object.keys(b).length > 0, { message: 'Provide at least one field to update' });
+
+export const adminSyncAllCatalogBlocksBodySchema = z.object({
+  tenantIds: z
+    .array(z.string().uuid('Each tenantId must be a valid UUID'))
+    .max(500, 'Cannot sync more than 500 tenants in a single request')
+    .optional(),
+});
+
 export type AdminUpdateTenantAiConfigInput = z.infer<typeof adminUpdateTenantAiConfigSchema>;
 export type SnapshotPromptBlock = {
   block_key: string;

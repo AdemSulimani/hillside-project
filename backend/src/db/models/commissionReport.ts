@@ -10,20 +10,26 @@ export interface CommissionReport {
   total_orders: number;
   total_revenue: number;
   commission_amount: number;
+  use_case_count: number;
+  use_case_amount: number;
   status: CommissionReportBillingStatus;
   created_at: Date;
 }
 
-type ReportRow = Omit<CommissionReport, 'total_revenue' | 'commission_amount'> & {
+type ReportRow = Omit<CommissionReport, 'total_revenue' | 'commission_amount' | 'use_case_amount'> & {
   total_revenue: string | number;
   commission_amount: string | number;
+  use_case_amount: string | number;
 };
 
 function rowToReport(row: ReportRow): CommissionReport {
   return {
     ...row,
+    total_orders: Number(row.total_orders),
     total_revenue: Number(row.total_revenue),
     commission_amount: Number(row.commission_amount),
+    use_case_count: Number(row.use_case_count),
+    use_case_amount: Number(row.use_case_amount),
   };
 }
 
@@ -34,14 +40,17 @@ export interface CreateCommissionReportInput {
   total_orders: number;
   total_revenue: number;
   commission_amount: number;
+  use_case_count?: number;
+  use_case_amount?: number;
   status?: CommissionReportBillingStatus;
 }
 
 export async function createCommissionReport(input: CreateCommissionReportInput): Promise<CommissionReport> {
   const { rows } = await pool.query<ReportRow>(
     `INSERT INTO commission_reports (
-      tenant_id, period_start, period_end, total_orders, total_revenue, commission_amount, status
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      tenant_id, period_start, period_end, total_orders, total_revenue,
+      commission_amount, use_case_count, use_case_amount, status
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING *`,
     [
       input.tenant_id,
@@ -50,6 +59,8 @@ export async function createCommissionReport(input: CreateCommissionReportInput)
       input.total_orders,
       input.total_revenue,
       input.commission_amount,
+      input.use_case_count ?? 0,
+      input.use_case_amount ?? 0,
       input.status ?? 'unpaid',
     ],
   );

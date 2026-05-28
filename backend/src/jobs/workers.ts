@@ -11,6 +11,14 @@ import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prep
 import { initRefreshMetaTokensScheduler, processRefreshMetaTokens } from './refreshMetaTokens';
 import { checkFinetuningStatus, startFinetuningJob } from './checkFinetuningStatus';
 import { processNotificationJob } from './processNotificationJob';
+import {
+  processEvaluateConversationUseCase,
+  type EvaluateUseCaseJobData,
+} from './evaluateConversationUseCase';
+import {
+  processMonthlyUseCaseSnapshot,
+  initMonthlyUseCaseSnapshotScheduler,
+} from './monthlyUseCaseSnapshot';
 import { attachWorkerFailureHandler } from './failureHandler';
 
 /** Shared BullMQ worker tuning to reduce idle / polling Redis traffic. */
@@ -58,10 +66,14 @@ export const webhookWorker = new Worker<InboundWebhookJobData>(
   { connection: createWorkerConnection(), concurrency: WEBHOOK_CONCURRENCY, ...redisOptimizedWorkerOptions },
 );
 
-export const aiWorker = new Worker<AIReplyJobData>(
+export const aiWorker = new Worker<AIReplyJobData | EvaluateUseCaseJobData>(
   'ai',
   async (job) => {
-    await processAIReply(job.data);
+    if (job.name === 'evaluateConversationUseCase') {
+      await processEvaluateConversationUseCase(job.data as EvaluateUseCaseJobData);
+      return;
+    }
+    await processAIReply(job.data as AIReplyJobData);
   },
   {
     connection: createWorkerConnection(),
@@ -111,6 +123,10 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
       await processRefreshMetaTokens();
       return;
     }
+    if (job.name === 'monthlyUseCaseSnapshot') {
+      await processMonthlyUseCaseSnapshot();
+      return;
+    }
     await processGenerateProductEmbedding(job.data);
   },
   { connection: createWorkerConnection(), concurrency: DEFAULT_CONCURRENCY, ...redisOptimizedWorkerOptions },
@@ -140,4 +156,8 @@ void initPrepareFinetuningScheduler().catch((err) => {
 
 void initRefreshMetaTokensScheduler().catch((err) => {
   console.error('[jobs] Failed to register Meta token refresh scheduler', err);
+});
+
+void initMonthlyUseCaseSnapshotScheduler().catch((err) => {
+  console.error('[jobs] Failed to register monthly use case snapshot scheduler', err);
 });

@@ -32,6 +32,8 @@ const AdminDashboardPage = lazyWithRetry(() => import('@/pages/admin/AdminDashbo
 const AdminBusinessesPage = lazyWithRetry(() => import('@/pages/admin/AdminBusinessesPage'), 'AdminBusinessesPage');
 const AdminBusinessDetailPage = lazyWithRetry(() => import('@/pages/admin/AdminBusinessDetailPage'), 'AdminBusinessDetailPage');
 const AdminCommissionReportsPage = lazyWithRetry(() => import('@/pages/admin/AdminCommissionReportsPage'), 'AdminCommissionReportsPage');
+const AdminAiCatalogPage = lazyWithRetry(() => import('@/pages/admin/AdminAiCatalogPage'), 'AdminAiCatalogPage');
+const CreditsPage = lazyWithRetry(() => import('@/pages/credits/CreditsPage'), 'CreditsPage');
 
 export default function App() {
   return (
@@ -51,6 +53,7 @@ export default function App() {
             <Route path="businesses" element={<AdminBusinessesPage />} />
             <Route path="businesses/:tenantId" element={<AdminBusinessDetailPage />} />
             <Route path="commission-reports" element={<AdminCommissionReportsPage />} />
+            <Route path="ai-catalog" element={<AdminAiCatalogPage />} />
           </Route>
         </Route>
 
@@ -76,6 +79,7 @@ export default function App() {
               <Route path="/statistics" element={<StatisticsPage />} />
               <Route path="/feedback" element={<FeedbackPage />} />
               <Route path="/ai-alerts" element={<AIAlertsPage />} />
+              <Route path="/credits" element={<CreditsPage />} />
               <Route path="/business" element={<BusinessPage />} />
               <Route path="/profile" element={<ProfilePage />} />
             </Route>

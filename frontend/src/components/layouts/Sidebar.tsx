@@ -15,6 +15,7 @@ import {
   BarChart3,
   MessageSquareHeart,
   ShieldAlert,
+  CreditCard,
   Building2,
   UserCircle,
   X,
@@ -31,6 +32,7 @@ const navItems = [
   { to: '/statistics', label: 'Statistics', icon: BarChart3 },
   { to: '/feedback', label: 'Feedback', icon: MessageSquareHeart },
   { to: '/ai-alerts', label: 'AI Alerts', icon: ShieldAlert },
+  { to: '/credits', label: 'Credits', icon: CreditCard },
   { to: '/business', label: 'My Business', icon: Building2 },
   { to: '/profile', label: 'My Profile', icon: UserCircle },
 ] as const;

@@ -53,6 +53,7 @@ import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
 import { logEvent } from '../services/analyticsService';
+import { aiQueue } from './queues';
 
 export interface AIReplyJobData {
   tenantId: string;
@@ -1647,6 +1648,21 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   socketService.emitNewMessage(tenantId, outboundMessage);
   socketService.emitConversationUpdated(tenantId, conversationId);
+
+  // Enqueue a delayed use case evaluation. The 4-hour delay acts as an inactivity window:
+  // if the customer replies again within 4 hours the job fires and re-evaluates at that point.
+  // jobId deduplication ensures that an explicit conversation-close enqueue (delay=0) with the
+  // same jobId cancels this delayed version, preventing a redundant double-evaluation.
+  void (aiQueue as unknown as { add: (name: string, data: unknown, opts?: unknown) => Promise<unknown> }).add(
+    'evaluateConversationUseCase',
+    { conversationId, tenantId },
+    {
+      delay: 4 * 60 * 60 * 1000,
+      jobId: `eval-usecase-${conversationId}`,
+      removeOnComplete: true,
+      removeOnFail: false,
+    },
+  );
 
   if (!sendResult?.success) {
     const errReason = sendResult?.error ?? 'Contact not found for conversation';

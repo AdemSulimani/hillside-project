@@ -1113,12 +1113,21 @@ function normalizeProductMentionsForReply(
   return normalized.trim();
 }
 
+/**
+ * Strips leading/trailing whitespace and collapses internal newlines to a single space.
+ * Used for single-line fields (business name, tone, niche) to prevent prompt structure
+ * injection via newline characters embedded in tenant-controlled strings.
+ */
+function sanitizeSingleLineField(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
 /** CRM "My Business" niche + description; injected so the model can answer location / about-us style questions. */
 export function formatBusinessProfileForPrompt(
   tenantNiche?: string | null,
   tenantDescription?: string | null,
 ): string | null {
-  const niche = typeof tenantNiche === 'string' ? tenantNiche.trim() : '';
+  const niche = typeof tenantNiche === 'string' ? sanitizeSingleLineField(tenantNiche) : '';
   const desc = typeof tenantDescription === 'string' ? tenantDescription.trim() : '';
   if (!niche && !desc) return null;
   const parts: string[] = ['Business profile (from My Business in the CRM):'];
@@ -1136,9 +1145,12 @@ export function buildRetailAISystemPrompt(
   tenantNiche?: string | null,
   tenantDescription?: string | null,
 ): string {
+  const safeName = sanitizeSingleLineField(businessName);
+  const safeTone = sanitizeSingleLineField(config.tone);
+
   const lines: string[] = [
-    `You are the AI sales assistant for "${businessName}".`,
-    `Your tone should be: ${config.tone}.`,
+    `You are the AI sales assistant for "${safeName}".`,
+    `Your tone should be: ${safeTone}.`,
   ];
 
   if (config.personality_description) {

@@ -21,6 +21,7 @@ import {
 } from '../services/conversationService';
 import { sendSuccess, sendError } from '../utils/response';
 import { logEvent } from '../services/analyticsService';
+import { aiQueue } from '../jobs/queues';
 import { uploadImage } from '../services/cloudinaryService';
 import { uploadFile } from '../services/backblazeService';
 import type {
@@ -211,6 +212,19 @@ export async function close(req: Request, res: Response): Promise<void> {
       sendError(res, 'Conversation not found', 404);
       return;
     }
+
+    // Trigger immediate use case evaluation on explicit close.
+    // Using the same jobId as the delayed version so BullMQ deduplicates them.
+    void (aiQueue as unknown as { add: (name: string, data: unknown, opts?: unknown) => Promise<unknown> }).add(
+      'evaluateConversationUseCase',
+      { conversationId: id, tenantId },
+      {
+        delay: 0,
+        jobId: `eval-usecase-${id}`,
+        removeOnComplete: true,
+        removeOnFail: false,
+      },
+    );
 
     sendSuccess(res, { conversation: updated }, 'Conversation closed successfully');
   } catch (err) {

@@ -468,7 +468,9 @@ export async function resolveOrderActionForTenant(
 }
 
 /**
- * Confirms an order and, when applicable, marks the conversation as fully AI-handled.
+ * Confirms an order and, when applicable:
+ * - marks the conversation as fully AI-handled
+ * - voids any unbilled AI use case for the conversation (order commission takes precedence)
  */
 export async function confirmOrderForTenant(id: string, tenantId: string): Promise<Order | null> {
   const client = await pool.connect();
@@ -492,6 +494,17 @@ export async function confirmOrderForTenant(id: string, tenantId: string): Promi
     if (row.is_commissionable) {
       await setConversationFullyAiHandled(row.conversation_id, tenantId, client);
     }
+
+    // If an AI use case was recorded for this conversation before the order was confirmed,
+    // void it — commission applies instead, never both.
+    await client.query(
+      `UPDATE ai_use_cases
+       SET status = 'voided', updated_at = now()
+       WHERE conversation_id = $1
+         AND status = 'completed'
+         AND billing_status = 'unbilled'`,
+      [row.conversation_id],
+    );
 
     await client.query('COMMIT');
     return rowToOrder(row);

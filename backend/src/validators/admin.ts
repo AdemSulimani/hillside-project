@@ -88,3 +88,23 @@ export const adminReportStatusPatchBodySchema = z.object({
 });
 
 export type AdminReportStatusPatchBody = z.infer<typeof adminReportStatusPatchBodySchema>;
+
+export const adminUseCaseIdParamsSchema = z.object({
+  useCaseId: z.string().uuid('Invalid use case ID'),
+});
+
+export type AdminUseCaseIdParamsBody = z.infer<typeof adminUseCaseIdParamsSchema>;
+
+export const adminUseCaseBillingStatusPatchBodySchema = z.object({
+  billing_status: z.enum(['unbilled', 'billed', 'paid']),
+});
+
+export type AdminUseCaseBillingStatusPatchBody = z.infer<typeof adminUseCaseBillingStatusPatchBodySchema>;
+
+export const adminMarkUseCasePeriodBodySchema = z.object({
+  billing_period: z
+    .string()
+    .regex(/^\d{4}-\d{2}$/, 'billing_period must be YYYY-MM'),
+});
+
+export type AdminMarkUseCasePeriodBody = z.infer<typeof adminMarkUseCasePeriodBodySchema>;

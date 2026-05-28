@@ -316,3 +316,105 @@ export async function postAdminTenantAiTest(
   return data.data!;
 }
 
+// —— Catalog block sync ——
+
+export interface TenantCatalogSyncResult {
+  added_count: number;
+  added_block_keys: string[];
+}
+
+export interface BulkCatalogSyncTenantDetail {
+  tenant_id: string;
+  added_block_keys: string[];
+}
+
+export interface BulkCatalogSyncResult {
+  tenants_updated: number;
+  total_blocks_added: number;
+  details: BulkCatalogSyncTenantDetail[];
+}
+
+/** Syncs missing platform catalog blocks into a single tenant. */
+export async function postAdminSyncTenantCatalogBlocks(tenantId: string) {
+  const { data } = await adminApi.post<ApiResponse<TenantCatalogSyncResult>>(
+    `/admin/businesses/${tenantId}/ai/sync-catalog-blocks`,
+  );
+  return data.data!;
+}
+
+/**
+ * Syncs missing platform catalog blocks across all tenants or a specific subset.
+ * Pass an empty `tenantIds` array (or omit it) to target every business.
+ */
+export async function postAdminSyncAllCatalogBlocks(body?: { tenantIds?: string[] }) {
+  const { data } = await adminApi.post<ApiResponse<BulkCatalogSyncResult>>(
+    '/admin/ai/sync-catalog-blocks',
+    body ?? {},
+  );
+  return data.data!;
+}
+
+// —— Platform catalog block management ——
+
+export interface CatalogPromptBlock {
+  id: string;
+  key: string;
+  title: string;
+  description: string | null;
+  default_content: string;
+  category: 'guidelines' | 'vision';
+  sort_order: number;
+  is_platform_locked: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CatalogBlockSyncSummary {
+  tenants_updated: number;
+  total_blocks_added: number;
+}
+
+export async function fetchAdminCatalogBlocks() {
+  const { data } = await adminApi.get<ApiResponse<{ rows: CatalogPromptBlock[] }>>(
+    '/admin/ai/catalog-blocks',
+  );
+  return data.data!.rows;
+}
+
+export async function postAdminCreateCatalogBlock(body: {
+  key: string;
+  title: string;
+  description?: string | null;
+  default_content: string;
+  category: 'guidelines' | 'vision';
+  sort_order: number;
+  is_platform_locked: boolean;
+  is_active: boolean;
+  sync_to_existing: boolean;
+}) {
+  const { data } = await adminApi.post<
+    ApiResponse<{ block: CatalogPromptBlock; sync: CatalogBlockSyncSummary | null }>
+  >('/admin/ai/catalog-blocks', body);
+  return data.data!;
+}
+
+export async function patchAdminCatalogBlock(
+  blockId: string,
+  body: Partial<{
+    title: string;
+    description: string | null;
+    default_content: string;
+    category: 'guidelines' | 'vision';
+    sort_order: number;
+    is_platform_locked: boolean;
+    is_active: boolean;
+    sync_to_existing: boolean;
+  }>,
+) {
+  const { data } = await adminApi.patch<
+    ApiResponse<{ block: CatalogPromptBlock; sync: CatalogBlockSyncSummary | null }>
+  >(`/admin/ai/catalog-blocks/${blockId}`, body);
+  return data.data!;
+}
+

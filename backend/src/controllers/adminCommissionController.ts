@@ -13,6 +13,15 @@ import {
   markOrdersCommissionBilledInPeriod,
   markOrdersCommissionPaidInPeriod,
 } from '../db/models/order';
+import {
+  listAiUseCasesForAdmin,
+  updateAiUseCaseBillingStatus,
+  adminVoidAiUseCase,
+  markUseCasesBilledInPeriod,
+  markUseCasesPaidInPeriod,
+  countAiUseCasesForTenantInPeriod,
+} from '../db/models/aiUseCase';
+import { calculateProgressiveFee } from '../services/aiUseCaseService';
 import { listChannelSummariesForTenant } from '../db/models/channel';
 import {
   getAdminDashboardSummary,
@@ -33,6 +42,9 @@ import type {
   AdminPeriodQueryRequired,
   AdminMarkCommissionPeriodBody,
   AdminReportStatusPatchBody,
+  AdminUseCaseIdParamsBody,
+  AdminUseCaseBillingStatusPatchBody,
+  AdminMarkUseCasePeriodBody,
 } from '../validators/admin';
 
 function utcMonthBounds(reference: Date): { start: Date; endExclusive: Date } {
@@ -323,5 +335,133 @@ export async function destroyCommissionReport(req: Request, res: Response): Prom
     sendSuccess(res, { deleted: true }, 'Commission report deleted successfully');
   } catch (err) {
     sendError(res, 'Failed to delete commission report', 500, err);
+  }
+}
+
+export async function listBusinessUseCases(req: Request, res: Response): Promise<void> {
+  try {
+    const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
+    const query = (req.validated?.query ?? req.query) as unknown as AdminBusinessListQuery;
+
+    const tenant = await findTenantById(tenantId);
+    if (!tenant) {
+      sendError(res, 'Business not found', 404);
+      return;
+    }
+
+    const { rows, total } = await listAiUseCasesForAdmin(tenantId, query.page, query.limit);
+    sendPaginated(res, rows, query.page, query.limit, total, 'AI use cases retrieved successfully');
+  } catch (err) {
+    sendError(res, 'Failed to list AI use cases', 500, err);
+  }
+}
+
+export async function patchUseCaseBillingStatus(req: Request, res: Response): Promise<void> {
+  try {
+    const { useCaseId } = (req.validated?.params ?? req.params) as AdminUseCaseIdParamsBody;
+    const { billing_status } = req.body as AdminUseCaseBillingStatusPatchBody;
+
+    const updated = await updateAiUseCaseBillingStatus(useCaseId, billing_status);
+    if (!updated) {
+      sendError(res, 'AI use case not found', 404);
+      return;
+    }
+
+    sendSuccess(res, { use_case: updated }, 'Use case billing status updated successfully');
+  } catch (err) {
+    sendError(res, 'Failed to update use case billing status', 500, err);
+  }
+}
+
+export async function voidUseCase(req: Request, res: Response): Promise<void> {
+  try {
+    const { useCaseId } = (req.validated?.params ?? req.params) as AdminUseCaseIdParamsBody;
+
+    const voided = await adminVoidAiUseCase(useCaseId);
+    if (!voided) {
+      sendError(res, 'Use case not found or already billed/voided', 404);
+      return;
+    }
+
+    sendSuccess(res, { use_case: voided }, 'Use case voided successfully');
+  } catch (err) {
+    sendError(res, 'Failed to void use case', 500, err);
+  }
+}
+
+export async function markUseCasesBilledForPeriod(req: Request, res: Response): Promise<void> {
+  try {
+    const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
+    const body = req.body as AdminMarkUseCasePeriodBody;
+
+    const tenant = await findTenantById(tenantId);
+    if (!tenant) {
+      sendError(res, 'Business not found', 404);
+      return;
+    }
+
+    const updatedCount = await markUseCasesBilledInPeriod(tenantId, body.billing_period);
+    sendSuccess(res, { updated_count: updatedCount }, 'Use cases marked as billed');
+  } catch (err) {
+    sendError(res, 'Failed to mark use cases as billed', 500, err);
+  }
+}
+
+export async function markUseCasesPaidForPeriod(req: Request, res: Response): Promise<void> {
+  try {
+    const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
+    const body = req.body as AdminMarkUseCasePeriodBody;
+
+    const tenant = await findTenantById(tenantId);
+    if (!tenant) {
+      sendError(res, 'Business not found', 404);
+      return;
+    }
+
+    const updatedCount = await markUseCasesPaidInPeriod(tenantId, body.billing_period);
+    sendSuccess(res, { updated_count: updatedCount }, 'Use cases marked as paid');
+  } catch (err) {
+    sendError(res, 'Failed to mark use cases as paid', 500, err);
+  }
+}
+
+export async function generateFullReport(req: Request, res: Response): Promise<void> {
+  try {
+    const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
+    const body = req.body as AdminGenerateReportBody;
+
+    const tenant = await findTenantById(tenantId);
+    if (!tenant) {
+      sendError(res, 'Business not found', 404);
+      return;
+    }
+
+    const periodStart = parseDateOnlyUtc(body.period_start);
+    const periodEnd = parseDateOnlyUtc(body.period_end);
+    const { start, endExclusive } = periodToUtcRange(body.period_start, body.period_end);
+
+    const [agg, reportStatus, useCaseCount] = await Promise.all([
+      aggregateReportForTenantInPeriod(tenantId, periodStart, periodEnd),
+      deriveCommissionReportStatusForTenantPeriod(tenantId, periodStart, periodEnd),
+      countAiUseCasesForTenantInPeriod(tenantId, start, endExclusive),
+    ]);
+
+    const useCaseAmount = calculateProgressiveFee(useCaseCount);
+
+    const report = await createCommissionReport({
+      tenant_id: tenantId,
+      period_start: periodStart,
+      period_end: periodEnd,
+      total_orders: agg.total_orders,
+      total_revenue: agg.total_revenue,
+      commission_amount: agg.commission_amount,
+      use_case_count: useCaseCount,
+      use_case_amount: useCaseAmount,
+      status: reportStatus,
+    });
+
+    sendSuccess(res, { report }, 'Full billing report generated successfully', 201);
+  } catch (err) {
+    sendError(res, 'Failed to generate full billing report', 500, err);
   }
 }
