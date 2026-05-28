@@ -326,7 +326,7 @@ export default function CreditsPage() {
     : 0;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex min-w-0 flex-col gap-6">
       <ConversationPreviewSheet
         useCase={selectedUseCase}
         onClose={() => setSelectedUseCase(null)}
@@ -478,7 +478,8 @@ export default function CreditsPage() {
           {monthlyQuery.isLoading ? (
             <Skeleton className="h-56 w-full" />
           ) : (
-            <ResponsiveContainer width="100%" height={224}>
+            <div className="h-56 w-full min-w-0">
+              <ResponsiveContainer width="100%" height={224}>
               <BarChart data={monthly} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
                 <XAxis
@@ -513,7 +514,8 @@ export default function CreditsPage() {
                 <Bar dataKey="commission" stackId="a" fill="hsl(var(--primary))" radius={[0, 0, 2, 2]} />
                 <Bar dataKey="use_case_fees" stackId="a" fill="hsl(142 71% 45%)" radius={[2, 2, 0, 0]} />
               </BarChart>
-            </ResponsiveContainer>
+              </ResponsiveContainer>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -531,7 +533,8 @@ export default function CreditsPage() {
           {dailyQuery.isLoading ? (
             <Skeleton className="h-48 w-full" />
           ) : (
-            <ResponsiveContainer width="100%" height={192}>
+            <div className="h-48 w-full min-w-0">
+              <ResponsiveContainer width="100%" height={192}>
               <LineChart data={daily} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
                 <XAxis
@@ -565,7 +568,8 @@ export default function CreditsPage() {
                   activeDot={{ r: 4 }}
                 />
               </LineChart>
-            </ResponsiveContainer>
+              </ResponsiveContainer>
+            </div>
           )}
         </CardContent>
       </Card>
