@@ -7,6 +7,7 @@ import { sendError, sendSuccess } from '../utils/response';
 
 const INSTAGRAM_OAUTH_BASE = 'https://api.instagram.com/oauth';
 const INSTAGRAM_GRAPH_BASE = 'https://graph.instagram.com/v25.0';
+const INSTAGRAM_GRAPH_TOKEN_BASE = 'https://graph.instagram.com';
 const META_GRAPH_BASE = 'https://graph.facebook.com/v25.0';
 
 interface OAuthStatePayload {
@@ -17,6 +18,12 @@ interface InstagramTokenResponse {
   access_token: string;
   token_type: string;
   expires_in?: number;
+}
+
+interface InstagramLongLivedTokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
 }
 
 interface InstagramIdentityResponse {
@@ -38,12 +45,13 @@ async function attemptSubscribeOnBase(
   baseUrl: string,
   igUserId: string,
   accessToken: string,
+  subscribedFields: string,
 ): Promise<SubscriptionAttemptResult> {
   try {
     await axios.post(`${baseUrl}/${igUserId}/subscribed_apps`, null, {
       params: {
         access_token: accessToken,
-        subscribed_fields: 'messages,message_echoes',
+        subscribed_fields: subscribedFields,
       },
     });
 
@@ -62,6 +70,38 @@ async function attemptSubscribeOnBase(
       ok: false,
       error: axios.isAxiosError(err) ? err.response?.data ?? err.message : err,
     };
+  }
+}
+
+/**
+ * Exchanges a short-lived Instagram Business Login token (valid ~1 hour) for a long-lived token
+ * (valid 60 days). Uses the Instagram Graph API — this is NOT the same as the Facebook
+ * fb_exchange_token flow used for Page tokens.
+ */
+async function exchangeForLongLivedToken(
+  shortLivedToken: string,
+  appId: string,
+  appSecret: string,
+): Promise<{ accessToken: string; expiresIn: number } | null> {
+  try {
+    const resp = await axios.get<InstagramLongLivedTokenResponse>(
+      `${INSTAGRAM_GRAPH_TOKEN_BASE}/access_token`,
+      {
+        params: {
+          grant_type: 'ig_exchange_token',
+          client_id: appId,
+          client_secret: appSecret,
+          access_token: shortLivedToken,
+        },
+      },
+    );
+    if (!resp.data.access_token) return null;
+    return { accessToken: resp.data.access_token, expiresIn: resp.data.expires_in };
+  } catch (err) {
+    console.warn('[instagram] Failed to exchange short-lived token for long-lived token', {
+      error: axios.isAxiosError(err) ? err.response?.data ?? err.message : err,
+    });
+    return null;
   }
 }
 
@@ -143,7 +183,22 @@ export async function callback(req: Request, res: Response): Promise<void> {
       },
     );
 
-    const accessToken = tokenResp.data.access_token;
+    const shortLivedToken = tokenResp.data.access_token;
+
+    // Exchange the short-lived token (~1 hour) for a long-lived token (60 days) immediately.
+    // Instagram Business Login uses a different exchange endpoint than Facebook Page tokens.
+    const longLivedResult = await exchangeForLongLivedToken(shortLivedToken, appId, appSecret);
+    const accessToken = longLivedResult?.accessToken ?? shortLivedToken;
+    const resolvedExpiresIn = longLivedResult?.expiresIn ?? tokenResp.data.expires_in ?? null;
+
+    if (longLivedResult) {
+      console.info('[instagram] exchanged short-lived token for long-lived token', {
+        expiresInDays: Math.round((longLivedResult.expiresIn ?? 0) / 86400),
+      });
+    } else {
+      console.warn('[instagram] could not exchange for long-lived token; storing short-lived token');
+    }
+
     const identityResp = await axios.get<InstagramIdentityResponse>(`${INSTAGRAM_GRAPH_BASE}/me`, {
       params: {
         fields: 'user_id,username,name,account_type,profile_picture_url',
@@ -158,9 +213,12 @@ export async function callback(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    // graph.instagram.com does not have a `message_echoes` field — it's a Messenger/Facebook
+    // concept. Passing it causes the entire subscription request to be rejected by Meta.
+    // For Instagram Business Login, `messages` is the only field needed for inbound DMs.
     const subscriptionAttempts = await Promise.all([
-      attemptSubscribeOnBase(INSTAGRAM_GRAPH_BASE, externalId, accessToken),
-      attemptSubscribeOnBase(META_GRAPH_BASE, externalId, accessToken),
+      attemptSubscribeOnBase(INSTAGRAM_GRAPH_BASE, externalId, accessToken, 'messages'),
+      attemptSubscribeOnBase(META_GRAPH_BASE, externalId, accessToken, 'messages,message_echoes'),
     ]);
     const successfulAttempt = subscriptionAttempts.find((attempt) => attempt.ok);
     if (successfulAttempt) {
@@ -185,7 +243,8 @@ export async function callback(req: Request, res: Response): Promise<void> {
       account_type: identity.account_type ?? null,
       profile_picture_url: identity.profile_picture_url ?? null,
       token_type: tokenResp.data.token_type ?? null,
-      expires_in: tokenResp.data.expires_in ?? null,
+      expires_in: resolvedExpiresIn,
+      long_lived_token: Boolean(longLivedResult),
       subscribed_apps_configured: Boolean(successfulAttempt),
       subscribed_apps_endpoint: successfulAttempt?.endpoint ?? null,
     };
