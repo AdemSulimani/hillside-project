@@ -1317,6 +1317,79 @@ Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | nu
   }
 }
 
+export async function detectWrongProductIntent(
+  inboundMessage: string,
+  conversationHistory: Message[],
+): Promise<{
+  is_wrong_product: boolean;
+  reason: string | null;
+  confidence: number;
+}> {
+  const historySlice = conversationHistory.slice(-8);
+  const historyText = historySlice
+    .map((msg) => {
+      const who = msg.sent_by === 'customer' ? 'Customer' : 'Agent';
+      return `${who}: ${(msg.content ?? '').trim()}`;
+    })
+    .join('\n');
+
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_CHAT_MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: `You are a precise intent classifier. Determine if a customer is reporting that they received the wrong product for an order they already placed.
+
+Only return is_wrong_product: true if:
+- The customer clearly states they received the wrong item, a different product than ordered, or something they did not order.
+- The context confirms this is about a completed purchase/delivery they received, not a future or hypothetical one.
+
+Return is_wrong_product: false for:
+- Questions about what products are available.
+- Pre-purchase questions or general product inquiries.
+- Complaints about product quality, damage, or defects (not wrong item).
+- Delivery delays or non-delivery (package not arrived yet).
+- Vague complaints without clear mention of receiving a wrong item.
+
+Return JSON: { "is_wrong_product": boolean, "reason": string | null, "confidence": number }`,
+      },
+      {
+        role: 'user',
+        content: `Conversation context:\n${historyText || '(none)'}\n\nLatest customer message:\n${inboundMessage}`,
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    max_tokens: 200,
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw?.trim()) {
+    return { is_wrong_product: false, reason: null, confidence: 0 };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      is_wrong_product?: boolean;
+      reason?: string | null;
+      confidence?: number;
+    };
+    const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
+    const is_wrong_product = parsed.is_wrong_product === true;
+    let confidence = parseModelClassifierConfidence(parsed.confidence);
+    if (is_wrong_product && confidence === 0) {
+      confidence = 0.9;
+    }
+    return {
+      is_wrong_product,
+      reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
+      confidence,
+    };
+  } catch {
+    return { is_wrong_product: false, reason: null, confidence: 0 };
+  }
+}
+
 export async function detectPostPurchaseSupportIntent(
   inboundMessage: string,
   conversationHistory: Message[],

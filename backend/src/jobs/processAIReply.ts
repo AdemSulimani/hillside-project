@@ -36,6 +36,7 @@ import {
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
   detectPostPurchaseSupportIntent,
+  detectWrongProductIntent,
   detectReplyLanguage,
   findProductsForInboundMessage,
   generateReply,
@@ -689,7 +690,8 @@ function hasPostPurchaseIssueCue(text: string): boolean {
   return (
     /(kur|when).*(vjen|arrive|arrival|deliver|delivery|shipping)/.test(normalized) ||
     /(nuk me ka ardh|nuk ka ardh|nuk ka mberrit|still havent received|still haven't received|not delivered)/.test(normalized) ||
-    /(produkt.*gabuar|wrong item|wrong product|received.*wrong)/.test(normalized) ||
+    /(produkt.*gabuar|artikull.*gabuar|gabuar.*produkt|gabuar.*artikull|wrong item|wrong product|wrong order|received.*wrong|got.*wrong|sent.*wrong|shipped.*wrong|wrong.*one|different.*product|different.*item|not what i ordered)/.test(normalized) ||
+    /(tjeter.*produkt|produkt.*tjeter|tjeter.*artikull|artikull.*tjeter|derguat.*tjeter|derguan.*tjeter|erdhi.*tjeter|ka ardh.*tjeter|nuk eshte.*produkt|nuk eshte.*artikull)/.test(normalized) ||
     /(defekt|prish|problem me produkt|damaged|broken|faulty|defective)/.test(normalized)
   );
 }
@@ -989,6 +991,96 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           socketService.emitOrderActionRequired(tenantId, {
             order: escalatedOrder,
             reason: cancellationRefundIntent.reason,
+          });
+        }
+        socketService.emitNewMessage(tenantId, outboundAck);
+        socketService.emitConversationUpdated(tenantId, conversationId);
+
+        if (!sendResult?.success && sendResult) {
+          const errReason = sendResult.error ?? 'Failed to send acknowledgment';
+          await updateMessageSendFailure(outboundAck.id, tenantId, 'failed', errReason);
+          socketService.emitMessageSendFailed(tenantId, {
+            messageId: outboundAck.id,
+            conversationId,
+            error: errReason,
+          });
+        }
+        return;
+      }
+
+      const wrongProductIntent = await detectWrongProductIntent(inboundText, recentMessages);
+      console.info(
+        `[WRONG_PRODUCT] tenantId: ${tenantId} conversationId: ${conversationId} is_wrong_product: ${wrongProductIntent.is_wrong_product} confidence: ${wrongProductIntent.confidence} reasoning: ${logJsonStringOrNull(wrongProductIntent.reason)}`,
+      );
+      if (wrongProductIntent.is_wrong_product && wrongProductIntent.confidence > 0.8) {
+        const wrongProductPrecheck = await shouldStillSendAutomatedReply({
+          tenantId,
+          channelId,
+          conversationId,
+          scheduledInboundExternalId: data.messageExternalId,
+        });
+        if (!wrongProductPrecheck.ok) {
+          console.info('[ai.reply] Skipping wrong product holding message send', {
+            conversationId,
+            scheduledFor: data.messageExternalId,
+            reason: wrongProductPrecheck.reason,
+            ...wrongProductPrecheck.logPayload,
+          });
+          return;
+        }
+
+        const locale = inferHoldingMessageLocale(inboundText, replyLanguage);
+        const wrongProductHoldingMessage = HOLDING_MESSAGES[locale].postPurchaseSupport;
+        const client = await pool.connect();
+        let alert: AIAlert | undefined;
+        try {
+          await client.query('BEGIN');
+          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+          alert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'post_purchase_support_request',
+            },
+            client,
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('[ai.reply] Wrong product escalation transaction failed', {
+            conversationId,
+            tenantId,
+            err,
+          });
+        } finally {
+          client.release();
+        }
+
+        const contactForSend = await findContactById(conversation.contact_id);
+        let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
+        if (contactForSend) {
+          sendResult = await sendMessage(channel, contactForSend.external_id, wrongProductHoldingMessage);
+        }
+
+        const outboundAck = await createMessage({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+          direction: 'outbound',
+          type: 'text',
+          content: wrongProductHoldingMessage,
+          sent_by: 'ai',
+        });
+
+        if (alert) {
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForSend?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
           });
         }
         socketService.emitNewMessage(tenantId, outboundAck);
