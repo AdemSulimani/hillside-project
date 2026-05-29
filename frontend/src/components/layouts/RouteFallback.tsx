@@ -12,7 +12,7 @@ export function FullPageRouteFallback() {
 /** Shown inside CRM layout while a lazy child route loads (sidebar + header stay visible). */
 export function CRMRouteFallback() {
   return (
-    <div className="flex min-h-[40vh] items-center justify-center py-12">
+    <div className="flex min-h-[40vh] flex-1 items-center justify-center">
       <Spinner className="size-8 text-muted-foreground" />
     </div>
   );
