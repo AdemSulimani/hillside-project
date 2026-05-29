@@ -282,6 +282,32 @@ export default function InboxPage() {
   const resolveQualityAlertMutation = useMutation({
     mutationFn: ({ alertId, resume_ai }: { alertId: string; resume_ai: boolean }) =>
       resolveAIAlert(alertId, { resume_ai }),
+    onMutate: async ({ resume_ai }) => {
+      if (!resume_ai || !selectedId) return;
+      await queryClient.cancelQueries({ queryKey: ['conversations', selectedId, 'detail'] });
+      const prev = queryClient.getQueryData<ConversationThread>([
+        'conversations',
+        selectedId,
+        'detail',
+      ]);
+      if (prev) {
+        queryClient.setQueryData<ConversationThread>(['conversations', selectedId, 'detail'], {
+          ...prev,
+          conversation: {
+            ...prev.conversation,
+            ai_paused: false,
+            human_override_until: null,
+          },
+        });
+      }
+      return { prev };
+    },
+    onError: (err, _, ctx) => {
+      if (ctx?.prev && selectedId) {
+        queryClient.setQueryData(['conversations', selectedId, 'detail'], ctx.prev);
+      }
+      toast.error(extractMessage(err, 'Failed to update alert or AI pause state'));
+    },
     onSuccess: (_, { resume_ai }) => {
       if (selectedId) {
         void queryClient.invalidateQueries({ queryKey: ['conversations', selectedId, 'detail'] });
@@ -292,8 +318,6 @@ export default function InboxPage() {
         resume_ai ? 'AI resumed for this conversation' : 'Alert cleared — AI stays paused',
       );
     },
-    onError: (err) =>
-      toast.error(extractMessage(err, 'Failed to update alert or AI pause state')),
   });
 
   const toggleConversationAiMutation = useMutation({
@@ -333,7 +357,23 @@ export default function InboxPage() {
       }
       toast.error(extractMessage(err, 'Failed to update AI pause state for this conversation'));
     },
-    onSuccess: (result) => {
+    onSuccess: (result, conversationId) => {
+      // Write the server-confirmed state directly before invalidating so any concurrent
+      // socket-triggered refetch cannot briefly restore a stale human_override_until value.
+      queryClient.setQueryData<ConversationThread>(
+        ['conversations', conversationId, 'detail'],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            conversation: {
+              ...old.conversation,
+              ai_paused: result.ai_paused,
+              human_override_until: result.ai_paused ? old.conversation.human_override_until : null,
+            },
+          };
+        },
+      );
       void queryClient.invalidateQueries({ queryKey: ['chatbot', 'paused-conversations'] });
       void queryClient.invalidateQueries({ queryKey: ['conversations', 'list'] });
       void queryClient.invalidateQueries({

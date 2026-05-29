@@ -98,7 +98,10 @@ export async function setConversationAiPaused(
 ): Promise<Conversation | null> {
   const { rows } = await client.query<Conversation>(
     `UPDATE conversations
-     SET ai_paused = $3, updated_at = now()
+     SET
+       ai_paused = $3,
+       human_override_until = CASE WHEN $3 = FALSE THEN NULL ELSE human_override_until END,
+       updated_at = now()
      WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
     [id, tenantId, aiPaused],

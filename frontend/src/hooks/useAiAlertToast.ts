@@ -102,7 +102,6 @@ export function useAiAlertToast(): void {
 
       const tid = toast.warning(title, {
         duration: Infinity,
-        dismissible: false,
         closeButton: true,
         icon: warningIcon,
         description: getAlertToastDescription(payload.reason),
