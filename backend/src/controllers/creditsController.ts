@@ -8,6 +8,7 @@ import {
 } from '../services/creditsService';
 import { getTierStatusForTenant } from '../services/aiUseCaseService';
 import { listAiUseCasesForTenant } from '../db/models/aiUseCase';
+import { listAiOrdersForTenant } from '../db/models/order';
 
 function parsePaginationQuery(query: Record<string, unknown>) {
   const page = Math.max(1, parseInt(String(query.page ?? '1'), 10) || 1);
@@ -56,6 +57,17 @@ export async function billingHistory(req: Request, res: Response): Promise<void>
     sendPaginated(res, rows, page, limit, total, 'Billing history retrieved successfully');
   } catch (err) {
     sendError(res, 'Failed to load billing history', 500, err);
+  }
+}
+
+export async function aiOrders(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId!;
+    const { page, limit } = parsePaginationQuery(req.query as Record<string, unknown>);
+    const { rows, total } = await listAiOrdersForTenant(tenantId, page, limit);
+    sendPaginated(res, rows, page, limit, total, 'AI orders retrieved successfully');
+  } catch (err) {
+    sendError(res, 'Failed to list AI orders', 500, err);
   }
 }
 

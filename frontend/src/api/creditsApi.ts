@@ -36,6 +36,19 @@ export interface AiUseCaseRow {
   created_at: string;
 }
 
+export interface AiOrderRow {
+  id: string;
+  conversation_id: string;
+  contact_id: string;
+  contact_name: string;
+  product_name: string;
+  total_price: number;
+  commission_amount: number;
+  commission_status: 'unpaid' | 'billed' | 'paid';
+  status: string;
+  created_at: string;
+}
+
 export interface BillingHistoryRow {
   id: string;
   period_start: string;
@@ -111,6 +124,16 @@ export async function fetchAiUseCases(
 ): Promise<{ rows: AiUseCaseRow[]; pagination: Pagination }> {
   const { data } = await api.get<PaginatedResponse<AiUseCaseRow>>('/credits/use-cases', {
     params: { page, limit, ...(period ? { period } : {}) },
+  });
+  return { rows: data.data, pagination: data.pagination };
+}
+
+export async function fetchAiOrders(
+  page = 1,
+  limit = 15,
+): Promise<{ rows: AiOrderRow[]; pagination: Pagination }> {
+  const { data } = await api.get<PaginatedResponse<AiOrderRow>>('/credits/ai-orders', {
+    params: { page, limit },
   });
   return { rows: data.data, pagination: data.pagination };
 }

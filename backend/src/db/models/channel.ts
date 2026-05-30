@@ -169,10 +169,65 @@ export async function updateChannel(
   return rows[0] ?? null;
 }
 
+/**
+ * Deletes a channel while preserving all commission data (orders, AI use cases,
+ * commission reports) that were generated through conversations on that channel.
+ *
+ * Strategy: inside a single transaction, attempt to set channel_id = NULL on
+ * every linked conversation before deleting the channel row.  This decouples the
+ * rows so the database DELETE cannot cascade to orders / ai_use_cases.
+ *
+ * A SAVEPOINT is used around the UPDATE so that if migration 039 has not yet been
+ * applied (channel_id still NOT NULL in the DB) the outer transaction can recover
+ * gracefully and fall back to the original hard-delete behaviour.  Once the
+ * migration is applied the UPDATE will always succeed and commission data is safe.
+ */
 export async function deleteChannel(id: string, tenantId: string): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    'DELETE FROM channels WHERE id = $1 AND tenant_id = $2',
-    [id, tenantId],
-  );
-  return (rowCount ?? 0) > 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Decouple contacts and conversations from the channel before deletion so the
+    // database ON DELETE CASCADE on older columns cannot reach orders / ai_use_cases /
+    // commission data.  Uses SAVEPOINTs so that if either migration (039 or 040) has
+    // not yet been applied the outer transaction recovers gracefully and falls back to
+    // the original hard-delete behaviour.
+
+    await client.query('SAVEPOINT sp_decouple_contacts');
+    try {
+      await client.query(
+        'UPDATE contacts SET channel_id = NULL WHERE channel_id = $1',
+        [id],
+      );
+      await client.query('RELEASE SAVEPOINT sp_decouple_contacts');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT sp_decouple_contacts');
+      await client.query('RELEASE SAVEPOINT sp_decouple_contacts');
+    }
+
+    await client.query('SAVEPOINT sp_decouple_conversations');
+    try {
+      await client.query(
+        'UPDATE conversations SET channel_id = NULL WHERE channel_id = $1',
+        [id],
+      );
+      await client.query('RELEASE SAVEPOINT sp_decouple_conversations');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT sp_decouple_conversations');
+      await client.query('RELEASE SAVEPOINT sp_decouple_conversations');
+    }
+
+    const { rowCount } = await client.query(
+      'DELETE FROM channels WHERE id = $1 AND tenant_id = $2',
+      [id, tenantId],
+    );
+
+    await client.query('COMMIT');
+    return (rowCount ?? 0) > 0;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }

@@ -6,7 +6,7 @@ export interface Conversation {
   id: string;
   tenant_id: string;
   contact_id: string;
-  channel_id: string;
+  channel_id: string | null;
   status: string;
   last_message_at: Date;
   human_override_until: Date | null;
@@ -240,10 +240,10 @@ export async function listConversationsForContactForTenant(
        c.human_replied,
        c.created_at,
        c.updated_at,
-       ch.type AS channel_type,
-       ch.name AS channel_name
+       COALESCE(ch.type, 'facebook') AS channel_type,
+       COALESCE(ch.name, 'Disconnected channel') AS channel_name
      FROM conversations c
-     INNER JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = c.tenant_id
+     LEFT JOIN channels ch ON ch.id = c.channel_id AND ch.tenant_id = c.tenant_id
      WHERE c.contact_id = $1 AND c.tenant_id = $2
      ORDER BY c.last_message_at DESC
      LIMIT $3 OFFSET $4`,

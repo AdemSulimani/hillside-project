@@ -3,7 +3,7 @@ import pool from '../pool';
 export interface Contact {
   id: string;
   tenant_id: string;
-  channel_id: string;
+  channel_id: string | null;
   external_id: string;
   name: string;
   avatar_url: string | null;

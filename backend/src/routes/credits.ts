@@ -9,6 +9,7 @@ router.use(authenticate, ensureOnboarded);
 
 router.get('/summary', creditsController.summary);
 router.get('/use-cases', creditsController.useCases);
+router.get('/ai-orders', creditsController.aiOrders);
 router.get('/monthly-breakdown', creditsController.monthlyBreakdown);
 router.get('/billing-history', creditsController.billingHistory);
 router.get('/tier-status', creditsController.tierStatus);
