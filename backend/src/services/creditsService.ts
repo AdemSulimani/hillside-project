@@ -1,9 +1,6 @@
 import pool from '../db/pool';
 import { calculateProgressiveFee } from './aiUseCaseService';
 
-/** Confirmed-or-beyond lifecycle orders count toward commission. */
-const CONFIRMED_ORDER_STATUSES = "('confirmed', 'processing', 'shipped', 'delivered')";
-
 export interface CreditsSummary {
   commission_this_month: number;
   use_case_fees_this_month: number;
@@ -30,10 +27,7 @@ export async function getCreditsSummaryForTenant(tenantId: string): Promise<Cred
     }>(
       `SELECT
          COALESCE(SUM(commission_amount), 0)::text AS commission_this_month,
-         COUNT(*) FILTER (
-           WHERE is_commissionable = true
-             AND status IN ${CONFIRMED_ORDER_STATUSES}
-         )::text AS ai_orders_this_month
+         COUNT(*)::text AS ai_orders_this_month
        FROM orders
        WHERE tenant_id = $1
          AND is_commissionable = true
@@ -117,7 +111,6 @@ export async function getMonthlyBreakdownForTenant(
        FROM orders
        WHERE tenant_id = $1
          AND is_commissionable = true
-         AND status IN ${CONFIRMED_ORDER_STATUSES}
          AND created_at >= $2
        GROUP BY 1`,
       [tenantId, rangeStart],

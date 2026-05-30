@@ -254,19 +254,19 @@ export async function listOrdersForTenant(filters: OrderListFilters): Promise<{
     `SELECT COUNT(*)::text AS count
      FROM orders o
      INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
-     INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
+     LEFT JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
      WHERE ${where}`,
     values,
   );
   const total = parseInt(countResult.rows[0].count, 10);
 
-  type Row = OrderRow & { channel_type: ChannelType };
+  type Row = OrderRow & { channel_type: ChannelType | null };
 
   const { rows } = await pool.query<Row>(
     `SELECT o.*, ch.type AS channel_type
      FROM orders o
      INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
-     INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
+     LEFT JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
      WHERE ${where}
      ORDER BY ${sortCol} ${sortDir}
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
@@ -309,16 +309,18 @@ export async function findOrderWithRelationsForTenant(
     return null;
   }
 
-  const channel = await findChannelById(conversation.channel_id, tenantId);
-  if (!channel) {
-    return null;
-  }
+  // channel_id may be null when the social account was disconnected after the order was created
+  const channel = conversation.channel_id
+    ? await findChannelById(conversation.channel_id, tenantId)
+    : null;
 
   return {
     ...order,
     conversation,
     contact,
-    channel: { id: channel.id, type: channel.type, name: channel.name },
+    channel: channel
+      ? { id: channel.id, type: channel.type, name: channel.name }
+      : { id: '', type: 'facebook' as const, name: 'Disconnected channel' },
   };
 }
 
@@ -412,7 +414,7 @@ export async function listActionRequiredOrdersForTenant(
      FROM orders o
      INNER JOIN contacts ct ON ct.id = o.contact_id AND ct.tenant_id = o.tenant_id
      INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
-     INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
+     LEFT JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
      WHERE o.tenant_id = $1
        AND (o.cancellation_requested_at IS NOT NULL OR o.refund_requested_at IS NOT NULL)
        AND (o.resolution_status IS NULL OR o.resolution_status = 'pending')
@@ -514,6 +516,90 @@ export async function confirmOrderForTenant(id: string, tenantId: string): Promi
   } finally {
     client.release();
   }
+}
+
+export interface AiOrderListRow {
+  id: string;
+  conversation_id: string;
+  contact_id: string;
+  contact_name: string;
+  product_name: string;
+  total_price: number;
+  commission_amount: number;
+  commission_status: CommissionStatus;
+  status: OrderStatus;
+  created_at: Date;
+}
+
+/**
+ * Returns a paginated list of commissionable (AI-created) orders for a tenant, newest first.
+ * Used by the tenant Credits page to show AI orders commission history.
+ */
+export async function listAiOrdersForTenant(
+  tenantId: string,
+  page: number,
+  limit: number,
+): Promise<{ rows: AiOrderListRow[]; total: number }> {
+  const offset = (page - 1) * limit;
+
+  const countResult = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM orders
+     WHERE tenant_id = $1
+       AND is_commissionable = true`,
+    [tenantId],
+  );
+  const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
+
+  type Row = {
+    id: string;
+    conversation_id: string;
+    contact_id: string;
+    contact_name: string;
+    product_name: string;
+    total_price: string | number;
+    commission_amount: string | number;
+    commission_status: CommissionStatus;
+    status: OrderStatus;
+    created_at: Date;
+  };
+
+  const { rows } = await pool.query<Row>(
+    `SELECT
+       o.id,
+       o.conversation_id,
+       o.contact_id,
+       COALESCE(ct.name, 'Unknown') AS contact_name,
+       o.product_name,
+       o.total_price,
+       o.commission_amount,
+       o.commission_status,
+       o.status,
+       o.created_at
+     FROM orders o
+     LEFT JOIN contacts ct ON ct.id = o.contact_id
+     WHERE o.tenant_id = $1
+       AND o.is_commissionable = true
+     ORDER BY o.created_at DESC
+     LIMIT $2 OFFSET $3`,
+    [tenantId, limit, offset],
+  );
+
+  return {
+    rows: rows.map((r) => ({
+      id: r.id,
+      conversation_id: r.conversation_id,
+      contact_id: r.contact_id,
+      contact_name: r.contact_name,
+      product_name: r.product_name,
+      total_price: Number(r.total_price),
+      commission_amount: Number(r.commission_amount),
+      commission_status: r.commission_status,
+      status: r.status,
+      created_at: r.created_at,
+    })),
+    total,
+  };
 }
 
 export async function findOrderById(id: string): Promise<Order | null> {
@@ -645,12 +731,12 @@ export async function listOrdersForContactForTenant(
   );
   const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
 
-  type Row = OrderRow & { channel_type: ChannelType };
+  type Row = OrderRow & { channel_type: ChannelType | null };
   const { rows } = await pool.query<Row>(
     `SELECT o.*, ch.type AS channel_type
      FROM orders o
      INNER JOIN conversations conv ON conv.id = o.conversation_id AND conv.tenant_id = o.tenant_id
-     INNER JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
+     LEFT JOIN channels ch ON ch.id = conv.channel_id AND ch.tenant_id = o.tenant_id
      WHERE o.contact_id = $1 AND o.tenant_id = $2
      ORDER BY o.created_at DESC
      LIMIT $3 OFFSET $4`,

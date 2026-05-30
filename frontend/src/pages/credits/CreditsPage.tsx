@@ -45,6 +45,7 @@ import {
   fetchBillingHistory,
   fetchTierStatus,
   fetchAiUseCases,
+  fetchAiOrders,
 } from '@/api/creditsApi';
 
 function formatEur(value: number): string {
@@ -145,6 +146,18 @@ interface SelectedUseCase {
   billing_period: string | null;
   fee_amount: number | null;
   billing_status: string;
+}
+
+interface SelectedAiOrder {
+  id: string;
+  conversation_id: string;
+  contact_name: string;
+  product_name: string;
+  total_price: number;
+  commission_amount: number;
+  commission_status: string;
+  order_status: string;
+  created_at: string;
 }
 
 function ConversationPreviewSheet({
@@ -272,10 +285,152 @@ function ConversationPreviewSheet({
   );
 }
 
+function CommissionStatusBadge({ status }: { status: string }) {
+  if (status === 'paid') {
+    return <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-transparent">Paid</Badge>;
+  }
+  if (status === 'billed') {
+    return <Badge variant="secondary">Billed</Badge>;
+  }
+  return <Badge variant="outline" className="text-amber-600 border-amber-400/40">Unpaid</Badge>;
+}
+
+function AiOrderPreviewSheet({
+  order,
+  onClose,
+}: {
+  order: SelectedAiOrder | null;
+  onClose: () => void;
+}) {
+  const threadQuery = useQuery({
+    queryKey: ['conversation-thread', order?.conversation_id],
+    queryFn: () => fetchConversationThread(order!.conversation_id, { limit: 50 }),
+    enabled: Boolean(order?.conversation_id),
+    staleTime: 60_000,
+  });
+
+  if (!order) return null;
+
+  const messages = threadQuery.data?.messages ?? [];
+  const aiMessages = messages.filter((m) => m.sent_by === 'ai');
+  const lastAiMessage = aiMessages[aiMessages.length - 1];
+
+  return (
+    <Sheet open={Boolean(order)} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent side="right" className="flex w-full flex-col sm:max-w-lg p-0">
+        <SheetHeader className="border-b border-border px-5 py-4">
+          <SheetTitle className="flex items-center gap-2">
+            <ShoppingCart className="size-4 text-muted-foreground" />
+            AI Order — {order.contact_name}
+          </SheetTitle>
+          <SheetDescription>
+            {order.product_name} · {formatEur(order.total_price)} ·{' '}
+            Commission: {formatEur(order.commission_amount)}
+            {' · '}
+            <CommissionStatusBadge status={order.commission_status} />
+          </SheetDescription>
+        </SheetHeader>
+
+        {/* Verification notice */}
+        <div className="border-b border-border bg-primary/5 px-5 py-3">
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Bot className="size-3.5 shrink-0 text-primary" />
+            This order was fully created by AI without human involvement in the conversation.
+            Review the thread below to verify.
+          </p>
+        </div>
+
+        {/* Message transcript */}
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          {threadQuery.isLoading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className={`flex ${i % 2 === 0 ? 'justify-start' : 'justify-end'}`}>
+                  <Skeleton className="h-12 w-2/3 rounded-xl" />
+                </div>
+              ))}
+            </div>
+          ) : threadQuery.isError ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Could not load conversation.
+            </p>
+          ) : messages.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No messages in this conversation.
+            </p>
+          ) : (
+            messages.map((msg) => {
+              const isAi = msg.sent_by === 'ai';
+              const isCustomer = msg.sent_by === 'customer';
+              return (
+                <div
+                  key={msg.id}
+                  className={`flex gap-2 ${isCustomer ? 'justify-start' : 'justify-end'}`}
+                >
+                  <div
+                    className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
+                      isCustomer
+                        ? 'bg-muted text-foreground rounded-tl-sm'
+                        : isAi
+                        ? 'bg-emerald-500/15 text-emerald-900 dark:text-emerald-100 rounded-tr-sm'
+                        : 'bg-primary/10 text-foreground rounded-tr-sm'
+                    }`}
+                  >
+                    {isAi && (
+                      <p className="mb-1 flex items-center gap-1 text-[0.65rem] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                        <Bot className="size-3" />
+                        AI
+                      </p>
+                    )}
+                    {msg.content ? (
+                      <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+                    ) : msg.attachment_urls.length > 0 ? (
+                      <p className="italic text-muted-foreground">Attachment</p>
+                    ) : null}
+                    <p className="mt-1 text-[0.65rem] text-muted-foreground/70 text-right">
+                      {new Date(msg.created_at).toLocaleTimeString('en-GB', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </p>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {lastAiMessage?.content && !threadQuery.isLoading && (
+          <div className="border-t border-border bg-muted/40 px-4 py-3">
+            <p className="mb-0.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <MessageSquare className="size-3" />
+              Last AI message
+            </p>
+            <p className="line-clamp-2 text-sm text-foreground">{lastAiMessage.content}</p>
+          </div>
+        )}
+
+        <SheetFooter className="border-t border-border px-4 py-3">
+          <Link
+            to={`/inbox?c=${order.conversation_id}`}
+            onClick={onClose}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            <ExternalLink className="size-4" />
+            Open in Inbox
+          </Link>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 export default function CreditsPage() {
   const [billingHistoryPage, setBillingHistoryPage] = useState(1);
   const [useCasesPage, setUseCasesPage] = useState(1);
+  const [aiOrdersPage, setAiOrdersPage] = useState(1);
   const [selectedUseCase, setSelectedUseCase] = useState<SelectedUseCase | null>(null);
+  const [selectedAiOrder, setSelectedAiOrder] = useState<SelectedAiOrder | null>(null);
 
   const summaryQuery = useQuery({
     queryKey: ['credits', 'summary'],
@@ -310,6 +465,11 @@ export default function CreditsPage() {
     queryFn: () => fetchAiUseCases(useCasesPage, 15),
   });
 
+  const aiOrdersQuery = useQuery({
+    queryKey: ['credits', 'ai-orders', aiOrdersPage],
+    queryFn: () => fetchAiOrders(aiOrdersPage, 15),
+  });
+
   const summary = summaryQuery.data;
   const tier = tierQuery.data;
   const monthly = monthlyQuery.data ?? [];
@@ -330,6 +490,10 @@ export default function CreditsPage() {
       <ConversationPreviewSheet
         useCase={selectedUseCase}
         onClose={() => setSelectedUseCase(null)}
+      />
+      <AiOrderPreviewSheet
+        order={selectedAiOrder}
+        onClose={() => setSelectedAiOrder(null)}
       />
 
       {/* Page heading */}
@@ -687,6 +851,131 @@ export default function CreditsPage() {
                       className="rounded p-1 hover:bg-muted disabled:opacity-40"
                       disabled={useCasesPage >= (useCasesQuery.data?.pagination?.totalPages ?? 1)}
                       onClick={() => setUseCasesPage((p) => p + 1)}
+                      aria-label="Next page"
+                    >
+                      <ChevronRight className="size-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* AI Orders commission history table */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ShoppingCart className="size-4 text-muted-foreground" />
+            AI Orders
+          </CardTitle>
+          <CardDescription>
+            Orders fully created by AI — a 5% commission is charged per order at creation.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {aiOrdersQuery.isLoading ? (
+            <div className="space-y-2 p-4">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                      <th className="px-4 py-3 font-medium">Customer</th>
+                      <th className="px-4 py-3 font-medium">Product</th>
+                      <th className="px-4 py-3 font-medium">Order Value</th>
+                      <th className="px-4 py-3 font-medium">Commission (5%)</th>
+                      <th className="px-4 py-3 font-medium">Created</th>
+                      <th className="px-4 py-3 font-medium">Status</th>
+                      <th className="px-4 py-3 font-medium sr-only">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(aiOrdersQuery.data?.rows ?? []).length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          className="px-4 py-8 text-center text-sm text-muted-foreground"
+                        >
+                          No AI orders recorded yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      (aiOrdersQuery.data?.rows ?? []).map((row) => (
+                        <tr
+                          key={row.id}
+                          className="group border-b border-border/60 last:border-0 hover:bg-muted/30 transition-colors cursor-pointer"
+                          onClick={() =>
+                            setSelectedAiOrder({
+                              id: row.id,
+                              conversation_id: row.conversation_id,
+                              contact_name: row.contact_name,
+                              product_name: row.product_name,
+                              total_price: row.total_price,
+                              commission_amount: row.commission_amount,
+                              commission_status: row.commission_status,
+                              order_status: row.status,
+                              created_at: row.created_at,
+                            })
+                          }
+                        >
+                          <td className="px-4 py-3 font-medium">{row.contact_name}</td>
+                          <td className="px-4 py-3 text-muted-foreground">{row.product_name}</td>
+                          <td className="px-4 py-3">{formatEur(row.total_price)}</td>
+                          <td className="px-4 py-3 font-medium">{formatEur(row.commission_amount)}</td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            {new Date(row.created_at).toLocaleDateString('en-GB', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                            })}
+                          </td>
+                          <td className="px-4 py-3">
+                            <CommissionStatusBadge status={row.commission_status} />
+                          </td>
+                          <td className="px-4 py-3">
+                            <Link
+                              to={`/inbox?c=${row.conversation_id}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+                              title="Open in Inbox"
+                            >
+                              <ExternalLink className="size-3.5" />
+                              Inbox
+                            </Link>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {(aiOrdersQuery.data?.pagination?.totalPages ?? 0) > 1 ? (
+                <div className="flex items-center justify-between border-t border-border px-4 py-3 text-xs text-muted-foreground">
+                  <span>
+                    Page {aiOrdersPage} of {aiOrdersQuery.data?.pagination?.totalPages}
+                  </span>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      className="rounded p-1 hover:bg-muted disabled:opacity-40"
+                      disabled={aiOrdersPage <= 1}
+                      onClick={() => setAiOrdersPage((p) => p - 1)}
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeft className="size-4" />
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded p-1 hover:bg-muted disabled:opacity-40"
+                      disabled={aiOrdersPage >= (aiOrdersQuery.data?.pagination?.totalPages ?? 1)}
+                      onClick={() => setAiOrdersPage((p) => p + 1)}
                       aria-label="Next page"
                     >
                       <ChevronRight className="size-4" />

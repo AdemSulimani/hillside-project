@@ -281,7 +281,6 @@ export async function getCommissionEarnedByMonthUtc(
        COALESCE(SUM(o.commission_amount), 0)::text AS commission
      FROM orders o
      WHERE o.is_commissionable = true
-       AND o.status IN ${AI_ORDER_STATUSES_SQL}
        AND o.created_at >= $1::timestamptz
      GROUP BY 1
      ORDER BY 1 ASC`,
@@ -370,7 +369,6 @@ export async function aggregateReportForTenantInPeriod(
      FROM orders
      WHERE tenant_id = $1
        AND is_commissionable = true
-       AND status IN ${AI_ORDER_STATUSES_SQL}
        AND created_at::date >= $2::date
        AND created_at::date <= $3::date`,
     [tenantId, periodStart, periodEnd],
