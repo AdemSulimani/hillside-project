@@ -895,8 +895,23 @@ export async function findProductsForInboundMessage(
 ): Promise<Product[]> {
   const searchText = inboundMessage.trim();
   if (!searchText) return [];
+
+  // 1. Semantic vector search — same strategy as generateReply so that nicknames,
+  //    abbreviations, and informal spellings that the AI matched are also found here.
+  try {
+    const queryEmbedding = await generateEmbedding(searchText);
+    const similar = await searchProductsBySimilarity(tenantId, queryEmbedding, limit);
+    const semanticMatches = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
+    if (semanticMatches.length > 0) return semanticMatches;
+  } catch {
+    // Embeddings unavailable — fall through to keyword search.
+  }
+
+  // 2. Full-text keyword search.
   const direct = await searchProducts(tenantId, searchText, limit);
   if (direct.length > 0) return direct;
+
+  // 3. Disjunctive keyword search on extracted terms.
   const keywords = extractKeywords(searchText);
   if (keywords.length === 0) return [];
   return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
@@ -1208,8 +1223,19 @@ export async function isUsageQuestionUnanswered(
     messages: [
       {
         role: 'system',
-        content:
-          'You are a strict classifier. Determine whether the customer usage question is unanswered by the provided product usage description. Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}. Mark true only when the usage description does not provide the requested usage information.',
+        content: `You are a semantic classifier. Determine whether the product usage description contains enough information to answer the customer's usage question.
+
+The text may be in Albanian (Shqip) or English, and may include informal spellings, missing diacritics, or minor typos — treat semantically equivalent text as matching.
+
+Return {"is_unanswered": false} when the usage description contains information that is directly relevant to or answers the customer's question — even if the wording differs, diacritics are missing, or only part of the description addresses it.
+Return {"is_unanswered": true} ONLY when the usage description contains NO information that relates to what the customer is asking about.
+
+Examples:
+- Customer: "sa here ne dite" / Description includes "Perdoret 1 here ne dite" → {"is_unanswered": false}
+- Customer: "how many times per day" / Description includes "Use once per day" → {"is_unanswered": false}
+- Customer: "can pregnant women use it" / Description only mentions frequency and age limit → {"is_unanswered": true}
+
+Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
       },
       {
         role: 'user',
@@ -2088,7 +2114,7 @@ export async function generateReply(
   attachmentUrlsRaw: unknown = [],
   productCatalogContext?: string,
   precomputedLanguage?: ReplyLocale,
-): Promise<{ reply: string; productCatalogContext: string; language: ReplyLocale }> {
+): Promise<{ reply: string; productCatalogContext: string; language: ReplyLocale; matchedProducts: Product[] }> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
@@ -2139,6 +2165,7 @@ export async function generateReply(
           ? productCatalogContext
           : '',
       language,
+      matchedProducts: [],
     };
   }
 
@@ -2274,6 +2301,7 @@ export async function generateReply(
       reply: getOutOfStockProductReply(language),
       productCatalogContext: resolvedProductCatalogContext,
       language,
+      matchedProducts: products,
     };
   }
 
@@ -2365,6 +2393,7 @@ export async function generateReply(
         reply: '[NO_REPLY]',
         productCatalogContext: resolvedProductCatalogContext,
         language,
+        matchedProducts: products,
       };
     }
 
@@ -2408,5 +2437,6 @@ export async function generateReply(
     reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
     productCatalogContext: resolvedProductCatalogContext,
     language,
+    matchedProducts: products,
   };
 }
