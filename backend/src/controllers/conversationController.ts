@@ -128,7 +128,7 @@ export async function reply(req: Request, res: Response): Promise<void> {
     }
 
     const [channel, contact] = await Promise.all([
-      findChannelById(conversation.channel_id, tenantId),
+      conversation.channel_id ? findChannelById(conversation.channel_id, tenantId) : null,
       findContactById(conversation.contact_id),
     ]);
 

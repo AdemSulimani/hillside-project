@@ -99,7 +99,7 @@ export interface OrderWithRelations extends Order {
     id: string;
     tenant_id: string;
     contact_id: string;
-    channel_id: string;
+    channel_id: string | null;
     status: string;
     last_message_at: Date;
     human_override_until: Date | null;
@@ -112,7 +112,7 @@ export interface OrderWithRelations extends Order {
   contact: {
     id: string;
     tenant_id: string;
-    channel_id: string;
+    channel_id: string | null;
     external_id: string;
     name: string;
     avatar_url: string | null;
@@ -276,7 +276,7 @@ export async function listOrdersForTenant(filters: OrderListFilters): Promise<{
   return {
     orders: rows.map((r) => {
       const { channel_type, ...rest } = r;
-      return { ...rowToOrder(rest), channel_type };
+      return { ...rowToOrder(rest), channel_type: channel_type ?? 'facebook' };
     }),
     total,
   };
@@ -398,7 +398,7 @@ export async function markOrderRefundRequested(
 
 type ActionRequiredOrderRow = OrderRow & {
   contact_name: string;
-  channel_type: ChannelType;
+  channel_type: ChannelType | null;
   request_reason: string | null;
 };
 
@@ -430,7 +430,7 @@ export async function listActionRequiredOrdersForTenant(
     return {
       ...rowToOrder(rest),
       contact_name,
-      channel_type,
+      channel_type: channel_type ?? 'facebook',
       conversation_id: rest.conversation_id,
       request_reason,
     };
@@ -746,7 +746,7 @@ export async function listOrdersForContactForTenant(
   return {
     orders: rows.map((r) => {
       const { channel_type, ...rest } = r;
-      return { ...rowToOrder(rest), channel_type };
+      return { ...rowToOrder(rest), channel_type: channel_type ?? 'facebook' };
     }),
     total,
   };
