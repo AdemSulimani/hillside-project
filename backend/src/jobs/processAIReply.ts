@@ -38,7 +38,6 @@ import {
   detectPostPurchaseSupportIntent,
   detectWrongProductIntent,
   detectReplyLanguage,
-  findProductsForInboundMessage,
   generateReply,
   isOutOfStockProductReply,
   isUsageQuestionUnanswered,
@@ -69,8 +68,12 @@ function normalizeLooseText(value: string | null | undefined): string {
 
 function normalizeVerbatimComparison(value: string | null | undefined): string {
   return (value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // strip diacritics so AI accent-correction doesn't break the match
     .replace(/\r\n/g, '\n')
-    .trim();
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function logJsonStringOrNull(value: string | null): string {
@@ -336,6 +339,16 @@ const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
   en: 'If you have any other questions or would like to place another order, I am here to help.',
 };
 
+/**
+ * Sent after all order details have been collected, asking the customer to verify
+ * their phone and address before the order is registered. Must match verbatim so
+ * messageIsDataConfirmationRequest can identify it in conversation history.
+ */
+const DATA_CONFIRMATION_MESSAGES: Record<ReplyLocale, string> = {
+  sq: 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që numri i telefonit dhe adresa e dërgesës që keni dhënë janë korrekte?',
+  en: 'Thank you for your order! To avoid any mistakes, could you please confirm that the phone number and delivery address you provided are correct?',
+};
+
 function normalizeForIncludesCheck(value: string): string {
   return value
     .normalize('NFD')
@@ -482,6 +495,34 @@ async function hasAssistantAskedOrderClosingInConversation(
     if (await classifyOrderClosingQuestionReplyIntent(content)) return true;
   }
   return false;
+}
+
+/**
+ * Returns true when the assistant message text looks like the data-confirmation request
+ * we send after collecting phone + address (before registering the order).
+ */
+function messageIsDataConfirmationRequest(text: string): boolean {
+  if (!(text ?? '').trim()) return false;
+  const normalized = normalizeForIncludesCheck(text);
+  const albanianMatch =
+    normalized.includes('konfirmoni') &&
+    (normalized.includes('telefon') || normalized.includes('numer')) &&
+    normalized.includes('adres');
+  const englishMatch =
+    normalized.includes('confirm') &&
+    (normalized.includes('phone') || normalized.includes('number')) &&
+    normalized.includes('address');
+  return albanianMatch || englishMatch;
+}
+
+/**
+ * Returns true if any previous AI message in the conversation is a data-confirmation
+ * request (asking the customer to verify their phone + address before order creation).
+ */
+function hasAssistantAskedDataConfirmation(messages: Array<{ sent_by: string; content: string | null }>): boolean {
+  return messages.some(
+    (msg) => msg.sent_by !== 'customer' && messageIsDataConfirmationRequest(msg.content ?? ''),
+  );
 }
 
 async function messageContainsOrderClosingAskHybrid(value: string): Promise<boolean> {
@@ -1323,7 +1364,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const { reply: replyText, productCatalogContext, language: generatedLanguage } =
+  const { reply: replyText, productCatalogContext, language: generatedLanguage, matchedProducts } =
     await generateReply(
       conversationId,
       tenantId,
@@ -1341,10 +1382,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   const isOosCannedReply = isOutOfStockProductReply(replyText);
 
-  const usageCandidates =
-    inboundText && !isOosCannedReply
-      ? await findProductsForInboundMessage(tenantId, inboundText, 5)
-      : [];
+  // Use the products already found by generateReply — they are the exact same products
+  // the AI used to build its answer, found via the same semantic+keyword search.
+  // Re-running a separate search here would risk missing products referenced by nickname,
+  // abbreviation, or follow-up pronoun (e.g. "kit produkt" / "this product").
+  const usageCandidates = isOosCannedReply ? [] : matchedProducts;
   const productWithUsage = usageCandidates.find((p) => typeof p.usage_description === 'string' && p.usage_description.trim() !== '');
   const usageDescription = productWithUsage?.usage_description?.trim() ?? null;
 
@@ -1411,6 +1453,52 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         tenantId,
         err,
       });
+    }
+  }
+
+  // Problem 2 safety net: customer asked a usage question but no usage_description
+  // exists for the matched product (or no product was matched at all).
+  // We must not let the AI answer from its general knowledge — escalate immediately.
+  if (!usageEscalated && usageQuestionIntent && !usageDescription && !isOosCannedReply) {
+    const client = await pool.connect();
+    let alert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationHumanReplied(conversationId, tenantId, false, client);
+      alert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: lastInbound?.id ?? null,
+          reason: 'usage_question_unanswered',
+        },
+        client,
+      );
+      await client.query('COMMIT');
+      usageEscalated = true;
+      finalReplyText = usageHoldingMessage;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[ai.reply] Usage escalation (no usage description) transaction failed', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    } finally {
+      client.release();
+    }
+
+    if (alert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...alert,
+        message_content: inboundText || null,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
     }
   }
 
@@ -1546,16 +1634,48 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     finalReplyText = stripFixedPhrasesOfOtherLocale(finalReplyText, replyLocale);
     const orderClosingAlreadyAskedInConversation =
       await hasAssistantAskedOrderClosingInConversation(recentMessages);
+
+    // Data-confirmation gate: if the AI generated an order-confirmation reply (or the inbound
+    // message provides delivery details after the order-closing question was already asked) but
+    // the customer has not yet been asked to verify their phone + address, override the reply
+    // with the structured data-confirmation message. The order will only be registered once
+    // the customer confirms their details in the next turn.
+    if (!usageEscalated && !isOosCannedReply) {
+      const dataConfirmationAlreadySent = hasAssistantAskedDataConfirmation(recentMessages);
+      const inboundProvidesDetails = messageLooksLikeOrderDetailsPayload(inboundText);
+      const shouldForceDataConfirmation =
+        !dataConfirmationAlreadySent &&
+        (isOrderConfirmationReply ||
+          (inboundProvidesDetails && orderClosingAlreadyAskedInConversation));
+      if (shouldForceDataConfirmation) {
+        console.info('[DATA_CONFIRMATION] Overriding AI reply with data-verification request', {
+          tenantId,
+          conversationId,
+          wasOrderConfirmationReply: isOrderConfirmationReply,
+          inboundProvidesDetails,
+        });
+        finalReplyText = DATA_CONFIRMATION_MESSAGES[replyLocale];
+        isOrderConfirmationReply = false;
+      }
+    }
+
+    // Fix: also strip the order-closing question when the customer's current message already
+    // expresses a clear order intent — there is no point asking "do you want to order?" when
+    // the customer just said they do or provided their delivery details.
+    const inboundImpliesOrderIntent =
+      looksLikeOrderAffirmation(inboundText) || messageLooksLikeOrderDetailsPayload(inboundText);
+    const effectiveOrderClosingAsked = orderClosingAlreadyAskedInConversation || inboundImpliesOrderIntent;
     finalReplyText = await stripRepeatedOrderClosingQuestion(
       finalReplyText,
-      orderClosingAlreadyAskedInConversation,
+      effectiveOrderClosingAsked,
     );
     // Generic follow-up invitations ("më tregoni", "let me know", etc.) are only allowed in
     // (a) the first product reply and (b) order-confirmation replies. If the order-closing
-    // was already asked and this is not an order-confirmation reply, strip them.
+    // was already asked (or implied by intent) and this is not an order-confirmation reply,
+    // strip them.
     finalReplyText = stripGenericFollowUpInvitation(
       finalReplyText,
-      orderClosingAlreadyAskedInConversation && !isOrderConfirmationReply,
+      effectiveOrderClosingAsked && !isOrderConfirmationReply,
     );
   }
 
@@ -1659,18 +1779,24 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
-  const mainSendPrecheck = await shouldStillSendAutomatedReply({
-    tenantId,
-    channelId,
-    conversationId,
-    scheduledInboundExternalId: data.messageExternalId,
-  });
+  // When usage escalation fired we already set ai_paused=true ourselves.
+  // shouldStillSendAutomatedReply would read that flag and abort the send,
+  // preventing the holding message from ever reaching the customer.
+  // Skip the precheck in that case — we still need to deliver the holding message.
+  const mainSendPrecheck = usageEscalated
+    ? ({ ok: true } as const)
+    : await shouldStillSendAutomatedReply({
+        tenantId,
+        channelId,
+        conversationId,
+        scheduledInboundExternalId: data.messageExternalId,
+      });
   if (!mainSendPrecheck.ok) {
     console.info('[ai.reply] Skipping AI send', {
       conversationId,
       scheduledFor: data.messageExternalId,
       reason: mainSendPrecheck.reason,
-      ...mainSendPrecheck.logPayload,
+      ...('logPayload' in mainSendPrecheck ? mainSendPrecheck.logPayload : {}),
     });
     return;
   }
@@ -1843,11 +1969,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       messagesForIntent,
     );
     const latestMessageProvidesOrderDetails = messageLooksLikeOrderDetailsPayload(inboundText);
+
+    // Require the data-confirmation request to have been sent before we register the order.
+    // This ensures the customer explicitly verified their phone + address in the previous turn.
+    // Exception: explicit new-order signals (customer asking for a repeat/additional order) are
+    // allowed to bypass this gate since the details are already on file from the current session.
+    const dataConfirmationSentBeforeCurrentTurn = hasAssistantAskedDataConfirmation(recentMessages);
     const shouldAffirmOrder =
-      latestMessageAffirmsOrder ||
       explicitNewOrder ||
-      recentCustomerAffirmation ||
-      (latestMessageProvidesOrderDetails && assistantAskedOrderClosingEarlier);
+      (dataConfirmationSentBeforeCurrentTurn &&
+        (latestMessageAffirmsOrder ||
+          recentCustomerAffirmation ||
+          (latestMessageProvidesOrderDetails && assistantAskedOrderClosingEarlier)));
 
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
@@ -1866,6 +1999,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         recentCustomerAffirmation,
         assistantAskedOrderClosingEarlier,
         latestMessageProvidesOrderDetails,
+        dataConfirmationSentBeforeCurrentTurn,
         shouldAffirmOrder,
         orderAffirmationConfidence: orderAffirmationIntent.confidence,
         orderAffirmationReason: orderAffirmationIntent.reason,

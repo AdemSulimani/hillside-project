@@ -42,6 +42,10 @@ export function buildGuidelinePlaceholderMap(ctx: GuidelinePlaceholderContext): 
     ? 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t\u2019ju ndihmuar.'
     : 'If you have any other questions or would like to place another order, I am here to help.';
 
+  const dataConfirmationSentence = isSq
+    ? 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni se të dhënat që keni dhënë janë korrekte?'
+    : 'Thank you for your order! To avoid any mistakes, could you please confirm that the information address you provided are correct?';
+
   const postPurchaseIssueSentence = isSq
     ? 'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t\u2019ju përgjigjet.'
     : 'Hello, we are sorry for the issue. A member of our team will get back to you shortly.';
@@ -65,6 +69,7 @@ export function buildGuidelinePlaceholderMap(ctx: GuidelinePlaceholderContext): 
     ORDER_CONFIRMATION_CLOSING_RULE: `- If you confirm that an order is placed/confirmed, end the message with this exact follow-up sentence ${orderConfirmationLanguageDirective}: "${orderConfirmationFollowUp}"`,
     DELIVERY_ETA_NOTE: `- When the business has configured a delivery-time window in the CRM, the platform inserts one ${languageName} sentence with that ETA immediately before that follow-up; do not add your own separate delivery-arrival time line in order-confirmation replies (avoid duplicating it).`,
     POST_PURCHASE_ESCALATION_RULE: `- If the customer reports a delivery delay/non-delivery, wrong item received, or product defect/problem after purchase, ${postPurchaseLanguageDirective}: "${postPurchaseIssueSentence}"`,
+    DATA_CONFIRMATION_SENTENCE: `"${dataConfirmationSentence}"`,
   };
 }
 
