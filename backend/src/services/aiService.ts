@@ -349,6 +349,13 @@ const ORDER_DETAILS_COLLECTION_REPLY_FALLBACK_KEYWORDS = [
   'delivery address',
   'full address',
   'phone number',
+  'emrin',
+  'emri',
+  'mbiemrin',
+  'mbiemri',
+  'first name',
+  'last name',
+  'your name',
   'to proceed with your order',
   'complete your order',
 ];
@@ -556,7 +563,7 @@ export async function classifyOrderDetailsCollectionReplyIntent(
         {
           role: 'system',
           content:
-            'You are a strict classifier. Determine whether the assistant reply is collecting required delivery details to proceed with purchase in any language. In this system, valid requested delivery details are ONLY: phone number and full delivery/shipping address. Return only JSON: {"is_order_details_collection_reply": true} or {"is_order_details_collection_reply": false}. Return true only when the reply asks for phone number and/or full delivery address as the next ordering step. Return false if the reply asks for unrelated personal data (e.g., full name, surname, ID number, birthday) or unrelated chit-chat.',
+            'You are a strict classifier. Determine whether the assistant reply is collecting required delivery details to proceed with purchase in any language. In this system, valid requested delivery details are: customer first name, customer last name, phone number, and full delivery/shipping address. Return only JSON: {"is_order_details_collection_reply": true} or {"is_order_details_collection_reply": false}. Return true only when the reply asks for one or more of those required details as the next ordering step. Return false if the reply asks for unrelated personal data (e.g., ID number, birthday, email) or unrelated chit-chat.',
         },
         {
           role: 'user',

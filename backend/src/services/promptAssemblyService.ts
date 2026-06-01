@@ -43,8 +43,8 @@ export function buildGuidelinePlaceholderMap(ctx: GuidelinePlaceholderContext): 
     : 'If you have any other questions or would like to place another order, I am here to help.';
 
   const dataConfirmationSentence = isSq
-    ? 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni se të dhënat që keni dhënë janë korrekte?'
-    : 'Thank you for your order! To avoid any mistakes, could you please confirm that the information address you provided are correct?';
+    ? 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që të dhënat që keni dhënë janë korrekte?'
+    : 'Thank you for your order! To avoid any mistakes, could you please confirm that the information you provided is correct?';
 
   const postPurchaseIssueSentence = isSq
     ? 'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t\u2019ju përgjigjet.'

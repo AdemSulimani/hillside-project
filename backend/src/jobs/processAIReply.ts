@@ -118,6 +118,55 @@ function extractPhoneNumberFromMessages(
   return null;
 }
 
+function isFallbackContactLabel(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  if (trimmed.toLowerCase() === 'unknown') return true;
+  if (/^ig user \d+$/i.test(trimmed)) return true;
+  return /^messenger user \d+$/i.test(trimmed);
+}
+
+function readMetaString(meta: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = meta[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function resolveCustomerNameForOrder(args: {
+  customerFirstNameFromIntent: string | null;
+  customerLastNameFromIntent: string | null;
+  contactName: string;
+  contactMetadata: Record<string, unknown>;
+}): { firstName: string | null; lastName: string | null; fullName: string | null } {
+  const meta = args.contactMetadata ?? {};
+  let firstName = args.customerFirstNameFromIntent?.trim() || null;
+  let lastName = args.customerLastNameFromIntent?.trim() || null;
+
+  if (!firstName) {
+    firstName = readMetaString(meta, ['first_name', 'firstName', 'given_name']);
+  }
+  if (!lastName) {
+    lastName = readMetaString(meta, ['last_name', 'lastName', 'family_name']);
+  }
+
+  const contactName = args.contactName.trim();
+  if (contactName && !isFallbackContactLabel(contactName)) {
+    const parts = contactName.split(/\s+/).filter((part) => part.length > 0);
+    if (!firstName && !lastName && parts.length >= 2) {
+      firstName = parts[0];
+      lastName = parts.slice(1).join(' ');
+    }
+  }
+
+  const fullName =
+    firstName && lastName ? `${firstName} ${lastName}`.trim() : null;
+  return { firstName, lastName, fullName };
+}
+
 function normalizeQuestionForSimilarity(value: string): string {
   return value
     .normalize('NFD')
@@ -341,12 +390,12 @@ const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
 
 /**
  * Sent after all order details have been collected, asking the customer to verify
- * their phone and address before the order is registered. Must match verbatim so
+ * their name, phone, and address before the order is registered. Must match verbatim so
  * messageIsDataConfirmationRequest can identify it in conversation history.
  */
 const DATA_CONFIRMATION_MESSAGES: Record<ReplyLocale, string> = {
-  sq: 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që numri i telefonit dhe adresa e dërgesës që keni dhënë janë korrekte?',
-  en: 'Thank you for your order! To avoid any mistakes, could you please confirm that the phone number and delivery address you provided are correct?',
+  sq: 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që të dhënat që keni dhënë janë korrekte?',
+  en: 'Thank you for your order! To avoid any mistakes, could you please confirm that the information you provided is correct?',
 };
 
 function normalizeForIncludesCheck(value: string): string {
@@ -499,25 +548,40 @@ async function hasAssistantAskedOrderClosingInConversation(
 
 /**
  * Returns true when the assistant message text looks like the data-confirmation request
- * we send after collecting phone + address (before registering the order).
+ * we send after collecting name, phone, and address (before registering the order).
  */
 function messageIsDataConfirmationRequest(text: string): boolean {
   if (!(text ?? '').trim()) return false;
   const normalized = normalizeForIncludesCheck(text);
-  const albanianMatch =
+  const genericAlbanianMatch =
+    normalized.includes('konfirmoni') &&
+    normalized.includes('te dhenat') &&
+    normalized.includes('korrekte');
+  const genericEnglishMatch =
+    normalized.includes('confirm') &&
+    normalized.includes('information') &&
+    normalized.includes('provided') &&
+    normalized.includes('correct');
+  // Legacy wording that listed individual fields (still in older conversations).
+  const legacyAlbanianMatch =
     normalized.includes('konfirmoni') &&
     (normalized.includes('telefon') || normalized.includes('numer')) &&
     normalized.includes('adres');
-  const englishMatch =
+  const legacyEnglishMatch =
     normalized.includes('confirm') &&
     (normalized.includes('phone') || normalized.includes('number')) &&
     normalized.includes('address');
-  return albanianMatch || englishMatch;
+  return (
+    genericAlbanianMatch ||
+    genericEnglishMatch ||
+    legacyAlbanianMatch ||
+    legacyEnglishMatch
+  );
 }
 
 /**
  * Returns true if any previous AI message in the conversation is a data-confirmation
- * request (asking the customer to verify their phone + address before order creation).
+ * request (asking the customer to verify their name, phone, and address before order creation).
  */
 function hasAssistantAskedDataConfirmation(messages: Array<{ sent_by: string; content: string | null }>): boolean {
   return messages.some(
@@ -1956,6 +2020,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       customerPhoneFromMetadata ?? customerPhoneFromConversation ?? customerPhoneFromContactExternalId;
     const hasCustomerPhone = typeof customerPhone === 'string' && customerPhone.length > 0;
 
+    const resolvedCustomerName = resolveCustomerNameForOrder({
+      customerFirstNameFromIntent: intent.customer_first_name,
+      customerLastNameFromIntent: intent.customer_last_name,
+      contactName: contact.name,
+      contactMetadata: meta,
+    });
+    const hasCustomerName = resolvedCustomerName.fullName !== null;
+
     const recentCustomerAffirmation = messagesForIntent
       .slice(-20)
       .some(
@@ -1971,7 +2043,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     const latestMessageProvidesOrderDetails = messageLooksLikeOrderDetailsPayload(inboundText);
 
     // Require the data-confirmation request to have been sent before we register the order.
-    // This ensures the customer explicitly verified their phone + address in the previous turn.
+    // This ensures the customer explicitly verified their name, phone, and address in the previous turn.
     // Exception: explicit new-order signals (customer asking for a repeat/additional order) are
     // allowed to bypass this gate since the details are already on file from the current session.
     const dataConfirmationSentBeforeCurrentTurn = hasAssistantAskedDataConfirmation(recentMessages);
@@ -1988,6 +2060,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       intent.product_name != null &&
       hasDeliveryAddress &&
       hasCustomerPhone &&
+      hasCustomerName &&
       shouldAffirmOrder;
 
     if (!passesDraftOrderValidation) {
@@ -2005,6 +2078,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         orderAffirmationReason: orderAffirmationIntent.reason,
         hasDeliveryAddress,
         hasCustomerPhone,
+        hasCustomerName,
+        customerFirstName: resolvedCustomerName.firstName,
+        customerLastName: resolvedCustomerName.lastName,
       });
       return;
     }
@@ -2074,7 +2150,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       unit_price: unitPrice,
       total_price: totalPrice,
       status: 'draft',
-      customer_name: contact.name || 'Unknown',
+      customer_name: resolvedCustomerName.fullName ?? 'Unknown',
       customer_phone: customerPhone,
       delivery_address: intent.delivery_address?.trim() ?? null,
       notes: null,

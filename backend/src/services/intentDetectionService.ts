@@ -7,6 +7,8 @@ export interface IntentResult {
   product_name: string | null;
   quantity: number | null;
   delivery_address: string | null;
+  customer_first_name: string | null;
+  customer_last_name: string | null;
   is_ready_to_order: boolean;
   reasoning: string;
 }
@@ -52,6 +54,16 @@ function parseIntentJson(raw: string): IntentResult {
       ? parsed.delivery_address.trim()
       : null;
 
+  const customer_first_name =
+    typeof parsed.customer_first_name === 'string' && parsed.customer_first_name.trim()
+      ? parsed.customer_first_name.trim()
+      : null;
+
+  const customer_last_name =
+    typeof parsed.customer_last_name === 'string' && parsed.customer_last_name.trim()
+      ? parsed.customer_last_name.trim()
+      : null;
+
   const is_ready_to_order = parsed.is_ready_to_order === true;
 
   const reasoning =
@@ -64,6 +76,8 @@ function parseIntentJson(raw: string): IntentResult {
     product_name,
     quantity,
     delivery_address,
+    customer_first_name,
+    customer_last_name,
     is_ready_to_order,
     reasoning,
   };
@@ -83,6 +97,8 @@ export async function detect(
       product_name: null,
       quantity: null,
       delivery_address: null,
+      customer_first_name: null,
+      customer_last_name: null,
       is_ready_to_order: false,
       reasoning: '',
     };
@@ -101,8 +117,9 @@ The customer has not asked any more clarifying questions in their latest message
 
 A medium score (0.4 to 0.74) means the customer is interested but has not committed — they are asking about price, availability, or details.
 A low score (below 0.4) means the customer is browsing, asking general questions, or the message is unrelated to purchasing.
-Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, delivery_address: string | null, is_ready_to_order: boolean, reasoning: string }
-The is_ready_to_order field must only be true if intent_score is above 0.85 AND all four signals above are present. Do not set is_ready_to_order to true based on intent_score alone.
+Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, delivery_address: string | null, customer_first_name: string | null, customer_last_name: string | null, is_ready_to_order: boolean, reasoning: string }
+Extract customer_first_name and customer_last_name only when the customer explicitly provided them in the transcript (not from channel profile metadata). Use null when missing or uncertain.
+The is_ready_to_order field must only be true if intent_score is above 0.85 AND all four purchase signals above are present. Do not set is_ready_to_order to true based on intent_score alone.
 
 Respond with a single JSON object only (no markdown), matching that shape exactly.`;
 
