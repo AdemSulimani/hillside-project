@@ -142,7 +142,7 @@ export async function update(req: Request, res: Response): Promise<void> {
       }
     }
 
-    const embeddingRelevantFields = ['name', 'brand', 'description', 'tags'] as const;
+    const embeddingRelevantFields = ['name', 'brand', 'description', 'tags', 'category'] as const;
     const touchesEmbedding = embeddingRelevantFields.some(
       (f) => f in fields,
     );
@@ -250,6 +250,17 @@ export async function uploadDocument(req: Request, res: Response): Promise<void>
       products = await service.process(inputSource);
     }
 
+    // Queue embedding generation for every imported product. The document service
+    // calls createProduct() directly (bypassing the single-product controller), so
+    // embeddings are never scheduled otherwise — leaving all bulk-imported products
+    // with embedding = NULL and invisible to semantic search.
+    await Promise.all(
+      products.map((p) =>
+        defaultQueue.add('product.embedding', { productId: p.id, tenantId }),
+      ),
+    );
+    await redisConnection.del(`products:${tenantId}`);
+
     sendSuccess(
       res,
       { products, count: products.length },
@@ -292,6 +303,11 @@ export async function uploadOcrImage(req: Request, res: Response): Promise<void>
     } else {
       product = await imageService.process(inputSource);
     }
+
+    // Queue embedding generation — OCR image import calls createProduct() directly,
+    // bypassing the single-product controller that normally enqueues this job.
+    await defaultQueue.add('product.embedding', { productId: product.id, tenantId });
+    await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, { product }, 'Product imported from image', 201);
   } catch (err) {

@@ -2,6 +2,7 @@ import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
 import {
+  countActiveProducts,
   searchProducts,
   searchProductsByDisjunctiveTerms,
   searchProductsBySimilarity,
@@ -18,7 +19,12 @@ import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorage
 import { generateEmbedding } from './embeddingService';
 import { redisConnection } from '../jobs/redisConnection';
 
-const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.75');
+// 0.65 gives a better recall/precision balance for large catalogs where many
+// products share semantic space (e.g. supplements, cosmetics). The old 0.75
+// default caused too many false-negatives: correct products scored 0.70–0.74
+// and were silently discarded, pushing execution into the 5-product fallback.
+// Operators can override this via the SIMILARITY_THRESHOLD env variable.
+const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.65');
 
 /** How many catalog rows we consider for matching + OOS canned detection (needs the named SKU in-list). */
 const FOCUSED_PRODUCT_MATCH_LIMIT = 10;
@@ -184,6 +190,11 @@ async function loadTenant(tenantId: string) {
   return tenant;
 }
 
+// Maximum number of products returned by the alphabetical fallback catalog.
+// Raised from 5 to 20 so that the AI has a broader view when semantic/keyword
+// search both miss (e.g. vague greeting messages on first contact).
+const FALLBACK_CATALOG_LIMIT = 20;
+
 async function loadProductCatalog(tenantId: string): Promise<Product[]> {
   const cacheKey = `products:${tenantId}`;
   const cached = await redisConnection.get(cacheKey);
@@ -195,7 +206,7 @@ async function loadProductCatalog(tenantId: string): Promise<Product[]> {
     }
   }
 
-  const products = await searchProducts(tenantId, '', 5);
+  const products = await searchProducts(tenantId, '', FALLBACK_CATALOG_LIMIT);
   await redisConnection.set(cacheKey, JSON.stringify(products), 'EX', 120);
   return products;
 }
@@ -1005,13 +1016,24 @@ function inboundTextLikelyReferencesProduct(inboundMessage: string, product: Pro
 
 export function formatProductCatalog(
   products: Product[],
-  options?: { includePrice?: boolean; includeDiscount?: boolean },
+  options?: { includePrice?: boolean; includeDiscount?: boolean; totalCatalogCount?: number },
 ): string {
   const includePrice = options?.includePrice ?? true;
   const includeDiscount = options?.includeDiscount ?? false;
-  if (products.length === 0) return 'No matching products found in the catalog.';
+  const totalCatalogCount = options?.totalCatalogCount ?? 0;
 
-  return products
+  if (products.length === 0) {
+    if (totalCatalogCount > 0) {
+      return (
+        `[This business has ${totalCatalogCount} active product(s) in its catalog. ` +
+        `No products closely matched the current query — do NOT claim a product does not exist. ` +
+        `Ask the customer to clarify the product name or provide more details so you can look it up accurately.]`
+      );
+    }
+    return 'No matching products found in the catalog.';
+  }
+
+  const catalogLines = products
     .map((p) => {
       const typeText = p.tags.length > 0 ? p.tags.join(', ') : 'N/A';
       const parts = [
@@ -1046,6 +1068,22 @@ export function formatProductCatalog(
       return parts.join('\n');
     })
     .join('\n');
+
+  // When the catalog has more products than are shown, append a clear instruction
+  // so the AI does not falsely claim a product doesn't exist just because it is
+  // absent from the current context window.
+  const hiddenCount = totalCatalogCount > products.length ? totalCatalogCount - products.length : 0;
+  if (hiddenCount > 0) {
+    return (
+      catalogLines +
+      `\n\n[Note: Only the ${products.length} most relevant product(s) are shown above. ` +
+      `The full catalog contains ${totalCatalogCount} active product(s). ` +
+      `If the customer asks about a product not listed here, do NOT say it does not exist — ` +
+      `ask the customer to clarify the product name or provide more details.]`
+    );
+  }
+
+  return catalogLines;
 }
 
 function formatQAPairs(pairs: { question: string; answer: string }[]): string {
@@ -2118,11 +2156,12 @@ export async function generateReply(
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
-  const [tenant, config, conversationHistoryWindow, cachedCatalogProducts] = await Promise.all([
+  const [tenant, config, conversationHistoryWindow, cachedCatalogProducts, totalCatalogCount] = await Promise.all([
     loadTenant(tenantId),
     loadAIConfig(tenantId),
     findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT),
     productCatalogContext ? Promise.resolve([] as Product[]) : loadProductCatalog(tenantId),
+    countActiveProducts(tenantId),
   ]);
   const olderHistory =
     conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
@@ -2228,8 +2267,18 @@ export async function generateReply(
             (getProductBrand(product) ?? '').toLowerCase() === normalizedBrand,
           )
         : [];
+
+      // Check brand presence against the actual search results, not the stale
+      // 5-product alphabetical cache. With 200+ products the cache almost never
+      // contains the relevant brand, causing false "brand absent" verdicts.
+      const brandCheckPool =
+        extractedMatches.length > 0
+          ? extractedMatches
+          : products.length > 0
+            ? products
+            : cachedCatalogProducts;
       const likelyNonMatchByBrand = extracted.brand_name
-        ? !isBrandLikelyInCatalog(extracted.brand_name, cachedCatalogProducts)
+        ? !isBrandLikelyInCatalog(extracted.brand_name, brandCheckPool)
         : false;
 
       if (exactBrandMatches.length > 0) {
@@ -2260,6 +2309,7 @@ export async function generateReply(
       : formatProductCatalog(products, {
           includePrice: customerAskedPrice || customerAskedDiscount,
           includeDiscount: customerAskedDiscount,
+          totalCatalogCount,
         });
 
   const primaryFocusedProduct = products[0];

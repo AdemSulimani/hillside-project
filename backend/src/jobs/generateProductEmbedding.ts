@@ -20,7 +20,13 @@ export async function processGenerateProductEmbedding(
   }
 
   const tags: string[] = Array.isArray(product.tags) ? product.tags : [];
-  const text = buildProductText(product.name, product.description, tags);
+  const text = buildProductText(
+    product.name,
+    product.description,
+    tags,
+    product.brand ?? null,
+    product.category ?? null,
+  );
 
   const vector = await generateEmbedding(text);
 
