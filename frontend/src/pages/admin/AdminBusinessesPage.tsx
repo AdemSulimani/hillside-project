@@ -26,10 +26,19 @@ import { cn } from '@/lib/utils';
 
 const PAGE_SIZE = 20;
 
-function aggregateStatusVariant(
+function orderStatusVariant(
   s: 'unpaid' | 'billed' | 'paid' | 'clear',
 ): 'destructive' | 'secondary' | 'default' | 'outline' {
   if (s === 'unpaid') return 'destructive';
+  if (s === 'billed') return 'secondary';
+  if (s === 'paid') return 'default';
+  return 'outline';
+}
+
+function getUseCaseStatusVariant(
+  s: 'unbilled' | 'billed' | 'paid' | 'clear',
+): 'destructive' | 'secondary' | 'default' | 'outline' {
+  if (s === 'unbilled') return 'destructive';
   if (s === 'billed') return 'secondary';
   if (s === 'paid') return 'default';
   return 'outline';
@@ -140,15 +149,18 @@ export default function AdminBusinessesPage() {
       <Card>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
+            <table className="w-full min-w-[1100px] text-sm">
               <thead>
                 <tr className="border-b border-border bg-muted/40 text-left">
                   <th className="px-4 py-3 font-medium">Business</th>
                   <th className="px-4 py-3 font-medium">Plan</th>
                   <th className="px-4 py-3 font-medium text-right">Orders</th>
                   <th className="px-4 py-3 font-medium text-right">AI orders</th>
-                  <th className="px-4 py-3 font-medium text-right">Commission owed</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium text-right">Order commission</th>
+                  <th className="px-4 py-3 font-medium">Order status</th>
+                  <th className="px-4 py-3 font-medium text-right">Use cases</th>
+                  <th className="px-4 py-3 font-medium text-right">UC fees owed</th>
+                  <th className="px-4 py-3 font-medium">UC status</th>
                   <th className="px-4 py-3 font-medium text-right"> </th>
                 </tr>
               </thead>
@@ -156,7 +168,7 @@ export default function AdminBusinessesPage() {
                 {isLoading
                   ? Array.from({ length: 6 }).map((_, i) => (
                       <tr key={i} className="border-b border-border">
-                        <td className="px-4 py-3" colSpan={7}>
+                        <td className="px-4 py-3" colSpan={10}>
                           <Skeleton className="h-8 w-full" />
                         </td>
                       </tr>
@@ -164,7 +176,7 @@ export default function AdminBusinessesPage() {
                   : isError
                     ? (
                         <tr>
-                          <td className="px-4 py-8 text-center text-destructive" colSpan={7}>
+                          <td className="px-4 py-8 text-center text-destructive" colSpan={10}>
                             Failed to load businesses.
                           </td>
                         </tr>
@@ -172,7 +184,7 @@ export default function AdminBusinessesPage() {
                     : rows.length === 0
                       ? (
                           <tr>
-                            <td className="px-4 py-8 text-center text-muted-foreground" colSpan={7}>
+                            <td className="px-4 py-8 text-center text-muted-foreground" colSpan={10}>
                               No businesses yet.
                             </td>
                           </tr>
@@ -188,8 +200,17 @@ export default function AdminBusinessesPage() {
                                 {formatCurrency(r.total_commission_owed)}
                               </td>
                               <td className="px-4 py-3">
-                                <Badge variant={aggregateStatusVariant(r.aggregate_commission_status)}>
+                                <Badge variant={orderStatusVariant(r.aggregate_commission_status)}>
                                   {r.aggregate_commission_status}
+                                </Badge>
+                              </td>
+                              <td className="px-4 py-3 text-right tabular-nums">{r.total_use_cases}</td>
+                              <td className="px-4 py-3 text-right tabular-nums font-medium">
+                                {formatCurrency(r.total_use_case_fees_owed)}
+                              </td>
+                              <td className="px-4 py-3">
+                                <Badge variant={getUseCaseStatusVariant(r.aggregate_use_case_billing_status)}>
+                                  {r.aggregate_use_case_billing_status}
                                 </Badge>
                               </td>
                               <td className="px-4 py-3 text-right">

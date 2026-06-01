@@ -13,6 +13,7 @@ import {
   markOrdersCommissionBilledInPeriod,
   markOrdersCommissionPaidInPeriod,
 } from '../db/models/order';
+import pool from '../db/pool';
 import {
   listAiUseCasesForAdmin,
   updateAiUseCaseBillingStatus,
@@ -20,6 +21,8 @@ import {
   markUseCasesBilledInPeriod,
   markUseCasesPaidInPeriod,
   countAiUseCasesForTenantInPeriod,
+  findAllCompletedUseCaseIdsForTenantInPeriod,
+  stampBillingPeriodOnUseCases,
 } from '../db/models/aiUseCase';
 import { calculateProgressiveFee } from '../services/aiUseCaseService';
 import { listChannelSummariesForTenant } from '../db/models/channel';
@@ -32,6 +35,7 @@ import {
   deriveCommissionReportStatusForTenantPeriod,
   getCommissionEarnedByMonthUtc,
   getTenantCommissionPeriodStats,
+  getTenantUseCasePeriodStats,
 } from '../services/platformCommissionService';
 import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import type {
@@ -389,6 +393,25 @@ export async function voidUseCase(req: Request, res: Response): Promise<void> {
   }
 }
 
+export async function businessUseCasePeriodStats(req: Request, res: Response): Promise<void> {
+  try {
+    const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
+    const q = (req.validated?.query ?? req.query) as unknown as AdminPeriodQueryRequired;
+
+    const tenant = await findTenantById(tenantId);
+    if (!tenant) {
+      sendError(res, 'Business not found', 404);
+      return;
+    }
+
+    const { start, endExclusive } = periodToUtcRange(q.period_start, q.period_end);
+    const stats = await getTenantUseCasePeriodStats(tenantId, start, endExclusive);
+    sendSuccess(res, stats, 'Use case period stats retrieved successfully');
+  } catch (err) {
+    sendError(res, 'Failed to load use case period stats', 500, err);
+  }
+}
+
 export async function markUseCasesBilledForPeriod(req: Request, res: Response): Promise<void> {
   try {
     const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
@@ -422,6 +445,80 @@ export async function markUseCasesPaidForPeriod(req: Request, res: Response): Pr
     sendSuccess(res, { updated_count: updatedCount }, 'Use cases marked as paid');
   } catch (err) {
     sendError(res, 'Failed to mark use cases as paid', 500, err);
+  }
+}
+
+/**
+ * Manually stamps billing_period and fee_amount on ALL completed use cases for a tenant
+ * resolved within the given billing period (YYYY-MM). Recalculates the progressive fee
+ * from scratch using the full case count, so repeated calls are idempotent.
+ *
+ * This replicates the month-end billing job logic on demand, letting admins trigger
+ * fee calculation without waiting for the scheduled cron.
+ */
+export async function stampUseCaseFees(req: Request, res: Response): Promise<void> {
+  try {
+    const { tenantId } = (req.validated?.params ?? req.params) as { tenantId: string };
+    const body = req.body as AdminMarkUseCasePeriodBody;
+
+    const tenant = await findTenantById(tenantId);
+    if (!tenant) {
+      sendError(res, 'Business not found', 404);
+      return;
+    }
+
+    // Derive the UTC date range from the YYYY-MM billing period string.
+    const [yearStr, monthStr] = body.billing_period.split('-');
+    const year = parseInt(yearStr, 10);
+    const month = parseInt(monthStr, 10) - 1; // 0-indexed
+    if (!Number.isFinite(year) || !Number.isFinite(month)) {
+      sendError(res, 'Invalid billing_period format — expected YYYY-MM', 400);
+      return;
+    }
+    const rangeStart = new Date(Date.UTC(year, month, 1));
+    const rangeEnd = new Date(Date.UTC(year, month + 1, 1));
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const ids = await findAllCompletedUseCaseIdsForTenantInPeriod(
+        tenantId,
+        rangeStart,
+        rangeEnd,
+        client,
+      );
+
+      if (ids.length === 0) {
+        await client.query('ROLLBACK');
+        sendSuccess(
+          res,
+          { stamped_count: 0, total_fee: 0, fee_per_case: 0 },
+          'No completed use cases found in this billing period',
+        );
+        return;
+      }
+
+      const totalFee = calculateProgressiveFee(ids.length);
+      const feePerCase = Math.round((totalFee / ids.length) * 100) / 100;
+
+      await stampBillingPeriodOnUseCases(ids, body.billing_period, feePerCase, client);
+
+      await client.query('COMMIT');
+
+      sendSuccess(
+        res,
+        { stamped_count: ids.length, total_fee: totalFee, fee_per_case: feePerCase },
+        `Stamped fees for ${ids.length} use case(s) in ${body.billing_period}`,
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    sendError(res, 'Failed to stamp use case fees', 500, err);
   }
 }
 

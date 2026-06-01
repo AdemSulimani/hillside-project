@@ -7,6 +7,11 @@ export interface AdminDashboardSummary {
   total_commission_earned: number;
   total_unpaid_commission: number;
   total_paid_commission: number;
+  total_ai_completed_use_cases: number;
+  /** Completed use cases with billing_status = 'unbilled' (fee not yet calculated by billing job). */
+  total_unbilled_use_cases: number;
+  total_use_case_fees_earned: number;
+  total_unpaid_use_case_fees: number;
 }
 
 export interface AdminBusinessRow {
@@ -17,11 +22,39 @@ export interface AdminBusinessRow {
   total_ai_completed_orders: number;
   total_commission_owed: number;
   aggregate_commission_status: 'unpaid' | 'billed' | 'paid' | 'clear';
+  total_use_cases: number;
+  total_use_case_fees_owed: number;
+  aggregate_use_case_billing_status: 'unbilled' | 'billed' | 'paid' | 'clear';
 }
 
 export interface CommissionMonthPoint {
   month_key: string;
   commission: number;
+  use_case_fees: number;
+}
+
+export interface AdminUseCaseRow {
+  id: string;
+  tenant_id: string;
+  conversation_id: string;
+  contact_id: string;
+  contact_name: string;
+  status: 'completed' | 'voided';
+  billing_status: 'unbilled' | 'billed' | 'paid';
+  fee_amount: number | null;
+  billing_period: string | null;
+  resolved_at: string;
+  created_at: string;
+}
+
+export interface TenantUseCasePeriodStats {
+  completed_use_cases: number;
+  use_case_unbilled: number;
+  use_case_billed: number;
+  use_case_paid: number;
+  use_case_fees_unbilled: number;
+  use_case_fees_billed: number;
+  use_case_fees_paid: number;
 }
 
 export interface CommissionableOrderRow {
@@ -157,6 +190,73 @@ export async function patchAdminOrderCommissionStatus(
   body: { commission_status: CommissionableOrderRow['commission_status'] },
 ): Promise<void> {
   await adminApi.patch(`/admin/orders/${orderId}/commission-status`, body);
+}
+
+export async function fetchAdminBusinessUseCases(
+  tenantId: string,
+  page: number,
+  limit: number,
+) {
+  const { data } = await adminApi.get<PaginatedResponse<AdminUseCaseRow>>(
+    `/admin/businesses/${tenantId}/use-cases`,
+    { params: { page, limit } },
+  );
+  return { rows: data.data ?? [], pagination: data.pagination };
+}
+
+export async function fetchAdminBusinessUseCasePeriodStats(
+  tenantId: string,
+  periodStart: string,
+  periodEnd: string,
+) {
+  const { data } = await adminApi.get<ApiResponse<TenantUseCasePeriodStats>>(
+    `/admin/businesses/${tenantId}/use-case-period-stats`,
+    { params: { period_start: periodStart, period_end: periodEnd } },
+  );
+  return data.data!;
+}
+
+export async function patchAdminUseCaseBillingStatus(
+  useCaseId: string,
+  body: { billing_status: AdminUseCaseRow['billing_status'] },
+): Promise<void> {
+  await adminApi.patch(`/admin/use-cases/${useCaseId}/billing-status`, body);
+}
+
+export async function postAdminVoidUseCase(useCaseId: string): Promise<void> {
+  await adminApi.post(`/admin/use-cases/${useCaseId}/void`);
+}
+
+export async function postAdminStampUseCaseFees(
+  tenantId: string,
+  body: { billing_period: string },
+) {
+  const { data } = await adminApi.post<
+    ApiResponse<{ stamped_count: number; total_fee: number; fee_per_case: number }>
+  >(`/admin/businesses/${tenantId}/use-cases/stamp-fees`, body);
+  return data.data!;
+}
+
+export async function postAdminMarkUseCasesBilled(
+  tenantId: string,
+  body: { billing_period: string },
+) {
+  const { data } = await adminApi.post<ApiResponse<{ updated_count: number }>>(
+    `/admin/businesses/${tenantId}/use-cases/mark-billed`,
+    body,
+  );
+  return data.data!.updated_count;
+}
+
+export async function postAdminMarkUseCasesPaid(
+  tenantId: string,
+  body: { billing_period: string },
+) {
+  const { data } = await adminApi.post<ApiResponse<{ updated_count: number }>>(
+    `/admin/businesses/${tenantId}/use-cases/mark-paid`,
+    body,
+  );
+  return data.data!.updated_count;
 }
 
 export async function fetchAdminCommissionReportsAll(page: number, limit: number) {
