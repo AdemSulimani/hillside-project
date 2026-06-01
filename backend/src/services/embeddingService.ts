@@ -23,15 +23,22 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 }
 
 /**
- * Builds a single text blob from a product's name, description, and tags
- * for embedding generation.
+ * Builds a single text blob from a product's fields for embedding generation.
+ * Brand and category are intentionally included so semantic search can resolve
+ * queries like "Optimum Nutrition whey" or "facial care cream" against the
+ * correct product even when brand/category live in dedicated columns.
  */
 export function buildProductText(
   name: string,
   description: string | null,
   tags: string[],
+  brand?: string | null,
+  category?: string | null,
 ): string {
-  const parts = [name];
+  const parts: string[] = [];
+  if (brand) parts.push(brand);
+  parts.push(name);
+  if (category) parts.push(category);
   if (description) parts.push(description);
   if (tags.length > 0) parts.push(tags.join(', '));
   return parts.join('. ');

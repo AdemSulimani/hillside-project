@@ -309,6 +309,16 @@ export async function searchProductsBySimilarity(
   return rows;
 }
 
+/** Returns the number of active, non-deleted products for a tenant. */
+export async function countActiveProducts(tenantId: string): Promise<number> {
+  const { rows } = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true`,
+    [tenantId],
+  );
+  return parseInt(rows[0]?.count ?? '0', 10);
+}
+
 export async function appendImageUrls(
   id: string,
   tenantId: string,

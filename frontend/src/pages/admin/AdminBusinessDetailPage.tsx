@@ -18,6 +18,7 @@ import {
   postAdminMarkUseCasesBilled,
   postAdminMarkUseCasesPaid,
   postAdminGenerateReport,
+  postAdminBackfillProductEmbeddings,
   type AdminUseCaseRow,
   type CommissionableOrderRow,
 } from '@/api/platformAdminApi';
@@ -207,6 +208,20 @@ export default function AdminBusinessDetailPage() {
     },
   });
 
+  const backfillEmbeddingsMutation = useMutation({
+    mutationFn: () => postAdminBackfillProductEmbeddings(tenantId!),
+    onSuccess: (result) => {
+      if (result.queued === 0) {
+        toast.info('All products already have embeddings — nothing to backfill.');
+      } else {
+        toast.success(`Queued embedding generation for ${result.queued} product(s). They will be indexed shortly.`);
+      }
+    },
+    onError: (e) => {
+      toast.error(e instanceof AxiosError ? (e.response?.data?.message as string) ?? 'Backfill failed' : 'Backfill failed');
+    },
+  });
+
   const tenant = overviewQuery.data?.tenant;
   const channels = overviewQuery.data?.channels ?? [];
   const stats = statsQuery.data;
@@ -271,6 +286,28 @@ export default function AdminBusinessDetailPage() {
             <TabsTrigger value="commissions">Commissions</TabsTrigger>
           </TabsList>
           <TabsContent value="ai" className="mt-4 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Product embeddings</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Products imported via spreadsheet or PDF before June 2026 may be missing
+                  semantic embeddings, which causes the AI to miss them during customer
+                  conversations. Use this to queue embedding generation for all products that
+                  currently lack one.
+                </p>
+              </CardHeader>
+              <CardContent>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={backfillEmbeddingsMutation.isPending}
+                  onClick={() => backfillEmbeddingsMutation.mutate()}
+                >
+                  {backfillEmbeddingsMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+                  Backfill missing embeddings
+                </Button>
+              </CardContent>
+            </Card>
             <AdminBusinessAiPanel tenantId={tenant.id} />
           </TabsContent>
           <TabsContent value="commissions" className="mt-4 space-y-8">

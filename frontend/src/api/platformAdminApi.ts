@@ -482,6 +482,15 @@ export async function fetchAdminCatalogBlocks() {
   return data.data!.rows;
 }
 
+export async function postAdminBackfillProductEmbeddings(
+  tenantId: string,
+): Promise<{ queued: number; product_ids: string[] }> {
+  const { data } = await adminApi.post<
+    ApiResponse<{ queued: number; product_ids: string[] }>
+  >(`/admin/businesses/${tenantId}/products/backfill-embeddings`);
+  return data.data!;
+}
+
 export async function postAdminCreateCatalogBlock(body: {
   key: string;
   title: string;

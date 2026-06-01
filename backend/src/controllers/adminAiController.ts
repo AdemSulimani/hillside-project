@@ -21,6 +21,7 @@ import type { TenantAiSnapshot } from '../validators/adminAi';
 import { findAIConfigVersion, insertAIConfigVersion, listAIConfigVersions } from '../db/models/aiConfigVersion';
 import { findTenantById } from '../db/models/tenant';
 import { searchProducts } from '../db/models/product';
+import { defaultQueue } from '../jobs/queues';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
 import { buildRetailAISystemPrompt, formatProductCatalog } from '../services/aiService';
 import { assembleGuidelinesFromBlocks } from '../services/promptAssemblyService';
@@ -508,5 +509,49 @@ export async function postSyncAllCatalogBlocks(req: Request, res: Response): Pro
       : 'All businesses are already up to date');
   } catch (err) {
     sendError(res, 'Failed to sync catalog blocks', 500, err);
+  }
+}
+
+/**
+ * Backfills missing product embeddings for a tenant.
+ * Queues a `product.embedding` job for every active product whose `embedding`
+ * column is NULL — typically products that were bulk-imported before the
+ * embedding pipeline was hooked into the document upload controller.
+ *
+ * POST /admin/businesses/:tenantId/products/backfill-embeddings
+ */
+export async function postBackfillProductEmbeddings(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.params.tenantId as string;
+
+    const { rows } = await pool.query<{ id: string; name: string }>(
+      `SELECT id, name FROM products
+       WHERE tenant_id = $1
+         AND deleted_at IS NULL
+         AND is_active = true
+         AND embedding IS NULL`,
+      [tenantId],
+    );
+
+    if (rows.length === 0) {
+      sendSuccess(res, { queued: 0 }, 'All products already have embeddings');
+      return;
+    }
+
+    await Promise.all(
+      rows.map((p) =>
+        defaultQueue.add('product.embedding', { productId: p.id, tenantId }),
+      ),
+    );
+
+    console.info('[admin] Queued embedding backfill', { tenantId, count: rows.length });
+
+    sendSuccess(
+      res,
+      { queued: rows.length, product_ids: rows.map((p) => p.id) },
+      `Queued embedding generation for ${rows.length} product(s)`,
+    );
+  } catch (err) {
+    sendError(res, 'Failed to backfill embeddings', 500, err);
   }
 }
