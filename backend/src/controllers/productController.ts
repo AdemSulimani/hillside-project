@@ -6,6 +6,7 @@ import {
   findProductById,
   updateProduct,
   softDeleteProduct,
+  softDeleteAllProducts,
 } from '../db/models/product';
 import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import { getDocumentService } from '../services/documents';
@@ -156,6 +157,35 @@ export async function update(req: Request, res: Response): Promise<void> {
     sendSuccess(res, { product }, 'Product updated successfully');
   } catch (err) {
     sendError(res, 'Failed to update product', 500, err);
+  }
+}
+
+export async function destroyAll(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId!;
+    const { deletedCount, imageUrls } = await softDeleteAllProducts(tenantId);
+
+    if (deletedCount === 0) {
+      sendSuccess(res, { deletedCount: 0 }, 'No products to delete');
+      return;
+    }
+
+    for (const url of imageUrls) {
+      try {
+        await deleteImage(getPublicIdFromUrl(url));
+      } catch (err) {
+        console.warn('[products.destroyAll] Failed to delete Cloudinary image', { url, err });
+      }
+    }
+    await redisConnection.del(`products:${tenantId}`);
+
+    sendSuccess(
+      res,
+      { deletedCount },
+      `${deletedCount} product(s) deleted successfully`,
+    );
+  } catch (err) {
+    sendError(res, 'Failed to delete products', 500, err);
   }
 }
 
