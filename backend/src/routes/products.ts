@@ -23,6 +23,8 @@ router.post('/', validateBody(createProductSchema), productController.store);
 router.post('/upload/document', uploadDocument, productController.uploadDocument);
 router.post('/upload/image', uploadOcrImage, productController.uploadOcrImage);
 
+router.delete('/all', productController.destroyAll);
+
 router.get('/:id', validateParams(productIdSchema), productController.show);
 router.put('/:id', validateParams(productIdSchema), validateBody(updateProductSchema), productController.update);
 router.delete('/:id', validateParams(productIdSchema), productController.destroy);

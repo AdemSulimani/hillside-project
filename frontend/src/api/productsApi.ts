@@ -115,6 +115,11 @@ export async function deleteProduct(id: string): Promise<void> {
   await api.delete(`/products/${id}`);
 }
 
+export async function deleteAllProducts(): Promise<{ deletedCount: number }> {
+  const { data } = await api.delete<ApiResponse<{ deletedCount: number }>>('/products/all');
+  return { deletedCount: data.data?.deletedCount ?? 0 };
+}
+
 export async function uploadProductImages(id: string, files: File[]): Promise<Product> {
   const formData = new FormData();
   files.forEach((f) => formData.append('images', f));

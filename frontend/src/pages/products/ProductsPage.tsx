@@ -8,9 +8,10 @@ import {
   Loader2,
   Package,
   Search,
+  Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { deleteProduct, fetchProduct, fetchProductTags, fetchProducts } from '@/api/productsApi';
+import { deleteAllProducts, deleteProduct, fetchProduct, fetchProductTags, fetchProducts } from '@/api/productsApi';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
 import type { Product } from '@/types/product';
@@ -63,6 +64,7 @@ function ProductsPageInner() {
   const [tagFilter, setTagFilter] = useState('');
   const [page, setPage] = useState(1);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
 
   useEffect(() => {
     const editId = searchParams.get('edit');
@@ -138,6 +140,14 @@ function ProductsPageInner() {
     enabled: Boolean(tenantId),
   });
 
+  const { data: catalogTotal = 0 } = useQuery({
+    queryKey: ['products', tenantId, 'catalog-total'],
+    queryFn: () => fetchProducts({ page: 1, limit: 1 }),
+    enabled: Boolean(tenantId),
+    select: (result) => result.pagination.total,
+    staleTime: 30_000,
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteProduct(id),
     onMutate: async (id) => {
@@ -188,6 +198,63 @@ function ProductsPageInner() {
     },
   });
 
+  const deleteAllMutation = useMutation({
+    mutationFn: () => deleteAllProducts(),
+    onMutate: async () => {
+      if (!tenantId) return { previous: [] as [readonly unknown[], unknown][] };
+      await queryClient.cancelQueries({ queryKey: ['products', tenantId] });
+      const previous = queryClient.getQueriesData<{
+        products: Product[];
+        pagination: { total: number; totalPages: number; page: number; limit: number };
+      }>({
+        queryKey: ['products', tenantId],
+      });
+      previous.forEach(([key, cached]) => {
+        if (!cached?.products) return;
+        queryClient.setQueryData(key, {
+          ...cached,
+          products: [],
+          pagination: {
+            ...cached.pagination,
+            total: 0,
+            totalPages: 0,
+            page: 1,
+          },
+        });
+      });
+      setDeleteAllOpen(false);
+      setSearchInput('');
+      setTagFilter('');
+      setPage(1);
+      return { previous };
+    },
+    onError: (err, _vars, ctx) => {
+      ctx?.previous.forEach(([key, data]) => {
+        if (data !== undefined) queryClient.setQueryData(key, data);
+      });
+      const msg =
+        err instanceof AxiosError && err.response?.data?.message
+          ? String(err.response.data.message)
+          : 'Could not delete products';
+      toast.error(msg);
+    },
+    onSuccess: (result) => {
+      if (result.deletedCount === 0) {
+        toast.info('No products to delete');
+      } else {
+        toast.success(
+          `${result.deletedCount} product${result.deletedCount === 1 ? '' : 's'} removed`,
+        );
+      }
+    },
+    onSettled: () => {
+      if (tenantId) {
+        queryClient.invalidateQueries({ queryKey: ['products', tenantId] });
+        queryClient.invalidateQueries({ queryKey: ['product-tags', tenantId] });
+      }
+    },
+  });
+
   const products = data?.products ?? [];
   const pagination = data?.pagination;
 
@@ -213,21 +280,33 @@ function ProductsPageInner() {
             Manage your catalog - search, filter by tag, or import from files.
           </p>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button className="gap-1 self-start sm:self-auto">
-                New product
-                <ChevronDown className="size-4 opacity-70" />
-              </Button>
-            }
-          />
-          <DropdownMenuContent align="end" className="min-w-48">
-            <DropdownMenuItem onClick={openManualCreate}>Create manually</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openUpload('document')}>Upload document</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openUpload('image')}>Upload image</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-1.5 border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            disabled={catalogTotal === 0 || deleteAllMutation.isPending}
+            onClick={() => setDeleteAllOpen(true)}
+          >
+            <Trash2 className="size-4" />
+            Delete all products
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button className="gap-1">
+                  New product
+                  <ChevronDown className="size-4 opacity-70" />
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end" className="min-w-48">
+              <DropdownMenuItem onClick={openManualCreate}>Create manually</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openUpload('document')}>Upload document</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openUpload('image')}>Upload image</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -366,6 +445,35 @@ function ProductsPageInner() {
               disabled={deleteMutation.isPending}
             >
               {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={deleteAllOpen} onOpenChange={(o) => !deleteAllMutation.isPending && setDeleteAllOpen(o)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete all products?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {catalogTotal === 0 ? (
+                'Your catalog is already empty.'
+              ) : (
+                <>
+                  This removes all {catalogTotal} product{catalogTotal === 1 ? '' : 's'} from your catalog,
+                  including any not shown by the current search or tag filters. Products are soft-deleted and can be
+                  restored from the database if needed.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteAllMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive/10 text-destructive hover:bg-destructive/20"
+              onClick={() => deleteAllMutation.mutate()}
+              disabled={deleteAllMutation.isPending || catalogTotal === 0}
+            >
+              {deleteAllMutation.isPending ? 'Deleting...' : 'Delete all'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

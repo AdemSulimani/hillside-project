@@ -197,6 +197,19 @@ export async function softDeleteProduct(
   return (rowCount ?? 0) > 0;
 }
 
+export async function softDeleteAllProducts(
+  tenantId: string,
+): Promise<{ deletedCount: number; imageUrls: string[] }> {
+  const { rows, rowCount } = await pool.query<{ image_urls: string[] }>(
+    `UPDATE products SET deleted_at = now(), updated_at = now()
+     WHERE tenant_id = $1 AND deleted_at IS NULL
+     RETURNING image_urls`,
+    [tenantId],
+  );
+  const imageUrls = rows.flatMap((row) => row.image_urls ?? []);
+  return { deletedCount: rowCount ?? 0, imageUrls };
+}
+
 /** Case-insensitive match: exact name first, then first ILIKE substring match (shortest name wins). */
 export async function findProductByNameCaseInsensitive(
   tenantId: string,
