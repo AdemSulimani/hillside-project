@@ -1,16 +1,31 @@
 import pool from '../db/pool';
 import { findTenantById } from '../db/models/tenant';
 import type { CommissionStatus } from '../db/models/order';
+import type { AiUseCaseBillingStatus } from '../db/models/aiUseCase';
 
 /** Confirmed-or-beyond lifecycle: commission counts only after confirmation. */
 const AI_ORDER_STATUSES_SQL = "('confirmed', 'processing', 'shipped', 'delivered')";
 
 export interface AdminDashboardSummary {
   total_businesses: number;
+  /**
+   * Count of ALL commissionable orders (is_commissionable = true), regardless of
+   * fulfillment status. Matches the same scope used by the commission amount sums.
+   */
   total_ai_completed_orders: number;
   total_commission_earned: number;
   total_unpaid_commission: number;
   total_paid_commission: number;
+  total_ai_completed_use_cases: number;
+  /**
+   * Completed use cases with billing_status = 'unbilled'.
+   * fee_amount is NULL until the month-end billing job stamps it.
+   */
+  total_unbilled_use_cases: number;
+  /** Sum of fee_amount for completed use cases that have been billed or paid (fee calculated). */
+  total_use_case_fees_earned: number;
+  /** Sum of fee_amount for completed use cases that are billed but not yet paid. */
+  total_unpaid_use_case_fees: number;
 }
 
 export async function getAdminDashboardSummary(): Promise<AdminDashboardSummary> {
@@ -20,18 +35,35 @@ export async function getAdminDashboardSummary(): Promise<AdminDashboardSummary>
     total_commission_earned: string;
     total_unpaid_commission: string;
     total_paid_commission: string;
+    total_ai_completed_use_cases: string;
+    total_unbilled_use_cases: string;
+    total_use_case_fees_earned: string;
+    total_unpaid_use_case_fees: string;
   }>(
     `SELECT
        (SELECT COUNT(*)::text FROM tenants) AS total_businesses,
+       -- Count ALL commissionable orders so the count is in sync with the commission sums below.
+       -- Draft / cancelled / refunded commissionable orders are intentionally included.
        (SELECT COUNT(*)::text FROM orders o
-         WHERE o.is_commissionable = true
-           AND o.status IN ${AI_ORDER_STATUSES_SQL}) AS total_ai_completed_orders,
+         WHERE o.is_commissionable = true) AS total_ai_completed_orders,
        (SELECT COALESCE(SUM(o.commission_amount), 0)::text FROM orders o
          WHERE o.is_commissionable = true) AS total_commission_earned,
        (SELECT COALESCE(SUM(o.commission_amount), 0)::text FROM orders o
          WHERE o.is_commissionable = true AND o.commission_status = 'unpaid') AS total_unpaid_commission,
        (SELECT COALESCE(SUM(o.commission_amount), 0)::text FROM orders o
-         WHERE o.is_commissionable = true AND o.commission_status = 'paid') AS total_paid_commission`,
+         WHERE o.is_commissionable = true AND o.commission_status = 'paid') AS total_paid_commission,
+       (SELECT COUNT(*)::text FROM ai_use_cases
+         WHERE status = 'completed') AS total_ai_completed_use_cases,
+       -- Unbilled use cases haven't had fee_amount stamped yet (billing job not run).
+       (SELECT COUNT(*)::text FROM ai_use_cases
+         WHERE status = 'completed'
+           AND billing_status = 'unbilled') AS total_unbilled_use_cases,
+       (SELECT COALESCE(SUM(fee_amount), 0)::text FROM ai_use_cases
+         WHERE status = 'completed'
+           AND billing_status IN ('billed', 'paid')) AS total_use_case_fees_earned,
+       (SELECT COALESCE(SUM(fee_amount), 0)::text FROM ai_use_cases
+         WHERE status = 'completed'
+           AND billing_status = 'billed') AS total_unpaid_use_case_fees`,
   );
   const r = rows[0];
   return {
@@ -40,6 +72,10 @@ export async function getAdminDashboardSummary(): Promise<AdminDashboardSummary>
     total_commission_earned: parseFloat(r.total_commission_earned),
     total_unpaid_commission: parseFloat(r.total_unpaid_commission),
     total_paid_commission: parseFloat(r.total_paid_commission),
+    total_ai_completed_use_cases: parseInt(r.total_ai_completed_use_cases, 10),
+    total_unbilled_use_cases: parseInt(r.total_unbilled_use_cases, 10),
+    total_use_case_fees_earned: parseFloat(r.total_use_case_fees_earned),
+    total_unpaid_use_case_fees: parseFloat(r.total_unpaid_use_case_fees),
   };
 }
 
@@ -51,6 +87,10 @@ export interface AdminBusinessRow {
   total_ai_completed_orders: number;
   total_commission_owed: number;
   aggregate_commission_status: CommissionStatus | 'clear';
+  total_use_cases: number;
+  /** Sum of fee_amount for billed (invoiced, unpaid) completed use cases. */
+  total_use_case_fees_owed: number;
+  aggregate_use_case_billing_status: AiUseCaseBillingStatus | 'clear';
 }
 
 export async function listAdminBusinessesPage(
@@ -74,14 +114,20 @@ export async function listAdminBusinessesPage(
     unpaid_cnt: string;
     billed_cnt: string;
     paid_cnt: string;
+    total_use_cases: string;
+    total_use_case_fees_owed: string;
+    uc_unbilled_cnt: string;
+    uc_billed_cnt: string;
+    uc_paid_cnt: string;
   }>(
     `SELECT
        t.id AS tenant_id,
        t.name AS business_name,
        t.plan,
        COUNT(o.id)::text AS total_orders,
+       -- Count ALL commissionable orders to keep in sync with the commission amount sums.
        COUNT(o.id) FILTER (
-         WHERE o.is_commissionable = true AND o.status IN ${AI_ORDER_STATUSES_SQL}
+         WHERE o.is_commissionable = true
        )::text AS total_ai_completed_orders,
        COALESCE(
          SUM(o.commission_amount) FILTER (
@@ -97,10 +143,27 @@ export async function listAdminBusinessesPage(
        )::text AS billed_cnt,
        COUNT(o.id) FILTER (
          WHERE o.is_commissionable = true AND o.commission_status = 'paid'
-       )::text AS paid_cnt
+       )::text AS paid_cnt,
+       uc.total_use_cases,
+       uc.total_use_case_fees_owed,
+       uc.uc_unbilled_cnt,
+       uc.uc_billed_cnt,
+       uc.uc_paid_cnt
      FROM tenants t
      LEFT JOIN orders o ON o.tenant_id = t.id
-     GROUP BY t.id
+     CROSS JOIN LATERAL (
+       SELECT
+         COUNT(*)::text AS total_use_cases,
+         COALESCE(SUM(fee_amount) FILTER (WHERE billing_status = 'billed'), 0)::text AS total_use_case_fees_owed,
+         COUNT(*) FILTER (WHERE billing_status = 'unbilled')::text AS uc_unbilled_cnt,
+         COUNT(*) FILTER (WHERE billing_status = 'billed')::text AS uc_billed_cnt,
+         COUNT(*) FILTER (WHERE billing_status = 'paid')::text AS uc_paid_cnt
+       FROM ai_use_cases
+       WHERE tenant_id = t.id AND status = 'completed'
+     ) uc
+     GROUP BY t.id, t.name, t.plan,
+              uc.total_use_cases, uc.total_use_case_fees_owed,
+              uc.uc_unbilled_cnt, uc.uc_billed_cnt, uc.uc_paid_cnt
      ORDER BY t.name ASC
      LIMIT $1 OFFSET $2`,
     [limit, offset],
@@ -115,6 +178,14 @@ export async function listAdminBusinessesPage(
     else if (billed > 0) aggregate_commission_status = 'billed';
     else if (paid > 0) aggregate_commission_status = 'paid';
 
+    const ucUnbilled = parseInt(r.uc_unbilled_cnt, 10);
+    const ucBilled = parseInt(r.uc_billed_cnt, 10);
+    const ucPaid = parseInt(r.uc_paid_cnt, 10);
+    let aggregate_use_case_billing_status: AiUseCaseBillingStatus | 'clear' = 'clear';
+    if (ucUnbilled > 0) aggregate_use_case_billing_status = 'unbilled';
+    else if (ucBilled > 0) aggregate_use_case_billing_status = 'billed';
+    else if (ucPaid > 0) aggregate_use_case_billing_status = 'paid';
+
     return {
       tenant_id: r.tenant_id,
       business_name: r.business_name,
@@ -123,6 +194,9 @@ export async function listAdminBusinessesPage(
       total_ai_completed_orders: parseInt(r.total_ai_completed_orders, 10),
       total_commission_owed: parseFloat(r.total_commission_owed),
       aggregate_commission_status,
+      total_use_cases: parseInt(r.total_use_cases, 10),
+      total_use_case_fees_owed: parseFloat(r.total_use_case_fees_owed),
+      aggregate_use_case_billing_status,
     };
   });
 
@@ -261,11 +335,13 @@ export async function getTenantCommissionSummary(
 export interface CommissionMonthPoint {
   month_key: string;
   commission: number;
+  use_case_fees: number;
 }
 
 /**
  * Commission earned per calendar month (UTC), based on order creation time,
  * for commissionable orders that reached confirmed-or-beyond status.
+ * Also includes AI use case fees (billed + paid) resolved in the same month.
  */
 export async function getCommissionEarnedByMonthUtc(
   monthsBack = 12,
@@ -275,25 +351,44 @@ export async function getCommissionEarnedByMonthUtc(
   const m = now.getUTCMonth();
   const rangeStart = new Date(Date.UTC(y, m - (monthsBack - 1), 1, 0, 0, 0, 0));
 
-  const { rows } = await pool.query<{ month_key: string; commission: string }>(
-    `SELECT
-       to_char(date_trunc('month', o.created_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month_key,
-       COALESCE(SUM(o.commission_amount), 0)::text AS commission
-     FROM orders o
-     WHERE o.is_commissionable = true
-       AND o.created_at >= $1::timestamptz
-     GROUP BY 1
-     ORDER BY 1 ASC`,
-    [rangeStart],
-  );
+  const [orderRows, useCaseRows] = await Promise.all([
+    pool.query<{ month_key: string; commission: string }>(
+      `SELECT
+         to_char(date_trunc('month', o.created_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month_key,
+         COALESCE(SUM(o.commission_amount), 0)::text AS commission
+       FROM orders o
+       WHERE o.is_commissionable = true
+         AND o.created_at >= $1::timestamptz
+       GROUP BY 1
+       ORDER BY 1 ASC`,
+      [rangeStart],
+    ),
+    pool.query<{ month_key: string; use_case_fees: string }>(
+      `SELECT
+         to_char(date_trunc('month', uc.resolved_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month_key,
+         COALESCE(SUM(uc.fee_amount), 0)::text AS use_case_fees
+       FROM ai_use_cases uc
+       WHERE uc.status = 'completed'
+         AND uc.billing_status IN ('billed', 'paid')
+         AND uc.resolved_at >= $1::timestamptz
+       GROUP BY 1
+       ORDER BY 1 ASC`,
+      [rangeStart],
+    ),
+  ]);
 
-  const byKey = new Map(rows.map((r) => [r.month_key, parseFloat(r.commission)]));
+  const commissionByKey = new Map(orderRows.rows.map((r) => [r.month_key, parseFloat(r.commission)]));
+  const ucFeesByKey = new Map(useCaseRows.rows.map((r) => [r.month_key, parseFloat(r.use_case_fees)]));
 
   const out: CommissionMonthPoint[] = [];
   for (let i = monthsBack - 1; i >= 0; i--) {
     const d = new Date(Date.UTC(y, m - i, 1));
     const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-    out.push({ month_key: key, commission: byKey.get(key) ?? 0 });
+    out.push({
+      month_key: key,
+      commission: commissionByKey.get(key) ?? 0,
+      use_case_fees: ucFeesByKey.get(key) ?? 0,
+    });
   }
   return out;
 }
@@ -317,23 +412,18 @@ export async function getTenantCommissionPeriodStats(
     commission_paid: string;
   }>(
     `SELECT
-       COUNT(*) FILTER (WHERE status IN ${AI_ORDER_STATUSES_SQL})::text AS commissionable_ai_orders,
+       -- Count ALL commissionable orders in the period (consistent with the businesses list aggregate).
+       COUNT(*)::text AS commissionable_ai_orders,
        COALESCE(
-         SUM(commission_amount) FILTER (
-           WHERE status IN ${AI_ORDER_STATUSES_SQL} AND commission_status = 'unpaid'
-         ),
+         SUM(commission_amount) FILTER (WHERE commission_status = 'unpaid'),
          0
        )::text AS commission_unpaid,
        COALESCE(
-         SUM(commission_amount) FILTER (
-           WHERE status IN ${AI_ORDER_STATUSES_SQL} AND commission_status = 'billed'
-         ),
+         SUM(commission_amount) FILTER (WHERE commission_status = 'billed'),
          0
        )::text AS commission_billed,
        COALESCE(
-         SUM(commission_amount) FILTER (
-           WHERE status IN ${AI_ORDER_STATUSES_SQL} AND commission_status = 'paid'
-         ),
+         SUM(commission_amount) FILTER (WHERE commission_status = 'paid'),
          0
        )::text AS commission_paid
      FROM orders
@@ -378,6 +468,71 @@ export async function aggregateReportForTenantInPeriod(
     total_orders: parseInt(r.total_orders, 10),
     total_revenue: parseFloat(r.total_revenue),
     commission_amount: parseFloat(r.commission_amount),
+  };
+}
+
+export interface TenantUseCasePeriodStats {
+  completed_use_cases: number;
+  /** Cases with billing_status = 'unbilled' (fee not yet calculated/invoiced). */
+  use_case_unbilled: number;
+  /** Cases with billing_status = 'billed' (invoiced but unpaid). */
+  use_case_billed: number;
+  /** Cases with billing_status = 'paid'. */
+  use_case_paid: number;
+  /** Sum of fee_amount for unbilled cases (usually 0 until billing period job runs). */
+  use_case_fees_unbilled: number;
+  /** Sum of fee_amount for billed (invoiced, unpaid) cases. */
+  use_case_fees_billed: number;
+  /** Sum of fee_amount for paid cases. */
+  use_case_fees_paid: number;
+}
+
+export async function getTenantUseCasePeriodStats(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+): Promise<TenantUseCasePeriodStats> {
+  const { rows } = await pool.query<{
+    completed_use_cases: string;
+    use_case_unbilled: string;
+    use_case_billed: string;
+    use_case_paid: string;
+    use_case_fees_unbilled: string;
+    use_case_fees_billed: string;
+    use_case_fees_paid: string;
+  }>(
+    `SELECT
+       COUNT(*) FILTER (WHERE status = 'completed')::text AS completed_use_cases,
+       COUNT(*) FILTER (WHERE status = 'completed' AND billing_status = 'unbilled')::text AS use_case_unbilled,
+       COUNT(*) FILTER (WHERE status = 'completed' AND billing_status = 'billed')::text AS use_case_billed,
+       COUNT(*) FILTER (WHERE status = 'completed' AND billing_status = 'paid')::text AS use_case_paid,
+       COALESCE(
+         SUM(fee_amount) FILTER (WHERE status = 'completed' AND billing_status = 'unbilled'),
+         0
+       )::text AS use_case_fees_unbilled,
+       COALESCE(
+         SUM(fee_amount) FILTER (WHERE status = 'completed' AND billing_status = 'billed'),
+         0
+       )::text AS use_case_fees_billed,
+       COALESCE(
+         SUM(fee_amount) FILTER (WHERE status = 'completed' AND billing_status = 'paid'),
+         0
+       )::text AS use_case_fees_paid
+     FROM ai_use_cases
+     WHERE tenant_id = $1
+       AND resolved_at >= $2::timestamptz
+       AND resolved_at < $3::timestamptz`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  const r = rows[0];
+  return {
+    completed_use_cases: parseInt(r.completed_use_cases, 10),
+    use_case_unbilled: parseInt(r.use_case_unbilled, 10),
+    use_case_billed: parseInt(r.use_case_billed, 10),
+    use_case_paid: parseInt(r.use_case_paid, 10),
+    use_case_fees_unbilled: parseFloat(r.use_case_fees_unbilled),
+    use_case_fees_billed: parseFloat(r.use_case_fees_billed),
+    use_case_fees_paid: parseFloat(r.use_case_fees_paid),
   };
 }
 

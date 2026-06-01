@@ -114,10 +114,22 @@ ownerRoutes.patch(
 );
 
 ownerRoutes.get(
+  '/businesses/:tenantId/use-case-period-stats',
+  validateParams(adminTenantIdParamsSchema),
+  validateQuery(adminPeriodQueryRequiredSchema),
+  adminCommissionController.businessUseCasePeriodStats,
+);
+ownerRoutes.get(
   '/businesses/:tenantId/use-cases',
   validateParams(adminTenantIdParamsSchema),
   validateQuery(adminBusinessListQuerySchema),
   adminCommissionController.listBusinessUseCases,
+);
+ownerRoutes.post(
+  '/businesses/:tenantId/use-cases/stamp-fees',
+  validateParams(adminTenantIdParamsSchema),
+  validateBody(adminMarkUseCasePeriodBodySchema),
+  adminCommissionController.stampUseCaseFees,
 );
 ownerRoutes.post(
   '/businesses/:tenantId/use-cases/mark-billed',

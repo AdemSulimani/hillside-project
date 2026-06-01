@@ -186,6 +186,31 @@ export async function findUnbilledUseCaseIdsForTenantInPeriod(
 }
 
 /**
+ * Locks and returns ALL completed use case IDs for a tenant resolved within a date range,
+ * regardless of billing_status or whether fee_amount is already set.
+ * Used by the admin manual fee-stamp action to allow recalculation.
+ */
+export async function findAllCompletedUseCaseIdsForTenantInPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  client: PoolClient,
+): Promise<string[]> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id
+     FROM ai_use_cases
+     WHERE tenant_id = $1
+       AND status = 'completed'
+       AND resolved_at >= $2
+       AND resolved_at < $3
+     ORDER BY resolved_at ASC
+     FOR UPDATE`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
  * Stamps a billing period and per-case fee on a batch of use case rows within a transaction.
  */
 export async function stampBillingPeriodOnUseCases(
