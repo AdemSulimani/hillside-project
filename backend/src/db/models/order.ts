@@ -648,8 +648,9 @@ export async function markOrdersCommissionBilledInPeriod(
   tenantId: string,
   rangeStartInclusive: Date,
   rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
 ): Promise<number> {
-  const result = await pool.query(
+  const result = await client.query(
     `UPDATE orders
      SET commission_status = 'billed', updated_at = now()
      WHERE tenant_id = $1
@@ -667,13 +668,34 @@ export async function markOrdersCommissionPaidInPeriod(
   tenantId: string,
   rangeStartInclusive: Date,
   rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
 ): Promise<number> {
-  const result = await pool.query(
+  const result = await client.query(
     `UPDATE orders
      SET commission_status = 'paid', updated_at = now()
      WHERE tenant_id = $1
        AND is_commissionable = true
-       AND commission_status = 'billed'
+       AND commission_status IN ('unpaid', 'billed')
+       AND status IN ${COMMISSIONABLE_ORDER_STATUSES_SQL}
+       AND created_at >= $2::timestamptz
+       AND created_at < $3::timestamptz`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
+}
+
+export async function markOrdersCommissionUnpaidInPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
+): Promise<number> {
+  const result = await client.query(
+    `UPDATE orders
+     SET commission_status = 'unpaid', updated_at = now()
+     WHERE tenant_id = $1
+       AND is_commissionable = true
+       AND commission_status IN ('billed', 'paid')
        AND status IN ${COMMISSIONABLE_ORDER_STATUSES_SQL}
        AND created_at >= $2::timestamptz
        AND created_at < $3::timestamptz`,

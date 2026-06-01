@@ -6,7 +6,7 @@ import {
   getDailyUseCaseVolumeForTenant,
   getBillingHistoryForTenant,
 } from '../services/creditsService';
-import { getTierStatusForTenant } from '../services/aiUseCaseService';
+import { getTierStatusForTenant, ensureStampedFeesForInvoicedUseCasesForTenant } from '../services/aiUseCaseService';
 import { listAiUseCasesForTenant } from '../db/models/aiUseCase';
 import { listAiOrdersForTenant } from '../db/models/order';
 
@@ -31,6 +31,8 @@ export async function useCases(req: Request, res: Response): Promise<void> {
     const tenantId = req.user!.tenantId!;
     const { page, limit } = parsePaginationQuery(req.query as Record<string, unknown>);
     const period = typeof req.query.period === 'string' ? req.query.period : null;
+
+    await ensureStampedFeesForInvoicedUseCasesForTenant(tenantId);
 
     const { rows, total } = await listAiUseCasesForTenant(tenantId, page, limit, period);
     sendPaginated(res, rows, page, limit, total, 'AI use cases retrieved successfully');

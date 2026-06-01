@@ -251,6 +251,94 @@ export async function markUseCasesBilledInPeriod(
 }
 
 /**
+ * Marks completed use cases resolved within a date range as billed.
+ */
+export async function markUseCasesBilledInResolvedPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
+): Promise<number> {
+  const result = await client.query(
+    `UPDATE ai_use_cases
+     SET billing_status = 'billed', updated_at = now()
+     WHERE tenant_id = $1
+       AND status = 'completed'
+       AND billing_status = 'unbilled'
+       AND resolved_at >= $2
+       AND resolved_at < $3`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Marks completed use cases resolved within a date range as paid.
+ */
+export async function markUseCasesPaidInResolvedPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
+): Promise<number> {
+  const result = await client.query(
+    `UPDATE ai_use_cases
+     SET billing_status = 'paid', updated_at = now()
+     WHERE tenant_id = $1
+       AND status = 'completed'
+       AND billing_status IN ('unbilled', 'billed')
+       AND resolved_at >= $2
+       AND resolved_at < $3`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Reverts completed use cases resolved within a date range to unbilled.
+ */
+export async function markUseCasesUnbilledInResolvedPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
+): Promise<number> {
+  const result = await client.query(
+    `UPDATE ai_use_cases
+     SET billing_status = 'unbilled', updated_at = now()
+     WHERE tenant_id = $1
+       AND status = 'completed'
+       AND billing_status IN ('billed', 'paid')
+       AND resolved_at >= $2
+       AND resolved_at < $3`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Returns distinct UTC billing month keys (YYYY-MM) for completed use cases in a date range.
+ */
+export async function listBillingMonthsForUseCasesInPeriod(
+  tenantId: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  client: PoolClient | typeof pool = pool,
+): Promise<string[]> {
+  const { rows } = await client.query<{ billing_month: string }>(
+    `SELECT DISTINCT to_char(date_trunc('month', resolved_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS billing_month
+     FROM ai_use_cases
+     WHERE tenant_id = $1
+       AND status = 'completed'
+       AND resolved_at >= $2
+       AND resolved_at < $3
+     ORDER BY billing_month`,
+    [tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return rows.map((r) => r.billing_month);
+}
+
+/**
  * Marks a batch of use case rows as paid within a transaction.
  */
 export async function markUseCasesPaidInPeriod(
@@ -271,13 +359,55 @@ export async function markUseCasesPaidInPeriod(
 }
 
 /**
+ * Returns a use case by primary key, or null if not found.
+ */
+export async function findAiUseCaseById(
+  id: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<AiUseCase | null> {
+  const { rows } = await client.query<AiUseCaseRow>(
+    'SELECT * FROM ai_use_cases WHERE id = $1 LIMIT 1',
+    [id],
+  );
+  return rows[0] ? rowToUseCase(rows[0]) : null;
+}
+
+/**
+ * Stamps billing_period and fee_amount on completed use cases in a calendar month
+ * that do not yet have a fee (fee_amount IS NULL).
+ */
+export async function stampMissingFeesForTenantInBillingMonth(
+  tenantId: string,
+  billingPeriod: string,
+  rangeStartInclusive: Date,
+  rangeEndExclusive: Date,
+  feePerCase: number,
+  client: PoolClient | typeof pool = pool,
+): Promise<number> {
+  const result = await client.query(
+    `UPDATE ai_use_cases
+     SET billing_period = $1,
+         fee_amount = $2,
+         updated_at = now()
+     WHERE tenant_id = $3
+       AND status = 'completed'
+       AND fee_amount IS NULL
+       AND resolved_at >= $4
+       AND resolved_at < $5`,
+    [billingPeriod, feePerCase, tenantId, rangeStartInclusive, rangeEndExclusive],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
  * Updates the billing_status of a single use case row (admin override).
  */
 export async function updateAiUseCaseBillingStatus(
   id: string,
   billingStatus: AiUseCaseBillingStatus,
+  client: PoolClient | typeof pool = pool,
 ): Promise<AiUseCase | null> {
-  const { rows } = await pool.query<AiUseCaseRow>(
+  const { rows } = await client.query<AiUseCaseRow>(
     `UPDATE ai_use_cases
      SET billing_status = $2, updated_at = now()
      WHERE id = $1

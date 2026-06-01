@@ -14,9 +14,6 @@ import {
   patchAdminOrderCommissionStatus,
   patchAdminUseCaseBillingStatus,
   postAdminVoidUseCase,
-  postAdminStampUseCaseFees,
-  postAdminMarkUseCasesBilled,
-  postAdminMarkUseCasesPaid,
   postAdminGenerateReport,
   postAdminBackfillProductEmbeddings,
   type AdminUseCaseRow,
@@ -30,6 +27,7 @@ import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { formatCurrency } from '@/lib/formatCurrency';
+import { buildCompletedCountsByMonth, getUseCaseDisplayFee } from '@/lib/useCaseFees';
 import { cn } from '@/lib/utils';
 
 const ORDERS_PAGE_SIZE = 20;
@@ -55,9 +53,15 @@ function defaultPeriod(): { start: string; end: string } {
   return { start: toYmdLocal(start), end: toYmdLocal(now) };
 }
 
-/** YYYY-MM from a date string — used for billing_period bulk actions. */
-function toBillingPeriod(ymd: string): string {
-  return ymd.slice(0, 7);
+async function fetchAllAdminUseCases(tenantId: string): Promise<AdminUseCaseRow[]> {
+  const limit = 100;
+  const first = await fetchAdminBusinessUseCases(tenantId, 1, limit);
+  const rows = [...first.rows];
+  for (let page = 2; page <= first.pagination.totalPages; page++) {
+    const next = await fetchAdminBusinessUseCases(tenantId, page, limit);
+    rows.push(...next.rows);
+  }
+  return rows;
 }
 
 export default function AdminBusinessDetailPage() {
@@ -104,6 +108,12 @@ export default function AdminBusinessDetailPage() {
   const useCasesQuery = useQuery({
     queryKey: ['admin', 'business', tenantId, 'use-cases', useCasesPage],
     queryFn: () => fetchAdminBusinessUseCases(tenantId!, useCasesPage, USE_CASES_PAGE_SIZE),
+    enabled: Boolean(tenantId),
+  });
+
+  const useCasesFeeLookupQuery = useQuery({
+    queryKey: ['admin', 'business', tenantId, 'use-cases-fee-lookup'],
+    queryFn: () => fetchAllAdminUseCases(tenantId!),
     enabled: Boolean(tenantId),
   });
 
@@ -155,48 +165,6 @@ export default function AdminBusinessDetailPage() {
     },
   });
 
-  const stampFeesMutation = useMutation({
-    mutationFn: () =>
-      postAdminStampUseCaseFees(tenantId!, { billing_period: toBillingPeriod(periodStart) }),
-    onSuccess: (result) => {
-      invalidateBusiness();
-      if (result.stamped_count === 0) {
-        toast.info('No completed use cases found for that billing period.');
-      } else {
-        toast.success(
-          `Fees stamped for ${result.stamped_count} use case(s) — ${result.stamped_count} × $${result.fee_per_case.toFixed(2)} = $${result.total_fee.toFixed(2)} total`,
-        );
-      }
-    },
-    onError: (e) => {
-      toast.error(e instanceof AxiosError ? (e.response?.data?.message as string) ?? 'Request failed' : 'Request failed');
-    },
-  });
-
-  const markUseCasesBilledMutation = useMutation({
-    mutationFn: () =>
-      postAdminMarkUseCasesBilled(tenantId!, { billing_period: toBillingPeriod(periodStart) }),
-    onSuccess: (count) => {
-      invalidateBusiness();
-      toast.success(`${count} use case(s) marked as billed`);
-    },
-    onError: (e) => {
-      toast.error(e instanceof AxiosError ? (e.response?.data?.message as string) ?? 'Request failed' : 'Request failed');
-    },
-  });
-
-  const markUseCasesPaidMutation = useMutation({
-    mutationFn: () =>
-      postAdminMarkUseCasesPaid(tenantId!, { billing_period: toBillingPeriod(periodStart) }),
-    onSuccess: (count) => {
-      invalidateBusiness();
-      toast.success(`${count} use case(s) marked as paid`);
-    },
-    onError: (e) => {
-      toast.error(e instanceof AxiosError ? (e.response?.data?.message as string) ?? 'Request failed' : 'Request failed');
-    },
-  });
-
   const generateReportMutation = useMutation({
     mutationFn: () => postAdminGenerateReport(tenantId!, { period_start: periodStart, period_end: periodEnd }),
     onSuccess: () => {
@@ -231,11 +199,10 @@ export default function AdminBusinessDetailPage() {
   const useCases = useCasesQuery.data?.rows ?? [];
   const useCasesPagination = useCasesQuery.data?.pagination;
 
-  const billingPeriodLabel = toBillingPeriod(periodStart);
-  const isBulkBusy =
-    stampFeesMutation.isPending ||
-    markUseCasesBilledMutation.isPending ||
-    markUseCasesPaidMutation.isPending;
+  const useCaseCountsByMonth = useMemo(
+    () => buildCompletedCountsByMonth(useCasesFeeLookupQuery.data ?? []),
+    [useCasesFeeLookupQuery.data],
+  );
 
   return (
     <div className="space-y-6">
@@ -315,12 +282,10 @@ export default function AdminBusinessDetailPage() {
             {/* ── Period & date range selector ─────────────────────────────── */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Period & report</CardTitle>
+                <CardTitle className="text-base">Date range & report</CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Select a date range to filter the stats and orders below. Bulk use case actions
-                  operate on the <span className="font-medium text-foreground">billing period</span>{' '}
-                  derived from the &quot;From&quot; date (e.g. <code className="text-xs">{billingPeriodLabel}</code>).
-                  Use <span className="font-medium text-foreground">Generate report</span> to save a
+                  Filter commission stats and orders below. Use{' '}
+                  <span className="font-medium text-foreground">Generate report</span> to save a
                   billing snapshot for invoicing.
                 </p>
               </CardHeader>
@@ -538,13 +503,19 @@ export default function AdminBusinessDetailPage() {
 
             {/* ── AI use case fees ─────────────────────────────────────────── */}
             <section className="space-y-4">
-              <h2 className="text-base font-semibold">AI use case fees (progressive tiers)</h2>
+              <div>
+                <h2 className="text-base font-semibold">AI conversation fees</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Per-conversation fees use progressive tiers (€0.50 down to €0.20 per case based on
+                  monthly volume). Stats below reflect the selected date range.
+                </p>
+              </div>
 
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-3">
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm font-medium text-muted-foreground">
-                      Completed use cases (period)
+                      Completed conversations
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
@@ -555,25 +526,16 @@ export default function AdminBusinessDetailPage() {
                     )}
                   </CardContent>
                 </Card>
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-muted-foreground">
-                      Unbilled (period)
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {useCaseStatsQuery.isLoading ? (
-                      <Loader2 className="size-5 animate-spin text-muted-foreground" />
-                    ) : (
-                      <p className="text-2xl font-bold tabular-nums">{ucStats?.use_case_unbilled ?? '—'}</p>
-                    )}
-                  </CardContent>
-                </Card>
                 <Card className="border-amber-500/30 bg-amber-500/5">
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm font-medium text-amber-900 dark:text-amber-200">
-                      Fees billed, unpaid (period)
+                      Invoiced, unpaid
                     </CardTitle>
+                    {(ucStats?.use_case_unbilled ?? 0) > 0 ? (
+                      <p className="text-xs text-amber-800/80 dark:text-amber-300/80">
+                        {ucStats?.use_case_unbilled} conversation{(ucStats?.use_case_unbilled ?? 0) === 1 ? '' : 's'} not yet invoiced
+                      </p>
+                    ) : null}
                   </CardHeader>
                   <CardContent>
                     {useCaseStatsQuery.isLoading ? (
@@ -588,7 +550,7 @@ export default function AdminBusinessDetailPage() {
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-sm font-medium text-muted-foreground">
-                      Fees paid (period)
+                      Fees paid
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
@@ -601,76 +563,21 @@ export default function AdminBusinessDetailPage() {
                 </Card>
               </div>
 
-              {/* Bulk billing period actions */}
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Bulk billing period actions</CardTitle>
+                  <CardTitle className="text-base">Conversation log</CardTitle>
                   <p className="text-sm text-muted-foreground">
-                    Actions apply to billing period{' '}
-                    <span className="font-medium text-foreground">{billingPeriodLabel}</span> (from
-                    the &quot;From&quot; date). Run in order: first <strong>Calculate fees</strong> to
-                    stamp amounts, then mark as billed for invoicing, then paid when settled.
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex flex-wrap gap-3">
-                    <Button
-                      type="button"
-                      variant="default"
-                      disabled={isBulkBusy || !periodValid}
-                      onClick={() => stampFeesMutation.mutate()}
-                    >
-                      {stampFeesMutation.isPending
-                        ? <Loader2 className="mr-2 size-4 animate-spin" />
-                        : null}
-                      1. Calculate fees ({billingPeriodLabel})
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={isBulkBusy || !periodValid}
-                      onClick={() => markUseCasesBilledMutation.mutate()}
-                    >
-                      {markUseCasesBilledMutation.isPending
-                        ? <Loader2 className="mr-2 size-4 animate-spin" />
-                        : null}
-                      2. Mark unbilled → billed ({billingPeriodLabel})
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={isBulkBusy || !periodValid}
-                      onClick={() => markUseCasesPaidMutation.mutate()}
-                    >
-                      {markUseCasesPaidMutation.isPending
-                        ? <Loader2 className="mr-2 size-4 animate-spin" />
-                        : null}
-                      3. Mark billed → paid ({billingPeriodLabel})
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* Use cases table (all, not period-filtered) */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">All use cases</CardTitle>
-                  <p className="text-sm text-muted-foreground">
-                    Every AI-completed conversation for this business. Fees are stamped by the
-                    month-end billing job. Use the dropdown to override a billing status, or void an
-                    unbilled case if it was recorded in error.
+                    AI-resolved conversations for this business. Update billing status per row, or
+                    void an unbilled conversation if it was recorded in error.
                   </p>
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[960px] text-sm">
+                    <table className="w-full min-w-[820px] text-sm">
                       <thead>
                         <tr className="border-b border-border bg-muted/40 text-left">
-                          <th className="px-4 py-3 font-medium">Use case ID</th>
                           <th className="px-4 py-3 font-medium">Contact</th>
                           <th className="px-4 py-3 font-medium">Resolved</th>
-                          <th className="px-4 py-3 font-medium">Status</th>
-                          <th className="px-4 py-3 font-medium">Billing period</th>
                           <th className="px-4 py-3 font-medium text-right">Fee</th>
                           <th className="px-4 py-3 font-medium">Billing status</th>
                           <th className="px-4 py-3 font-medium"> </th>
@@ -679,20 +586,21 @@ export default function AdminBusinessDetailPage() {
                       <tbody>
                         {useCasesQuery.isLoading ? (
                           <tr>
-                            <td className="px-4 py-8" colSpan={8}>
+                            <td className="px-4 py-8" colSpan={5}>
                               <Skeleton className="h-8 w-full" />
                             </td>
                           </tr>
                         ) : useCases.length === 0 ? (
                           <tr>
-                            <td className="px-4 py-8 text-center text-muted-foreground" colSpan={8}>
-                              No use cases recorded for this business.
+                            <td className="px-4 py-8 text-center text-muted-foreground" colSpan={5}>
+                              No AI conversations recorded for this business.
                             </td>
                           </tr>
                         ) : (
                           useCases.map((uc) => {
                             const isBusy = updatingUseCaseId === uc.id;
                             const isVoided = uc.status === 'voided';
+                            const displayFee = getUseCaseDisplayFee(uc, useCaseCountsByMonth);
                             return (
                               <tr
                                 key={uc.id}
@@ -701,25 +609,19 @@ export default function AdminBusinessDetailPage() {
                                   isVoided && 'opacity-50',
                                 )}
                               >
-                                <td className="px-4 py-3 font-mono text-xs">{uc.id}</td>
-                                <td className="px-4 py-3">{uc.contact_name}</td>
+                                <td className="px-4 py-3">
+                                  <p>{uc.contact_name}</p>
+                                  <p className="font-mono text-xs text-muted-foreground">{uc.id}</p>
+                                </td>
                                 <td className="px-4 py-3 text-muted-foreground">
                                   {new Date(uc.resolved_at).toLocaleString()}
                                 </td>
-                                <td className="px-4 py-3">
-                                  <Badge variant={isVoided ? 'outline' : 'secondary'}>
-                                    {uc.status}
-                                  </Badge>
-                                </td>
-                                <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                                  {uc.billing_period ?? '—'}
-                                </td>
                                 <td className="px-4 py-3 text-right tabular-nums font-medium">
-                                  {uc.fee_amount != null ? formatCurrency(uc.fee_amount) : '—'}
+                                  {displayFee != null ? formatCurrency(displayFee) : '—'}
                                 </td>
                                 <td className="px-4 py-3">
                                   {isVoided ? (
-                                    <span className="text-xs text-muted-foreground">voided</span>
+                                    <Badge variant="outline">Voided</Badge>
                                   ) : (
                                     <div className="flex items-center gap-2">
                                       <select

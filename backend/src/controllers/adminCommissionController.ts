@@ -6,17 +6,16 @@ import {
   listAllCommissionReportsPage,
   updateCommissionReportStatusById,
   deleteCommissionReportById,
+  findCommissionReportById,
+  findCommissionReportByTenantAndPeriod,
 } from '../db/models/commissionReport';
 import {
   findOrderById,
   updateOrderCommissionStatusById,
-  markOrdersCommissionBilledInPeriod,
-  markOrdersCommissionPaidInPeriod,
 } from '../db/models/order';
 import pool from '../db/pool';
 import {
   listAiUseCasesForAdmin,
-  updateAiUseCaseBillingStatus,
   adminVoidAiUseCase,
   markUseCasesBilledInPeriod,
   markUseCasesPaidInPeriod,
@@ -24,6 +23,7 @@ import {
   findAllCompletedUseCaseIdsForTenantInPeriod,
   stampBillingPeriodOnUseCases,
 } from '../db/models/aiUseCase';
+import { updateAdminUseCaseBillingStatus } from '../services/aiUseCaseService';
 import { calculateProgressiveFee } from '../services/aiUseCaseService';
 import { listChannelSummariesForTenant } from '../db/models/channel';
 import {
@@ -37,6 +37,7 @@ import {
   getTenantCommissionPeriodStats,
   getTenantUseCasePeriodStats,
 } from '../services/platformCommissionService';
+import { syncUnderlyingBillingForReportStatus } from '../services/billingReportSyncService';
 import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import type {
   AdminBusinessListQuery,
@@ -282,9 +283,35 @@ export async function markBilledForPeriod(req: Request, res: Response): Promise<
       return;
     }
 
-    const { start, endExclusive } = periodToUtcRange(body.period_start, body.period_end);
-    const updatedCount = await markOrdersCommissionBilledInPeriod(tenantId, start, endExclusive);
-    sendSuccess(res, { updated_count: updatedCount }, 'Orders marked as billed for the selected period');
+    const periodStart = parseDateOnlyUtc(body.period_start);
+    const periodEnd = parseDateOnlyUtc(body.period_end);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sync = await syncUnderlyingBillingForReportStatus(
+        tenantId,
+        periodStart,
+        periodEnd,
+        'billed',
+        client,
+      );
+      const report = await findCommissionReportByTenantAndPeriod(tenantId, periodStart, periodEnd, client);
+      if (report) {
+        await updateCommissionReportStatusById(report.id, 'billed', client);
+      }
+      await client.query('COMMIT');
+      sendSuccess(
+        res,
+        { updated_count: sync.orders_updated, use_cases_updated: sync.use_cases_updated },
+        'Orders marked as billed for the selected period',
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (err) {
     sendError(res, 'Failed to mark orders as billed', 500, err);
   }
@@ -301,9 +328,35 @@ export async function markPaidForPeriod(req: Request, res: Response): Promise<vo
       return;
     }
 
-    const { start, endExclusive } = periodToUtcRange(body.period_start, body.period_end);
-    const updatedCount = await markOrdersCommissionPaidInPeriod(tenantId, start, endExclusive);
-    sendSuccess(res, { updated_count: updatedCount }, 'Orders marked as paid for the selected period');
+    const periodStart = parseDateOnlyUtc(body.period_start);
+    const periodEnd = parseDateOnlyUtc(body.period_end);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sync = await syncUnderlyingBillingForReportStatus(
+        tenantId,
+        periodStart,
+        periodEnd,
+        'paid',
+        client,
+      );
+      const report = await findCommissionReportByTenantAndPeriod(tenantId, periodStart, periodEnd, client);
+      if (report) {
+        await updateCommissionReportStatusById(report.id, 'paid', client);
+      }
+      await client.query('COMMIT');
+      sendSuccess(
+        res,
+        { updated_count: sync.orders_updated, use_cases_updated: sync.use_cases_updated },
+        'Orders marked as paid for the selected period',
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (err) {
     sendError(res, 'Failed to mark orders as paid', 500, err);
   }
@@ -314,13 +367,42 @@ export async function patchCommissionReport(req: Request, res: Response): Promis
     const { reportId } = (req.validated?.params ?? req.params) as { reportId: string };
     const { status } = req.body as AdminReportStatusPatchBody;
 
-    const updated = await updateCommissionReportStatusById(reportId, status);
-    if (!updated) {
-      sendError(res, 'Commission report not found', 404);
-      return;
-    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    sendSuccess(res, { report: updated }, 'Commission report updated successfully');
+      const existing = await findCommissionReportById(reportId, client);
+      if (!existing) {
+        await client.query('ROLLBACK');
+        sendError(res, 'Commission report not found', 404);
+        return;
+      }
+
+      if (existing.status !== status) {
+        await syncUnderlyingBillingForReportStatus(
+          existing.tenant_id,
+          existing.period_start,
+          existing.period_end,
+          status,
+          client,
+        );
+      }
+
+      const updated = await updateCommissionReportStatusById(reportId, status, client);
+      if (!updated) {
+        await client.query('ROLLBACK');
+        sendError(res, 'Commission report not found', 404);
+        return;
+      }
+
+      await client.query('COMMIT');
+      sendSuccess(res, { report: updated }, 'Commission report updated successfully');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (err) {
     sendError(res, 'Failed to update commission report', 500, err);
   }
@@ -365,7 +447,7 @@ export async function patchUseCaseBillingStatus(req: Request, res: Response): Pr
     const { useCaseId } = (req.validated?.params ?? req.params) as AdminUseCaseIdParamsBody;
     const { billing_status } = req.body as AdminUseCaseBillingStatusPatchBody;
 
-    const updated = await updateAiUseCaseBillingStatus(useCaseId, billing_status);
+    const updated = await updateAdminUseCaseBillingStatus(useCaseId, billing_status);
     if (!updated) {
       sendError(res, 'AI use case not found', 404);
       return;
