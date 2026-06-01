@@ -35,7 +35,7 @@ function orderStatusVariant(
   return 'outline';
 }
 
-function useCaseStatusVariant(
+function getUseCaseStatusVariant(
   s: 'unbilled' | 'billed' | 'paid' | 'clear',
 ): 'destructive' | 'secondary' | 'default' | 'outline' {
   if (s === 'unbilled') return 'destructive';
@@ -209,7 +209,7 @@ export default function AdminBusinessesPage() {
                                 {formatCurrency(r.total_use_case_fees_owed)}
                               </td>
                               <td className="px-4 py-3">
-                                <Badge variant={useCaseStatusVariant(r.aggregate_use_case_billing_status)}>
+                                <Badge variant={getUseCaseStatusVariant(r.aggregate_use_case_billing_status)}>
                                   {r.aggregate_use_case_billing_status}
                                 </Badge>
                               </td>
