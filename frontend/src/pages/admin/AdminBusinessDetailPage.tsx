@@ -59,14 +59,6 @@ function toBillingPeriod(ymd: string): string {
   return ymd.slice(0, 7);
 }
 
-function useCaseBillingStatusVariant(
-  s: AdminUseCaseRow['billing_status'],
-): 'destructive' | 'secondary' | 'default' {
-  if (s === 'unbilled') return 'destructive';
-  if (s === 'billed') return 'secondary';
-  return 'default';
-}
-
 export default function AdminBusinessDetailPage() {
   const { tenantId } = useParams<{ tenantId: string }>();
   const queryClient = useQueryClient();
