@@ -2,6 +2,7 @@ import pool from '../db/pool';
 import { findTenantById } from '../db/models/tenant';
 import type { CommissionStatus } from '../db/models/order';
 import type { AiUseCaseBillingStatus } from '../db/models/aiUseCase';
+import { ensureStampedFeesForInvoicedUseCasesInPeriod } from './aiUseCaseService';
 
 /** Confirmed-or-beyond lifecycle: commission counts only after confirmation. */
 const AI_ORDER_STATUSES_SQL = "('confirmed', 'processing', 'shipped', 'delivered')";
@@ -492,6 +493,12 @@ export async function getTenantUseCasePeriodStats(
   rangeStartInclusive: Date,
   rangeEndExclusive: Date,
 ): Promise<TenantUseCasePeriodStats> {
+  await ensureStampedFeesForInvoicedUseCasesInPeriod(
+    tenantId,
+    rangeStartInclusive,
+    rangeEndExclusive,
+  );
+
   const { rows } = await pool.query<{
     completed_use_cases: string;
     use_case_unbilled: string;

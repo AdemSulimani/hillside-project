@@ -1,5 +1,5 @@
 import pool from '../db/pool';
-import { calculateProgressiveFee } from './aiUseCaseService';
+import { calculateProgressiveFee, outstandingUseCaseFeesForMonth } from './aiUseCaseService';
 
 export interface CreditsSummary {
   commission_this_month: number;
@@ -11,16 +11,99 @@ export interface CreditsSummary {
   total_unpaid_use_case_fees: number;
 }
 
+interface MonthUseCaseOutstandingRow {
+  month_key: string;
+  unbilled_count: number;
+  total_count: number;
+  billed_fees: number;
+}
+
+/** Outstanding use case fees for one month (billed + projected unbilled). */
+function outstandingUseCaseFeesFromMonthRow(row: MonthUseCaseOutstandingRow): number {
+  return outstandingUseCaseFeesForMonth(row.unbilled_count, row.total_count, row.billed_fees);
+}
+
+/**
+ * Returns outstanding use case fee rows grouped by billing month.
+ * total_count includes all completed cases in the month (for tier pricing).
+ */
+async function getUseCaseOutstandingByMonth(
+  tenantId: string,
+  rangeStart?: Date,
+): Promise<MonthUseCaseOutstandingRow[]> {
+  const params: unknown[] = [tenantId];
+  const rangeFilter = rangeStart ? ' AND resolved_at >= $2' : '';
+  if (rangeStart) {
+    params.push(rangeStart);
+  }
+
+  const { rows } = await pool.query<{
+    month_key: string;
+    unbilled_count: string;
+    total_count: string;
+    billed_fees: string;
+  }>(
+    `WITH month_totals AS (
+       SELECT
+         to_char(date_trunc('month', resolved_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month_key,
+         COUNT(*)::text AS total_count
+       FROM ai_use_cases
+       WHERE tenant_id = $1
+         AND status = 'completed'${rangeFilter}
+       GROUP BY 1
+     ),
+     outstanding AS (
+       SELECT
+         to_char(date_trunc('month', resolved_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month_key,
+         COUNT(*) FILTER (WHERE billing_status = 'unbilled')::text AS unbilled_count,
+         COALESCE(
+           SUM(fee_amount) FILTER (WHERE billing_status = 'billed'),
+           0
+         )::text AS billed_fees
+       FROM ai_use_cases
+       WHERE tenant_id = $1
+         AND status = 'completed'
+         AND billing_status IN ('unbilled', 'billed')${rangeFilter}
+       GROUP BY 1
+     )
+     SELECT
+       o.month_key,
+       o.unbilled_count,
+       mt.total_count,
+       o.billed_fees
+     FROM outstanding o
+     INNER JOIN month_totals mt ON mt.month_key = o.month_key`,
+    params,
+  );
+
+  return rows.map((r) => ({
+    month_key: r.month_key,
+    unbilled_count: parseInt(r.unbilled_count, 10),
+    total_count: parseInt(r.total_count, 10),
+    billed_fees: parseFloat(r.billed_fees),
+  }));
+}
+
+/**
+ * Returns the total outstanding use case fees across all periods.
+ */
+async function getTotalOutstandingUseCaseFeesForTenant(tenantId: string): Promise<number> {
+  const rows = await getUseCaseOutstandingByMonth(tenantId);
+  const total = rows.reduce((sum, row) => sum + outstandingUseCaseFeesFromMonthRow(row), 0);
+  return Math.round(total * 100) / 100;
+}
+
 /**
  * Returns a complete current-month billing summary for the Credits dashboard.
- * Aggregates commission from orders and projected use case fees in a single query pass.
+ * All monetary fields reflect outstanding (unpaid/billed) amounts only — paid items are excluded.
  */
 export async function getCreditsSummaryForTenant(tenantId: string): Promise<CreditsSummary> {
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
 
-  const [orderRow, useCaseRow, unpaidRow] = await Promise.all([
+  const [orderRow, useCaseMonthRows, unpaidCommissionRow] = await Promise.all([
     pool.query<{
       commission_this_month: string;
       ai_orders_this_month: string;
@@ -31,53 +114,53 @@ export async function getCreditsSummaryForTenant(tenantId: string): Promise<Cred
        FROM orders
        WHERE tenant_id = $1
          AND is_commissionable = true
+         AND commission_status IN ('unpaid', 'billed')
          AND created_at >= $2
          AND created_at < $3`,
       [tenantId, monthStart, monthEnd],
     ),
 
-    pool.query<{ use_case_count: string }>(
-      `SELECT COUNT(*)::text AS use_case_count
-       FROM ai_use_cases
-       WHERE tenant_id = $1
-         AND status = 'completed'
-         AND resolved_at >= $2
-         AND resolved_at < $3`,
-      [tenantId, monthStart, monthEnd],
-    ),
+    getUseCaseOutstandingByMonth(tenantId, monthStart),
 
-    pool.query<{
-      unpaid_commission: string;
-      unbilled_use_case_fees: string;
-    }>(
-      `SELECT
-         COALESCE(
-           (SELECT SUM(commission_amount) FROM orders
-            WHERE tenant_id = $1 AND is_commissionable = true AND commission_status = 'unpaid'),
-           0
-         )::text AS unpaid_commission,
-         COALESCE(
-           (SELECT SUM(COALESCE(fee_amount, 0)) FROM ai_use_cases
-            WHERE tenant_id = $1 AND status = 'completed' AND billing_status = 'unbilled'),
-           0
-         )::text AS unbilled_use_case_fees`,
+    pool.query<{ outstanding_commission: string }>(
+      `SELECT COALESCE(SUM(commission_amount), 0)::text AS outstanding_commission
+       FROM orders
+       WHERE tenant_id = $1
+         AND is_commissionable = true
+         AND commission_status IN ('unpaid', 'billed')`,
       [tenantId],
     ),
   ]);
 
   const commissionThisMonth = parseFloat(orderRow.rows[0]?.commission_this_month ?? '0');
   const aiOrdersThisMonth = parseInt(orderRow.rows[0]?.ai_orders_this_month ?? '0', 10);
-  const useCaseCount = parseInt(useCaseRow.rows[0]?.use_case_count ?? '0', 10);
-  const useCaseFeesThisMonth = calculateProgressiveFee(useCaseCount);
-  const totalUnpaidCommission = parseFloat(unpaidRow.rows[0]?.unpaid_commission ?? '0');
-  const totalUnpaidUseCaseFees = parseFloat(unpaidRow.rows[0]?.unbilled_use_case_fees ?? '0');
+  const totalUnpaidCommission = parseFloat(unpaidCommissionRow.rows[0]?.outstanding_commission ?? '0');
+
+  const currentMonthUseCase = useCaseMonthRows.find((r) => r.month_key === monthKey);
+  const useCaseFeesThisMonth = currentMonthUseCase
+    ? outstandingUseCaseFeesFromMonthRow(currentMonthUseCase)
+    : 0;
+
+  const { rows: useCaseCountRows } = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM ai_use_cases
+     WHERE tenant_id = $1
+       AND status = 'completed'
+       AND billing_status IN ('unbilled', 'billed')
+       AND resolved_at >= $2
+       AND resolved_at < $3`,
+    [tenantId, monthStart, monthEnd],
+  );
+  const outstandingUseCaseCountThisMonth = parseInt(useCaseCountRows[0]?.count ?? '0', 10);
+
+  const totalUnpaidUseCaseFees = await getTotalOutstandingUseCaseFeesForTenant(tenantId);
 
   return {
     commission_this_month: commissionThisMonth,
     use_case_fees_this_month: useCaseFeesThisMonth,
-    use_case_count_this_month: useCaseCount,
+    use_case_count_this_month: outstandingUseCaseCountThisMonth,
     ai_orders_this_month: aiOrdersThisMonth,
-    estimated_invoice: commissionThisMonth + useCaseFeesThisMonth,
+    estimated_invoice: Math.round((commissionThisMonth + useCaseFeesThisMonth) * 100) / 100,
     total_unpaid_commission: totalUnpaidCommission,
     total_unpaid_use_case_fees: totalUnpaidUseCaseFees,
   };
@@ -91,8 +174,8 @@ export interface MonthlyBreakdownPoint {
 }
 
 /**
- * Returns the last N months of billing data (commission + use case fees) for chart display.
- * Always returns a full N-month array, filling missing months with zeros.
+ * Returns the last N months of billing activity for chart display.
+ * Shows total commission and use case fees generated each month regardless of payment status.
  */
 export async function getMonthlyBreakdownForTenant(
   tenantId: string,

@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import pool from '../pool';
 
 export type CommissionReportBillingStatus = 'unpaid' | 'billed' | 'paid';
@@ -111,11 +112,41 @@ export async function listAllCommissionReportsPage(
   return { rows: mapped, total };
 }
 
+export async function findCommissionReportById(
+  reportId: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<CommissionReport | null> {
+  const { rows } = await client.query<ReportRow>(
+    'SELECT * FROM commission_reports WHERE id = $1::uuid',
+    [reportId],
+  );
+  return rows[0] ? rowToReport(rows[0]) : null;
+}
+
+export async function findCommissionReportByTenantAndPeriod(
+  tenantId: string,
+  periodStart: Date,
+  periodEnd: Date,
+  client: PoolClient | typeof pool = pool,
+): Promise<CommissionReport | null> {
+  const { rows } = await client.query<ReportRow>(
+    `SELECT * FROM commission_reports
+     WHERE tenant_id = $1
+       AND period_start = $2::date
+       AND period_end = $3::date
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [tenantId, periodStart, periodEnd],
+  );
+  return rows[0] ? rowToReport(rows[0]) : null;
+}
+
 export async function updateCommissionReportStatusById(
   reportId: string,
   status: CommissionReportBillingStatus,
+  client: PoolClient | typeof pool = pool,
 ): Promise<CommissionReportListRow | null> {
-  const { rows } = await pool.query<ReportListQueryRow>(
+  const { rows } = await client.query<ReportListQueryRow>(
     `UPDATE commission_reports cr
      SET status = $2::varchar
      FROM tenants t

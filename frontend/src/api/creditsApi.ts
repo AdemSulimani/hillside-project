@@ -128,6 +128,17 @@ export async function fetchAiUseCases(
   return { rows: data.data, pagination: data.pagination };
 }
 
+export async function fetchAllAiUseCases(): Promise<AiUseCaseRow[]> {
+  const limit = 100;
+  const first = await fetchAiUseCases(1, limit);
+  const rows = [...first.rows];
+  for (let page = 2; page <= first.pagination.totalPages; page++) {
+    const next = await fetchAiUseCases(page, limit);
+    rows.push(...next.rows);
+  }
+  return rows;
+}
+
 export async function fetchAiOrders(
   page = 1,
   limit = 15,

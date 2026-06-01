@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -45,8 +45,10 @@ import {
   fetchBillingHistory,
   fetchTierStatus,
   fetchAiUseCases,
+  fetchAllAiUseCases,
   fetchAiOrders,
 } from '@/api/creditsApi';
+import { buildCompletedCountsByMonth, getUseCaseDisplayFee } from '@/lib/useCaseFees';
 
 function formatEur(value: number): string {
   return `€${value.toFixed(2)}`;
@@ -78,6 +80,16 @@ function BillingStatusBadge({ status }: { status: string }) {
       </Badge>
     );
   }
+  if (status === 'voided') {
+    return <Badge variant="outline" className="text-muted-foreground">Voided</Badge>;
+  }
+  if (status === 'unbilled') {
+    return (
+      <Badge variant="outline" className="text-amber-600 border-amber-400/40">
+        Unbilled
+      </Badge>
+    );
+  }
   return (
     <Badge variant="outline" className="text-amber-600 border-amber-400/40">
       Unpaid
@@ -86,16 +98,7 @@ function BillingStatusBadge({ status }: { status: string }) {
 }
 
 function UseCaseBillingBadge({ status }: { status: string }) {
-  if (status === 'paid') {
-    return <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-transparent">Paid</Badge>;
-  }
-  if (status === 'billed') {
-    return <Badge variant="secondary">Billed</Badge>;
-  }
-  if (status === 'voided') {
-    return <Badge variant="outline" className="text-muted-foreground">Voided</Badge>;
-  }
-  return <Badge variant="outline" className="text-amber-600 border-amber-400/40">Unbilled</Badge>;
+  return <BillingStatusBadge status={status} />;
 }
 
 function StatCard({
@@ -188,14 +191,19 @@ function ConversationPreviewSheet({
             <User className="size-4 text-muted-foreground" />
             {useCase.contact_name}
           </SheetTitle>
-          <SheetDescription>
-            Resolved {new Date(useCase.resolved_at).toLocaleDateString('en-GB', {
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-            })}
-            {useCase.billing_period ? ` · Period ${useCase.billing_period}` : ''}
-            {useCase.fee_amount != null ? ` · ${formatEur(useCase.fee_amount)}` : ''}
+          <SheetDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>
+              Resolved{' '}
+              {new Date(useCase.resolved_at).toLocaleDateString('en-GB', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+              })}
+            </span>
+            {useCase.fee_amount != null ? (
+              <span>· {formatEur(useCase.fee_amount)}</span>
+            ) : null}
+            <UseCaseBillingBadge status={useCase.billing_status} />
           </SheetDescription>
         </SheetHeader>
 
@@ -286,13 +294,7 @@ function ConversationPreviewSheet({
 }
 
 function CommissionStatusBadge({ status }: { status: string }) {
-  if (status === 'paid') {
-    return <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-transparent">Paid</Badge>;
-  }
-  if (status === 'billed') {
-    return <Badge variant="secondary">Billed</Badge>;
-  }
-  return <Badge variant="outline" className="text-amber-600 border-amber-400/40">Unpaid</Badge>;
+  return <BillingStatusBadge status={status} />;
 }
 
 function AiOrderPreviewSheet({
@@ -463,12 +465,24 @@ export default function CreditsPage() {
   const useCasesQuery = useQuery({
     queryKey: ['credits', 'use-cases', useCasesPage],
     queryFn: () => fetchAiUseCases(useCasesPage, 15),
+    refetchInterval: 60_000,
+  });
+
+  const useCasesFeeLookupQuery = useQuery({
+    queryKey: ['credits', 'use-cases-fee-lookup'],
+    queryFn: fetchAllAiUseCases,
   });
 
   const aiOrdersQuery = useQuery({
     queryKey: ['credits', 'ai-orders', aiOrdersPage],
     queryFn: () => fetchAiOrders(aiOrdersPage, 15),
+    refetchInterval: 60_000,
   });
+
+  const useCaseCountsByMonth = useMemo(
+    () => buildCompletedCountsByMonth(useCasesFeeLookupQuery.data ?? []),
+    [useCasesFeeLookupQuery.data],
+  );
 
   const summary = summaryQuery.data;
   const tier = tierQuery.data;
@@ -500,7 +514,7 @@ export default function CreditsPage() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Credits & Billing</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Live overview of your AI commission costs and use case fees for this month.
+          Live overview of your outstanding AI commission costs and use case fees.
         </p>
       </div>
 
@@ -518,19 +532,19 @@ export default function CreditsPage() {
             <StatCard
               label="Commission This Month"
               value={formatEur(summary?.commission_this_month ?? 0)}
-              sub={`${summary?.ai_orders_this_month ?? 0} AI orders`}
+              sub={`${summary?.ai_orders_this_month ?? 0} unpaid AI orders`}
               icon={ShoppingCart}
             />
             <StatCard
               label="Use Case Fees This Month"
               value={formatEur(summary?.use_case_fees_this_month ?? 0)}
-              sub={`${summary?.use_case_count_this_month ?? 0} cases resolved`}
+              sub={`${summary?.use_case_count_this_month ?? 0} unpaid cases`}
               icon={Bot}
             />
             <StatCard
               label="Estimated Invoice"
               value={formatEur(summary?.estimated_invoice ?? 0)}
-              sub="Commission + use case fees"
+              sub="Outstanding commission + use case fees"
               icon={Receipt}
             />
             <StatCard
@@ -583,7 +597,7 @@ export default function CreditsPage() {
                     <span className="text-xs">({tier.current_tier.label})</span>
                   </span>
                   <span>
-                    Projected fee:{' '}
+                    Outstanding fee:{' '}
                     <span className="font-semibold text-foreground">
                       {formatEur(tier.projected_fee)}
                     </span>
@@ -738,15 +752,16 @@ export default function CreditsPage() {
         </CardContent>
       </Card>
 
-      {/* Recent AI use cases table */}
+      {/* AI conversations */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Bot className="size-4 text-muted-foreground" />
-            AI Use Cases
+            AI Conversations
           </CardTitle>
           <CardDescription>
-            Support conversations fully resolved by AI — no human intervention, no purchase.
+            Support conversations fully resolved by AI. Billing status matches your Hillside
+            account records.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
@@ -764,9 +779,8 @@ export default function CreditsPage() {
                     <tr className="border-b border-border text-left text-xs text-muted-foreground">
                       <th className="px-4 py-3 font-medium">Contact</th>
                       <th className="px-4 py-3 font-medium">Resolved</th>
-                      <th className="px-4 py-3 font-medium">Period</th>
-                      <th className="px-4 py-3 font-medium">Fee</th>
-                      <th className="px-4 py-3 font-medium">Status</th>
+                      <th className="px-4 py-3 font-medium text-right">Fee</th>
+                      <th className="px-4 py-3 font-medium">Billing status</th>
                       <th className="px-4 py-3 font-medium sr-only">Actions</th>
                     </tr>
                   </thead>
@@ -774,14 +788,17 @@ export default function CreditsPage() {
                     {(useCasesQuery.data?.rows ?? []).length === 0 ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={5}
                           className="px-4 py-8 text-center text-sm text-muted-foreground"
                         >
-                          No AI use cases recorded yet.
+                          No AI conversations recorded yet.
                         </td>
                       </tr>
                     ) : (
-                      (useCasesQuery.data?.rows ?? []).map((row) => (
+                      (useCasesQuery.data?.rows ?? []).map((row) => {
+                        const billingStatus = row.status === 'voided' ? 'voided' : row.billing_status;
+                        const displayFee = getUseCaseDisplayFee(row, useCaseCountsByMonth);
+                        return (
                         <tr
                           key={row.id}
                           className="group border-b border-border/60 last:border-0 hover:bg-muted/30 transition-colors cursor-pointer"
@@ -792,8 +809,8 @@ export default function CreditsPage() {
                               contact_name: row.contact_name,
                               resolved_at: row.resolved_at,
                               billing_period: row.billing_period,
-                              fee_amount: row.fee_amount,
-                              billing_status: row.status === 'voided' ? 'voided' : row.billing_status,
+                              fee_amount: displayFee,
+                              billing_status: billingStatus,
                             })
                           }
                         >
@@ -805,14 +822,11 @@ export default function CreditsPage() {
                               year: 'numeric',
                             })}
                           </td>
-                          <td className="px-4 py-3 text-muted-foreground">
-                            {row.billing_period ?? '—'}
+                          <td className="px-4 py-3 text-right tabular-nums font-medium">
+                            {displayFee != null ? formatEur(displayFee) : '—'}
                           </td>
                           <td className="px-4 py-3">
-                            {row.fee_amount != null ? formatEur(row.fee_amount) : '—'}
-                          </td>
-                          <td className="px-4 py-3">
-                            <UseCaseBillingBadge status={row.status === 'voided' ? 'voided' : row.billing_status} />
+                            <UseCaseBillingBadge status={billingStatus} />
                           </td>
                           <td className="px-4 py-3">
                             <Link
@@ -826,7 +840,8 @@ export default function CreditsPage() {
                             </Link>
                           </td>
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -871,7 +886,7 @@ export default function CreditsPage() {
             AI Orders
           </CardTitle>
           <CardDescription>
-            Orders fully created by AI — a 5% commission is charged per order at creation.
+            Orders fully created by AI. Commission status matches your Hillside account records.
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
@@ -892,7 +907,7 @@ export default function CreditsPage() {
                       <th className="px-4 py-3 font-medium">Order Value</th>
                       <th className="px-4 py-3 font-medium">Commission (5%)</th>
                       <th className="px-4 py-3 font-medium">Created</th>
-                      <th className="px-4 py-3 font-medium">Status</th>
+                      <th className="px-4 py-3 font-medium">Commission status</th>
                       <th className="px-4 py-3 font-medium sr-only">Actions</th>
                     </tr>
                   </thead>
