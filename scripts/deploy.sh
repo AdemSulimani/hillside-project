@@ -52,11 +52,32 @@ fi
 echo "[deploy] Pulling base images"
 docker compose "${COMPOSE_FILES[@]}" --env-file backend/.env --env-file frontend/.env pull --ignore-pull-failures || true
 
-echo "[deploy] Building and starting containers"
+echo "[deploy] Building images (without starting)"
 docker compose "${COMPOSE_FILES[@]}" \
   --env-file backend/.env \
   --env-file frontend/.env \
-  up -d --build --remove-orphans
+  build
+
+# Run database migrations BEFORE bringing the new containers up.
+#
+# Running them here means the schema is always ahead of the code, not racing
+# with it. The `--rm` flag removes the one-shot container immediately after.
+# We mount no new volumes — the migration container connects to the same
+# Postgres service already running on the host network.
+#
+# IMPORTANT: migrations must be idempotent (all use IF NOT EXISTS / ON CONFLICT)
+# so re-running on a failed deploy is always safe.
+echo "[deploy] Running database migrations"
+docker compose "${COMPOSE_FILES[@]}" \
+  --env-file backend/.env \
+  --env-file frontend/.env \
+  run --rm backend node dist/db/migrate.js
+
+echo "[deploy] Starting containers"
+docker compose "${COMPOSE_FILES[@]}" \
+  --env-file backend/.env \
+  --env-file frontend/.env \
+  up -d --remove-orphans
 
 echo "[deploy] Waiting for backend health"
 for i in $(seq 1 30); do

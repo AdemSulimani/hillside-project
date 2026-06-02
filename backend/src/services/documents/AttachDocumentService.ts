@@ -1,4 +1,4 @@
-import { createProduct, type Product, type CreateProductInput } from '../../db/models/product';
+import { createProduct, upsertProductByName, type Product, type CreateProductInput } from '../../db/models/product';
 
 export interface ExtractedProductData {
   name?: string;
@@ -82,7 +82,7 @@ export abstract class AttachDocumentService {
     }
 
     for (const data of result.products) {
-      const product = await createProduct(
+      const { product } = await upsertProductByName(
         extractedDataToProductInput(this.tenantId, data, this.sourceType, result.rawText, {
           original_data: data,
         }),
@@ -108,7 +108,7 @@ export abstract class AttachDocumentService {
 
     const products: Product[] = [];
     for (const data of result.products) {
-      const product = await createProduct(
+      const { product } = await upsertProductByName(
         extractedDataToProductInput(this.tenantId, data, this.sourceType, result.rawText, {
           original_data: data,
           ai_enriched: !!aiEnrich,

@@ -232,13 +232,18 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
       : {};
 
   const enqueueInboundPayload = async (): Promise<void> => {
+    // Generate a correlation ID here — at the earliest point in the pipeline —
+    // so it can be forwarded through every downstream job and log line. A single
+    // grep for this traceId reconstructs the full lifecycle of one message.
+    const traceId = crypto.randomUUID();
     try {
       await webhookQueue.add('message.inbound', {
         channelType: channelTypeParam,
         payload: parsedPayload,
+        traceId,
       });
     } catch (err) {
-      console.error('[webhook] failed to enqueue inbound payload', err);
+      console.error('[webhook] failed to enqueue inbound payload', { err, traceId });
     }
   };
 

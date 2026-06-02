@@ -86,10 +86,8 @@ export async function store(req: Request, res: Response): Promise<void> {
       source_type: 'manual',
     });
 
-    await defaultQueue.add('product.embedding', {
-      productId: product.id,
-      tenantId,
-    });
+    // Priority 1 = highest — live edits always run before bulk reconciliation jobs (priority 5).
+    await defaultQueue.add('product.embedding', { productId: product.id, tenantId }, { priority: 1 });
     await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, { product }, 'Product created successfully', 201);
@@ -142,15 +140,16 @@ export async function update(req: Request, res: Response): Promise<void> {
       }
     }
 
-    const embeddingRelevantFields = ['name', 'brand', 'description', 'tags', 'category'] as const;
+    // usage_description was previously missing from this list — any update to it would
+    // leave the embedding pointing at the old text, silently breaking "how do I use X?"
+    // semantic queries. All fields that feed buildProductText() must be listed here.
+    const embeddingRelevantFields = ['name', 'brand', 'description', 'tags', 'category', 'usage_description'] as const;
     const touchesEmbedding = embeddingRelevantFields.some(
       (f) => f in fields,
     );
     if (touchesEmbedding) {
-      await defaultQueue.add('product.embedding', {
-        productId: product.id,
-        tenantId,
-      });
+      // Priority 1 = highest — live edits always run before bulk reconciliation (priority 5).
+      await defaultQueue.add('product.embedding', { productId: product.id, tenantId }, { priority: 1 });
     }
     await redisConnection.del(`products:${tenantId}`);
 
@@ -254,9 +253,10 @@ export async function uploadDocument(req: Request, res: Response): Promise<void>
     // calls createProduct() directly (bypassing the single-product controller), so
     // embeddings are never scheduled otherwise — leaving all bulk-imported products
     // with embedding = NULL and invisible to semantic search.
+    // Priority 2 — higher than reconciliation (5) but slightly below live edits (1).
     await Promise.all(
       products.map((p) =>
-        defaultQueue.add('product.embedding', { productId: p.id, tenantId }),
+        defaultQueue.add('product.embedding', { productId: p.id, tenantId }, { priority: 2 }),
       ),
     );
     await redisConnection.del(`products:${tenantId}`);
@@ -306,7 +306,8 @@ export async function uploadOcrImage(req: Request, res: Response): Promise<void>
 
     // Queue embedding generation — OCR image import calls createProduct() directly,
     // bypassing the single-product controller that normally enqueues this job.
-    await defaultQueue.add('product.embedding', { productId: product.id, tenantId });
+    // Priority 2 — higher than reconciliation (5) but slightly below live edits (1).
+    await defaultQueue.add('product.embedding', { productId: product.id, tenantId }, { priority: 2 });
     await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, { product }, 'Product imported from image', 201);

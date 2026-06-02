@@ -27,6 +27,10 @@ import { redisConnection } from '../jobs/redisConnection';
 // and were silently discarded, pushing execution into the 5-product fallback.
 // Operators can override this via the SIMILARITY_THRESHOLD env variable.
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.65');
+// Log the live value once at startup so operators always know which threshold is active
+// (the .env.example default of 0.65 and an overriding SIMILARITY_THRESHOLD=0.75 both
+// used to be in circulation, causing silent config drift in deployed environments).
+console.info('[aiService] SIMILARITY_THRESHOLD resolved to', SIMILARITY_THRESHOLD);
 
 /** How many catalog rows we consider for matching + OOS canned detection (needs the named SKU in-list). */
 const FOCUSED_PRODUCT_MATCH_LIMIT = 10;
@@ -304,23 +308,55 @@ export function hasCategoryShoppingIntent(text: string): boolean {
       normalized,
     ) ||
     /\b(cfare|çfarë)\s+produkt/.test(normalized) ||
-    extractCatalogSearchPhrases(text).some((p) => p.includes(' '))
+    /\b(masa\s+muskulore|mass\s+gainer|massgainer|weight\s+gain)\b/.test(normalized)
   );
 }
 
-function mergeMatchedProducts(sources: Product[][], limit: number): Product[] {
-  const seen = new Set<string>();
-  const out: Product[] = [];
-  for (const list of sources) {
-    for (const p of list) {
-      if (!seen.has(p.id)) {
-        seen.add(p.id);
-        out.push(p);
-        if (out.length >= limit) return out;
-      }
-    }
+/**
+ * A retrieval source list plus a weight. Higher weight = the source contributes more
+ * to the fused score. Order within `products` is treated as the source's own ranking.
+ */
+interface WeightedSource {
+  name: string;
+  products: Product[];
+  weight: number;
+}
+
+/**
+ * Reciprocal Rank Fusion (RRF) constant. Larger k flattens the contribution of rank
+ * position; 60 is the value from the original RRF paper and the common default.
+ */
+const RRF_K = 60;
+
+/**
+ * Fuses multiple ranked retrieval sources into a single relevance-ordered list.
+ *
+ * The previous strategy concatenated sources in a fixed priority order and kept
+ * first-seen — which buried the high-precision semantic results behind unranked
+ * substring (ILIKE) matches, and let lexical noise evict the correct product when the
+ * result cap was hit. RRF instead rewards products that rank highly across multiple
+ * sources, so a product found by BOTH semantic and keyword search outranks one found
+ * only by a noisy substring match, regardless of source order.
+ *
+ *   score(p) = Σ_sources  weight / (RRF_K + rank_in_source(p))
+ */
+function fuseByRRF(sources: WeightedSource[], limit: number): Product[] {
+  const scores = new Map<string, number>();
+  const byId = new Map<string, Product>();
+
+  for (const source of sources) {
+    source.products.forEach((p, idx) => {
+      if (!byId.has(p.id)) byId.set(p.id, p);
+      const contribution = source.weight / (RRF_K + idx + 1);
+      scores.set(p.id, (scores.get(p.id) ?? 0) + contribution);
+    });
   }
-  return out;
+
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id]) => byId.get(id))
+    .filter((p): p is Product => p !== undefined);
 }
 
 /** Short follow-up about usage/dosage with no product name (e.g. "Si ta perdor?"). */
@@ -431,8 +467,64 @@ export function isPriceOnlyFollowUp(message: string): boolean {
 }
 
 /**
- * Unified product retrieval: tag/category phrases first for shopping-by-goal queries,
- * then semantic + keyword. Prevents generic whey matches from hiding tagged catalog rows.
+ * Timeout for OpenAI query-embedding calls (ms). When OpenAI is slow or rate-limited,
+ * the semantic path is skipped and keyword/phrase search still runs — which is correct
+ * fail-open behaviour — but only if the hung request is actually cancelled. Without a
+ * timeout the whole reply job blocks for up to 60 s and the semantic failure is silent.
+ */
+const EMBEDDING_QUERY_TIMEOUT_MS = (() => {
+  const raw = process.env.EMBEDDING_QUERY_TIMEOUT_MS;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 5000;
+})();
+
+/** In-process LRU-style cache for query embeddings (maps trimmed text → vector). */
+const QUERY_EMBEDDING_CACHE_MAX = 256;
+const queryEmbeddingCache = new Map<string, number[]>();
+
+function getCachedQueryEmbedding(text: string): number[] | undefined {
+  return queryEmbeddingCache.get(text);
+}
+
+function setCachedQueryEmbedding(text: string, vector: number[]): void {
+  if (queryEmbeddingCache.size >= QUERY_EMBEDDING_CACHE_MAX) {
+    // Evict the oldest entry (Map iteration is insertion-ordered).
+    const oldest = queryEmbeddingCache.keys().next().value;
+    if (oldest !== undefined) queryEmbeddingCache.delete(oldest);
+  }
+  queryEmbeddingCache.set(text, vector);
+}
+
+/**
+ * Generates a query embedding with a hard timeout. Resolves with null when
+ * OpenAI is unavailable/slow — callers fall back to keyword-only retrieval.
+ */
+async function generateQueryEmbeddingWithTimeout(text: string): Promise<number[] | null> {
+  const cached = getCachedQueryEmbedding(text);
+  if (cached) return cached;
+
+  try {
+    const result = await Promise.race([
+      generateEmbedding(text),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), EMBEDDING_QUERY_TIMEOUT_MS)),
+    ]);
+    if (result) setCachedQueryEmbedding(text, result);
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Unified product retrieval: all sources (category/tag phrases, semantic vector search,
+ * keyword ILIKE) run in parallel where possible and are fused with Reciprocal Rank
+ * Fusion (RRF) so the final order reflects cross-source agreement, not source priority.
+ *
+ * RRF source weights:
+ *   - semantic (dense vector): 2.0 — highest precision
+ *   - category/tag phrase:     1.5 — structured, high precision
+ *   - phrase direct (ILIKE):   1.2
+ *   - keyword ILIKE:           1.0 — broad recall, lower precision
  */
 export async function matchProductsForCustomerMessage(
   tenantId: string,
@@ -442,24 +534,32 @@ export async function matchProductsForCustomerMessage(
   const trimmed = searchText.trim();
   if (!trimmed) return [];
 
+  const t0 = Date.now();
   const phrases = extractCatalogSearchPhrases(trimmed);
-  const categoryTagMatches = await searchProductsByCatalogPhrases(tenantId, phrases, limit);
+  const keywords = extractKeywords(trimmed);
   const categoryIntent = hasCategoryShoppingIntent(trimmed);
 
-  let semantic: Product[] = [];
-  try {
-    const queryEmbedding = await generateEmbedding(trimmed);
-    const similar = await searchProductsBySimilarity(tenantId, queryEmbedding, limit);
-    semantic = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
-  } catch {
-    // Fall through — keyword paths still run.
-  }
-
-  const keywords = extractKeywords(trimmed);
-  const keywordMatches =
+  // Run all retrieval paths in parallel — semantic + both lexical paths.
+  const [categoryTagMatches, embeddingVector, keywordMatches] = await Promise.all([
+    searchProductsByCatalogPhrases(tenantId, phrases, limit),
+    generateQueryEmbeddingWithTimeout(trimmed),
     keywords.length > 0
-      ? await searchProductsByDisjunctiveTerms(tenantId, keywords, limit)
-      : [];
+      ? searchProductsByDisjunctiveTerms(tenantId, keywords, limit)
+      : Promise.resolve([] as Product[]),
+  ]);
+
+  let semanticCandidates: Product[] = [];
+  let semanticSkipped = false;
+  if (embeddingVector) {
+    try {
+      const similar = await searchProductsBySimilarity(tenantId, embeddingVector, limit);
+      semanticCandidates = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
+    } catch {
+      semanticSkipped = true;
+    }
+  } else {
+    semanticSkipped = true;
+  }
 
   const phraseDirect: Product[] = [];
   for (const phrase of phrases) {
@@ -467,14 +567,45 @@ export async function matchProductsForCustomerMessage(
     phraseDirect.push(...(await searchProducts(tenantId, phrase, limit)));
   }
 
-  if (categoryIntent && categoryTagMatches.length > 0) {
-    return mergeMatchedProducts([categoryTagMatches, phraseDirect, keywordMatches], limit);
+  // For pure category-shopping intent (e.g. "show me weight-gain products") semantic
+  // broad-recall can return tangential products — category/tag matches are more precise.
+  const sources: WeightedSource[] = categoryIntent && categoryTagMatches.length > 0
+    ? [
+        { name: 'category_tag', products: categoryTagMatches, weight: 1.5 },
+        { name: 'phrase_direct', products: phraseDirect, weight: 1.2 },
+        { name: 'keyword', products: keywordMatches, weight: 1.0 },
+      ]
+    : [
+        { name: 'semantic', products: semanticCandidates, weight: 2.0 },
+        { name: 'category_tag', products: categoryTagMatches, weight: 1.5 },
+        { name: 'phrase_direct', products: phraseDirect, weight: 1.2 },
+        { name: 'keyword', products: keywordMatches, weight: 1.0 },
+      ];
+
+  const results = fuseByRRF(sources, limit);
+
+  // Structured retrieval log — one line per call, easy to grep / ingest into a log
+  // aggregator. Captures enough to reconstruct what was retrieved vs. what was correct.
+  console.info('[retrieval]', {
+    tenantId,
+    query: trimmed.slice(0, 120),
+    categoryIntent,
+    semanticSkipped,
+    sources: sources.map((s) => ({ name: s.name, count: s.products.length })),
+    fused: results.length,
+    topIds: results.slice(0, 5).map((p) => p.id),
+    topNames: results.slice(0, 5).map((p) => p.name),
+    elapsedMs: Date.now() - t0,
+  });
+
+  if (semanticSkipped && trimmed.length > 0) {
+    console.warn('[retrieval] Semantic path skipped — embedding unavailable or timed out', {
+      tenantId,
+      queryLength: trimmed.length,
+    });
   }
 
-  return mergeMatchedProducts(
-    [categoryTagMatches, phraseDirect, semantic, keywordMatches],
-    limit,
-  );
+  return results;
 }
 
 /** Products the assistant recently mentioned — used for "Sa kushton?" style follow-ups. */
@@ -916,7 +1047,9 @@ async function customerAskedAboutPrice(message: string): Promise<boolean> {
         {
           role: 'system',
           content:
-            'You are a strict intent classifier. Detect whether the customer message explicitly asks for product price/cost/payment amount (in any language, slang, shorthand, or misspelling). Return only JSON: {"is_price_question": true} or {"is_price_question": false}. Mark true only when price/cost is explicitly requested.',
+            'You are a price-intent classifier. Determine whether the customer is asking about price, cost, or how much something costs — in any language, dialect, slang, shorthand, or with misspellings. ' +
+            'Albanian examples that MUST return true: "sa kushton?", "sa kushtojn?", "sa kushtojne?", "sa kushtoi?", "sa ben?", "cmimi?", "qmimi?". ' +
+            'Return only JSON: {"is_price_question": true} or {"is_price_question": false}.',
         },
         {
           role: 'user',
@@ -931,11 +1064,21 @@ async function customerAskedAboutPrice(message: string): Promise<boolean> {
     const raw = completion.choices[0]?.message?.content;
     if (raw?.trim()) {
       const parsed = JSON.parse(raw) as { is_price_question?: boolean };
-      if (parsed.is_price_question === true) return true;
-      if (parsed.is_price_question === false) return false;
+      if (parsed.is_price_question === true) {
+        console.info('[price_classifier] result=true message_preview:', inbound.slice(0, 80));
+        return true;
+      }
+      if (parsed.is_price_question === false) {
+        console.info('[price_classifier] result=false message_preview:', inbound.slice(0, 80));
+        return false;
+      }
+      console.warn('[price_classifier] unexpected shape — falling back to lexical', { raw: raw.slice(0, 200) });
     }
-  } catch {
-    // Fall through to lightweight lexical fallback if classifier is unavailable.
+  } catch (err) {
+    console.warn('[price_classifier] classifier failed — falling back to lexical', {
+      error: err instanceof Error ? err.message : String(err),
+      message_preview: inbound.slice(0, 80),
+    });
   }
 
   const t = inbound
@@ -949,6 +1092,12 @@ async function customerAskedAboutPrice(message: string): Promise<boolean> {
     'sa kushton',
     'kushton',
     'kushtojne',
+    'kushtojn',
+    'kushtoi',
+    'kushtuan',
+    'sa ben',
+    'sa eshte cmimi',
+    'sa eshte qmimi',
     'cmim',
     'çmim',
     'qmim',

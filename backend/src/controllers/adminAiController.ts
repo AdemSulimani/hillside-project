@@ -538,9 +538,11 @@ export async function postBackfillProductEmbeddings(req: Request, res: Response)
       return;
     }
 
+    // Priority 3 — admin-initiated, lower than live edits/imports (1-2) but above
+    // automated reconciliation (5) so operators can manually force a backfill quickly.
     await Promise.all(
       rows.map((p) =>
-        defaultQueue.add('product.embedding', { productId: p.id, tenantId }),
+        defaultQueue.add('product.embedding', { productId: p.id, tenantId }, { priority: 3 }),
       ),
     );
 
@@ -582,9 +584,11 @@ export async function postReembedAllProducts(req: Request, res: Response): Promi
       return;
     }
 
+    // Priority 3 — same as backfill, below live edits/imports so a full re-embed of a
+    // large catalog doesn't starve normal product update jobs.
     await Promise.all(
       rows.map((p) =>
-        defaultQueue.add('product.embedding', { productId: p.id, tenantId }),
+        defaultQueue.add('product.embedding', { productId: p.id, tenantId }, { priority: 3 }),
       ),
     );
 
