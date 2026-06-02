@@ -1,7 +1,10 @@
 import Tesseract from 'tesseract.js';
 import sharp from 'sharp';
 import { createProduct, type Product } from '../db/models/product';
-import type { ExtractedProductData } from './documents/AttachDocumentService';
+import {
+  extractedDataToProductInput,
+  type ExtractedProductData,
+} from './documents/AttachDocumentService';
 
 export class ImageProcessingService {
   private tenantId: string;
@@ -58,16 +61,9 @@ export class ImageProcessingService {
     const rawText = await this.extractText(source);
     const data = this.parseExtractedText(rawText);
 
-    return createProduct({
-      tenant_id: this.tenantId,
-      name: data.name || 'OCR Imported Product',
-      price: data.price ?? 0,
-      description: data.description ?? null,
-      tags: data.tags ?? (data.category ? [data.category] : []),
-      source_type: 'image',
-      extracted_text: rawText,
-      metadata: { ocr_data: data },
-    });
+    return createProduct(
+      extractedDataToProductInput(this.tenantId, data, 'image', rawText, { ocr_data: data }, 'OCR Imported Product'),
+    );
   }
 
   async processWithAI(
@@ -78,15 +74,15 @@ export class ImageProcessingService {
     const enriched = await aiEnrich(rawText);
     const data = enriched[0] ?? this.parseExtractedText(rawText);
 
-    return createProduct({
-      tenant_id: this.tenantId,
-      name: data.name || 'OCR Imported Product',
-      price: data.price ?? 0,
-      description: data.description ?? null,
-      tags: data.tags ?? (data.category ? [data.category] : []),
-      source_type: 'image',
-      extracted_text: rawText,
-      metadata: { ocr_data: data, ai_enriched: true },
-    });
+    return createProduct(
+      extractedDataToProductInput(
+        this.tenantId,
+        data,
+        'image',
+        rawText,
+        { ocr_data: data, ai_enriched: true },
+        'OCR Imported Product',
+      ),
+    );
   }
 }

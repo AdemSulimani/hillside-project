@@ -5,8 +5,12 @@ const SYSTEM_PROMPT = `You are a product data extraction assistant. Given raw te
 
 Return a JSON array of product objects. Each product object should have these fields:
 - name (string): The product name
-- description (string): A clear product description  
-- price (number): The product price as a decimal number
+- brand (string): The product brand or manufacturer
+- description (string): A clear product description
+- usage_description (string): How to use the product, instructions, or directions
+- price (number): The regular product price as a decimal number
+- discounted_price (number): Sale or discounted price, if any
+- sku (string): Product SKU, code, barcode, or identifier
 - tags (string[]): Relevant tags/keywords for the product
 - category (string): The product category
 
@@ -88,14 +92,29 @@ export class AIProductProcessingService {
         if (typeof item.name === 'string' && item.name.trim()) {
           product.name = item.name.trim().slice(0, 255);
         }
+        if (typeof item.brand === 'string' && item.brand.trim()) {
+          product.brand = item.brand.trim().slice(0, 255);
+        }
         if (typeof item.description === 'string' && item.description.trim()) {
           product.description = item.description.trim().slice(0, 5000);
+        }
+        if (typeof item.usage_description === 'string' && item.usage_description.trim()) {
+          product.usage_description = item.usage_description.trim().slice(0, 10000);
         }
         if (typeof item.price === 'number' && item.price >= 0) {
           product.price = item.price;
         } else if (typeof item.price === 'string') {
           const parsed = parseFloat(item.price);
           if (!isNaN(parsed) && parsed >= 0) product.price = parsed;
+        }
+        if (typeof item.discounted_price === 'number' && item.discounted_price >= 0) {
+          product.discounted_price = item.discounted_price;
+        } else if (typeof item.discounted_price === 'string') {
+          const parsed = parseFloat(item.discounted_price);
+          if (!isNaN(parsed) && parsed >= 0) product.discounted_price = parsed;
+        }
+        if (typeof item.sku === 'string' && item.sku.trim()) {
+          product.sku = item.sku.trim().slice(0, 100);
         }
         if (Array.isArray(item.tags)) {
           product.tags = item.tags
