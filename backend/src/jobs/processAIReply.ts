@@ -49,6 +49,7 @@ import {
   getQualityThreshold,
   resolveStoredFlagReason,
 } from '../services/aiQualityService';
+import { createFeedbackLog } from '../db/models/feedbackLog';
 import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
@@ -60,6 +61,8 @@ export interface AIReplyJobData {
   channelId: string;
   conversationId: string;
   messageExternalId: string;
+  /** Correlation ID from the originating webhook — see InboundWebhookJobData.traceId. */
+  traceId?: string;
 }
 
 function normalizeLooseText(value: string | null | undefined): string {
@@ -839,17 +842,104 @@ function isEmojiOnlyText(text: string): boolean {
   return withoutEmoji.length === 0;
 }
 
-export async function processAIReply(data: AIReplyJobData): Promise<void> {
-  const { tenantId, channelId, conversationId } = data;
+// ---------------------------------------------------------------------------
+// Per-tenant concurrent-job fairness guard
+//
+// Without this, one large tenant (flash sale, viral post) can flood the AI
+// queue with hundreds of jobs. With AI_WORKER_CONCURRENCY=2 those jobs
+// drain sequentially for minutes, completely starving all other tenants.
+//
+// This guard tracks how many AI reply jobs are actively running for each
+// tenant using a Redis counter incremented on job start and decremented in
+// a try/finally so it always returns to 0.  If a tenant already has
+// AI_MAX_CONCURRENT_PER_TENANT jobs in flight, the current job re-delays
+// itself (back into the BullMQ delayed set) for a short backoff and returns
+// early — no work is lost, the job just waits its turn.
+// ---------------------------------------------------------------------------
+const AI_MAX_CONCURRENT_PER_TENANT = (() => {
+  const n = parseInt(process.env.AI_MAX_CONCURRENT_PER_TENANT ?? '8', 10);
+  return Number.isFinite(n) && n > 0 ? n : 8;
+})();
+/** How long (ms) a job backs off before retrying when the tenant is at capacity. */
+const AI_FAIRNESS_BACKOFF_MS = 3000;
 
+// ---------------------------------------------------------------------------
+// Atomic per-conversation rate-limit counter
+//
+// The old implementation used INCR + a separate EXPIRE: if the process
+// crashed between those two commands the key had no TTL and the conversation
+// was permanently locked (AI never replied again) until manual cleanup.
+//
+// This Lua script atomically increments the counter AND sets the TTL in a
+// single Redis round-trip, with no window between the two operations.
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_INCR_SCRIPT = `
+local key   = KEYS[1]
+local ttl   = tonumber(ARGV[1])
+local count = redis.call('INCR', key)
+if count == 1 then
+  redis.call('EXPIRE', key, ttl)
+end
+return count
+`;
+
+export async function processAIReply(data: AIReplyJobData): Promise<void> {
+  const { tenantId, channelId, conversationId, traceId } = data;
+  console.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
+
+  // ---- Per-tenant fairness ------------------------------------------------
+  const tenantActiveKey = `ai_active_jobs:${tenantId}`;
+  const activeCount = await redisConnection.incr(tenantActiveKey);
+  // Safety TTL: if the process crashes mid-job the key will expire rather than
+  // permanently blocking the tenant. 5 minutes >> any normal job duration.
+  if (activeCount === 1) {
+    await redisConnection.expire(tenantActiveKey, 300);
+  }
+  if (activeCount > AI_MAX_CONCURRENT_PER_TENANT) {
+    // Decrement immediately — this job is not actually running yet.
+    await redisConnection.decr(tenantActiveKey);
+    // Re-delay into BullMQ. The job will be picked up once earlier jobs finish.
+    await aiQueue.add(
+      'ai.reply',
+      data,
+      {
+        delay: AI_FAIRNESS_BACKOFF_MS,
+        // Inherit the original jobId/dedup behaviour if present.
+      },
+    );
+    console.info('[ai.reply] Tenant at concurrency limit — re-delayed job', {
+      tenantId,
+      conversationId,
+      activeCount,
+      maxAllowed: AI_MAX_CONCURRENT_PER_TENANT,
+      backoffMs: AI_FAIRNESS_BACKOFF_MS,
+    });
+    return;
+  }
+
+  // Ensure the tenant counter is always decremented when this job finishes
+  // (success, error, or early return). Without this, a crashed job permanently
+  // reduces the tenant's available concurrency slot.
+  let tenantSlotReleased = false;
+  const releaseTenantSlot = async (): Promise<void> => {
+    if (tenantSlotReleased) return;
+    tenantSlotReleased = true;
+    await redisConnection.decr(tenantActiveKey).catch(() => undefined);
+  };
+
+  try {
+
+  // ---- Per-conversation rate limit (atomic) --------------------------------
   const parsedMax = parseInt(process.env.AI_MAX_REPLIES_PER_HOUR ?? '25', 10);
   const aiMaxRepliesPerHour =
     Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 25;
   const rateLimitKey = `ai_rate_limit:${conversationId}`;
-  const rateCount = await redisConnection.incr(rateLimitKey);
-  if (rateCount === 1) {
-    await redisConnection.expire(rateLimitKey, 3600);
-  }
+  const rateCount = await redisConnection.eval(
+    RATE_LIMIT_INCR_SCRIPT,
+    1,
+    rateLimitKey,
+    '3600',
+  ) as number;
   if (rateCount > aiMaxRepliesPerHour) {
     const client = await pool.connect();
     let alert: AIAlert | undefined;
@@ -985,7 +1075,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // reply — including system-inserted lines — is in the same language as the customer's message.
   const replyLanguage = await detectReplyLanguage(inboundText, recentMessages);
   console.info(
-    `[REPLY_LANGUAGE] tenantId: ${tenantId} conversationId: ${conversationId} language: ${replyLanguage}`,
+    `[REPLY_LANGUAGE] tenantId: ${tenantId} conversationId: ${conversationId} language: ${replyLanguage} traceId: ${traceId ?? 'n/a'}`,
   );
 
   if (inboundText) {
@@ -1917,6 +2007,34 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         channel_name: channel.name,
       });
       socketService.emitConversationUpdated(tenantId, conversationId);
+
+      // ------------------------------------------------------------------
+      // Feedback→fine-tuning loop
+      //
+      // A quality-flagged reply is evidence of a real accuracy problem —
+      // exactly the kind of example the fine-tuning pipeline needs. By
+      // auto-creating a feedback_log row here we close the loop: flagged
+      // replies immediately appear in the fine-tuning candidate pool without
+      // requiring a human to manually submit feedback first.
+      //
+      // corrected_response is left null; a human agent can fill it in via the
+      // Feedback page. The fine-tuning job already handles pending rows with
+      // no correction (it uses the original + the flag reason as signal).
+      // ------------------------------------------------------------------
+      void createFeedbackLog({
+        tenant_id: tenantId,
+        message_id: outboundMessage.id,
+        conversation_id: conversationId,
+        original_ai_response: outboundMessage.content ?? '',
+        corrected_response: null,
+        reason: flagReason ?? 'low_confidence',
+      }).catch((err) => {
+        console.warn('[ai.reply] Failed to auto-create feedback log for quality alert', {
+          tenantId,
+          conversationId,
+          err,
+        });
+      });
     }
   }
 
@@ -2174,5 +2292,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       tenantId,
       err,
     });
+  }
+
+  } finally {
+    // Always release the per-tenant concurrency slot, even if the job threw
+    // or returned early at any point inside the try block above.
+    await releaseTenantSlot();
   }
 }

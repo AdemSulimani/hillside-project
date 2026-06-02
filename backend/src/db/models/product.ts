@@ -96,6 +96,75 @@ export async function createProduct(input: CreateProductInput): Promise<Product>
   return rows[0];
 }
 
+/**
+ * Insert a product or, if a non-deleted product with the same (tenant_id, name)
+ * already exists, update its fields in place and return the surviving row.
+ *
+ * This prevents duplicate catalog rows when a tenant re-uploads a spreadsheet
+ * or PDF. The uniqueness check is case/whitespace-insensitive, matching the
+ * partial unique index idx_products_tenant_name_unique (migration 046).
+ *
+ * Returns `{ product, wasUpdated }` so callers can decide whether to re-queue
+ * an embedding job (always safe to re-queue; the embedding worker is idempotent).
+ */
+export async function upsertProductByName(
+  input: CreateProductInput,
+): Promise<{ product: Product; wasUpdated: boolean }> {
+  const { rows } = await pool.query<Product & { xmax: string }>(
+    `INSERT INTO products (
+       tenant_id, name, brand, price, discounted_price, description,
+       usage_description, sku, category, tags, image_urls, is_active,
+       in_stock, source_type, extracted_text, metadata
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb)
+     ON CONFLICT (tenant_id, LOWER(TRIM(name))) WHERE deleted_at IS NULL
+     DO UPDATE SET
+       brand              = EXCLUDED.brand,
+       price              = EXCLUDED.price,
+       discounted_price   = EXCLUDED.discounted_price,
+       description        = EXCLUDED.description,
+       usage_description  = EXCLUDED.usage_description,
+       sku                = EXCLUDED.sku,
+       category           = EXCLUDED.category,
+       tags               = EXCLUDED.tags,
+       image_urls         = CASE
+                              WHEN array_length(EXCLUDED.image_urls::text[]::text[], 1) > 0
+                              THEN EXCLUDED.image_urls
+                              ELSE products.image_urls
+                            END,
+       is_active          = EXCLUDED.is_active,
+       in_stock           = EXCLUDED.in_stock,
+       source_type        = EXCLUDED.source_type,
+       extracted_text     = EXCLUDED.extracted_text,
+       metadata           = EXCLUDED.metadata,
+       updated_at         = now()
+     RETURNING *, xmax::text`,
+    [
+      input.tenant_id,
+      input.name,
+      input.brand?.trim() || null,
+      input.price,
+      input.discounted_price ?? null,
+      input.description ?? null,
+      input.usage_description ?? null,
+      input.sku?.trim() || null,
+      input.category?.trim() || null,
+      JSON.stringify(input.tags ?? []),
+      JSON.stringify(input.image_urls ?? []),
+      input.is_active ?? true,
+      input.in_stock ?? true,
+      input.source_type ?? 'manual',
+      input.extracted_text ?? null,
+      input.metadata ? JSON.stringify(input.metadata) : null,
+    ],
+  );
+  const row = rows[0];
+  // xmax = '0' means the row was freshly inserted; non-zero means it was updated.
+  const wasUpdated = row.xmax !== '0';
+  const product: Product = { ...row };
+  return { product, wasUpdated };
+}
+
 export async function findProductsByTenant(
   params: ProductSearchParams,
 ): Promise<{ products: Product[]; total: number }> {
@@ -344,26 +413,57 @@ export interface SimilarProduct extends Product {
 }
 
 /**
+ * Candidate pool size for the HNSW graph traversal. The `embedding` index is GLOBAL
+ * (not partitioned per tenant), and the tenant filter is applied AFTER the ANN scan.
+ * With the pgvector default (40) a tenant whose products are a small fraction of all
+ * rows can have its correct matches fall outside the global top-40 and silently return
+ * fewer than `limit` rows — the "the right product exists but wasn't retrieved" bug.
+ * A larger ef_search widens the candidate pool so post-filtering still yields `limit`
+ * rows, at the cost of some latency. Must be >= the requested limit.
+ */
+const HNSW_EF_SEARCH = (() => {
+  const raw = process.env.HNSW_EF_SEARCH;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 100;
+})();
+
+/**
  * Vector similarity search using pgvector's cosine distance operator.
  * Returns products ordered by closest embedding match.
+ *
+ * Runs inside a transaction so `SET LOCAL hnsw.ef_search` only affects this query and
+ * is reset automatically when the (pooled) connection is returned — it never leaks to
+ * other queries sharing the same pool client.
  */
 export async function searchProductsBySimilarity(
   tenantId: string,
   queryEmbedding: number[],
   limit = 5,
 ): Promise<SimilarProduct[]> {
-  const { rows } = await pool.query<SimilarProduct>(
-    `SELECT *, 1 - (embedding <=> $2) AS similarity
-     FROM products
-     WHERE tenant_id = $1
-       AND deleted_at IS NULL
-       AND is_active = true
-       AND embedding IS NOT NULL
-     ORDER BY embedding <=> $2
-     LIMIT $3`,
-    [tenantId, toSql(queryEmbedding), limit],
-  );
-  return rows;
+  const efSearch = Math.max(HNSW_EF_SEARCH, limit);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+    const { rows } = await client.query<SimilarProduct>(
+      `SELECT *, 1 - (embedding <=> $2) AS similarity
+       FROM products
+       WHERE tenant_id = $1
+         AND deleted_at IS NULL
+         AND is_active = true
+         AND embedding IS NOT NULL
+       ORDER BY embedding <=> $2
+       LIMIT $3`,
+      [tenantId, toSql(queryEmbedding), limit],
+    );
+    await client.query('COMMIT');
+    return rows;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /** Returns the number of active, non-deleted products for a tenant. */

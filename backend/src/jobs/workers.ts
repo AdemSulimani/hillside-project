@@ -7,6 +7,10 @@ import type { InboundWebhookJobData } from './jobTypes';
 import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
 import { processGenerateProductEmbedding, type GenerateProductEmbeddingJobData } from './generateProductEmbedding';
+import {
+  processReconcileProductEmbeddings,
+  initEmbeddingReconcileScheduler,
+} from './reconcileProductEmbeddings';
 import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
 import { initRefreshMetaTokensScheduler, processRefreshMetaTokens } from './refreshMetaTokens';
 import { checkFinetuningStatus, startFinetuningJob } from './checkFinetuningStatus';
@@ -127,6 +131,10 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
       await processMonthlyUseCaseSnapshot();
       return;
     }
+    if (job.name === 'embeddingReconcile') {
+      await processReconcileProductEmbeddings();
+      return;
+    }
     await processGenerateProductEmbedding(job.data);
   },
   { connection: createWorkerConnection(), concurrency: DEFAULT_CONCURRENCY, ...redisOptimizedWorkerOptions },
@@ -152,6 +160,10 @@ defaultWorker.on('completed', (job) => {
 
 void initPrepareFinetuningScheduler().catch((err) => {
   console.error('[jobs] Failed to register finetuning scheduler', err);
+});
+
+void initEmbeddingReconcileScheduler().catch((err) => {
+  console.error('[jobs] Failed to register embedding reconciliation scheduler', err);
 });
 
 void initRefreshMetaTokensScheduler().catch((err) => {

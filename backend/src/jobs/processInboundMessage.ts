@@ -417,6 +417,9 @@ async function resolveFacebookContactProfile(
 }
 
 export async function processInboundMessage(data: InboundWebhookJobData): Promise<void> {
+  const { traceId } = data;
+  console.info('[webhook] processInboundMessage start', { traceId, channelType: data.channelType });
+
   let event: InboundEvent;
   try {
     event = normalize(data.channelType, data.payload);
@@ -788,6 +791,8 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
       channelId: channel.id,
       conversationId: conversation.id,
       messageExternalId: normalized.externalMessageId,
+      // Carry the originating webhook's traceId so processAIReply can log it.
+      traceId: (data as { traceId?: string }).traceId,
     }, {
       delay: Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000,
     });

@@ -35,6 +35,11 @@ services:
           memory: 256M
 
   redis:
+    # BullMQ shares this Redis. `noeviction` is mandatory so the queue never loses
+    # jobs under memory pressure (see docker-compose.yml for the full rationale).
+    # maxmemory stays below the 224M container limit; with noeviction the safe
+    # failure mode under pressure is a rejected cache write (which TTLs then clear),
+    # never a silently-dropped job.
     command:
       - redis-server
       - --save
@@ -45,7 +50,7 @@ services:
       - --maxmemory
       - 192mb
       - --maxmemory-policy
-      - allkeys-lru
+      - noeviction
     deploy:
       resources:
         limits:
