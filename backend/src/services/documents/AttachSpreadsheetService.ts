@@ -46,9 +46,22 @@ export class AttachSpreadsheetService extends AttachDocumentService {
         product.description = String(row[fieldMap.description] ?? '').trim() || undefined;
       }
       if (fieldMap.price) {
-        const raw = String(row[fieldMap.price] ?? '').replace(/[^0-9.]/g, '');
-        const parsed = parseFloat(raw);
-        if (!isNaN(parsed)) product.price = parsed;
+        const parsed = this.parsePrice(row[fieldMap.price]);
+        if (parsed != null) product.price = parsed;
+      }
+      if (fieldMap.discounted_price) {
+        const parsed = this.parsePrice(row[fieldMap.discounted_price]);
+        if (parsed != null) product.discounted_price = parsed;
+      }
+      if (fieldMap.brand) {
+        product.brand = String(row[fieldMap.brand] ?? '').trim() || undefined;
+      }
+      if (fieldMap.sku) {
+        product.sku = String(row[fieldMap.sku] ?? '').trim() || undefined;
+      }
+      if (fieldMap.usage_description) {
+        product.usage_description =
+          String(row[fieldMap.usage_description] ?? '').trim() || undefined;
       }
       if (fieldMap.tags) {
         const val = row[fieldMap.tags];
@@ -66,21 +79,53 @@ export class AttachSpreadsheetService extends AttachDocumentService {
 
   private detectColumns(headers: string[]): Record<string, string | undefined> {
     const map: Record<string, string | undefined> = {};
-    const lower = headers.map((h) => h.toLowerCase());
+    const lower = headers.map((h) => h.toLowerCase().trim());
+    const used = new Set<number>();
 
     const patterns: Record<string, RegExp> = {
+      discounted_price:
+        /^(discounted[_\s-]?price|discounted|sale[_\s-]?price|discount[_\s-]?price|promo[_\s-]?price|special[_\s-]?price|offer[_\s-]?price|reduced[_\s-]?price)/,
+      usage_description:
+        /^(usage([_\s-]desc(ription)?)?|how[_\s-]?to[_\s-]?use|instructions?|directions?)/,
       name: /^(name|product|title|item)/,
-      description: /^(desc|description|details|about)/,
-      price: /^(price|cost|amount|rate)/,
+      brand: /^(brand|manufacturer|maker|vendor)/,
+      description: /^(desc(ription)?|details|about|product[_\s-]?desc(ription)?)/,
+      price: /^(price|cost|amount|rate|regular[_\s-]?price)/,
+      sku: /^(sku|code|product[_\s-]?code|item[_\s-]?code|barcode|upc|ean)/,
       tags: /^(tags?|labels?|keywords?)/,
       category: /^(category|type|group|class)/,
     };
 
-    for (const [field, regex] of Object.entries(patterns)) {
-      const idx = lower.findIndex((h) => regex.test(h));
-      if (idx !== -1) map[field] = headers[idx];
+    const fieldOrder = [
+      'discounted_price',
+      'usage_description',
+      'name',
+      'brand',
+      'description',
+      'price',
+      'sku',
+      'tags',
+      'category',
+    ] as const;
+
+    for (const field of fieldOrder) {
+      const regex = patterns[field];
+      const idx = lower.findIndex((h, i) => !used.has(i) && regex.test(h));
+      if (idx !== -1) {
+        map[field] = headers[idx];
+        used.add(idx);
+      }
     }
 
     return map;
+  }
+
+  private parsePrice(value: unknown): number | undefined {
+    if (typeof value === 'number' && !isNaN(value) && value >= 0) {
+      return value;
+    }
+    const raw = String(value ?? '').replace(/[^0-9.]/g, '');
+    const parsed = parseFloat(raw);
+    return !isNaN(parsed) && parsed >= 0 ? parsed : undefined;
   }
 }
