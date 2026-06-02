@@ -26,6 +26,7 @@ export async function processGenerateProductEmbedding(
     tags,
     product.brand ?? null,
     product.category ?? null,
+    product.usage_description ?? null,
   );
 
   const vector = await generateEmbedding(text);

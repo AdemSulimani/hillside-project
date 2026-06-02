@@ -16,6 +16,7 @@ import {
   postAdminVoidUseCase,
   postAdminGenerateReport,
   postAdminBackfillProductEmbeddings,
+  postAdminReembedAllProducts,
   type AdminUseCaseRow,
   type CommissionableOrderRow,
 } from '@/api/platformAdminApi';
@@ -190,6 +191,20 @@ export default function AdminBusinessDetailPage() {
     },
   });
 
+  const reembedAllMutation = useMutation({
+    mutationFn: () => postAdminReembedAllProducts(tenantId!),
+    onSuccess: (result) => {
+      if (result.queued === 0) {
+        toast.info('No active products found for this business.');
+      } else {
+        toast.success(`Queued re-embedding for all ${result.queued} product(s). Vectors will include usage descriptions once complete.`);
+      }
+    },
+    onError: (e) => {
+      toast.error(e instanceof AxiosError ? (e.response?.data?.message as string) ?? 'Re-embed failed' : 'Re-embed failed');
+    },
+  });
+
   const tenant = overviewQuery.data?.tenant;
   const channels = overviewQuery.data?.channels ?? [];
   const stats = statsQuery.data;
@@ -257,22 +272,47 @@ export default function AdminBusinessDetailPage() {
               <CardHeader>
                 <CardTitle className="text-base">Product embeddings</CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Products imported via spreadsheet or PDF before June 2026 may be missing
-                  semantic embeddings, which causes the AI to miss them during customer
-                  conversations. Use this to queue embedding generation for all products that
-                  currently lack one.
+                  Semantic embeddings power the AI's product search. Use these actions to repair
+                  or refresh them when the AI is missing products or giving inaccurate answers.
                 </p>
               </CardHeader>
-              <CardContent>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={backfillEmbeddingsMutation.isPending}
-                  onClick={() => backfillEmbeddingsMutation.mutate()}
-                >
-                  {backfillEmbeddingsMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
-                  Backfill missing embeddings
-                </Button>
+              <CardContent className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-medium">Backfill missing embeddings</p>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    Queues embedding generation only for products that currently have no vector
+                    (e.g. bulk-imported products whose job failed or hadn't run yet).
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-fit"
+                    disabled={backfillEmbeddingsMutation.isPending}
+                    onClick={() => backfillEmbeddingsMutation.mutate()}
+                  >
+                    {backfillEmbeddingsMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+                    Backfill missing embeddings
+                  </Button>
+                </div>
+                <div className="border-t pt-4 flex flex-col gap-1">
+                  <p className="text-sm font-medium">Re-embed all products</p>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    Regenerates vectors for <span className="font-medium text-foreground">every</span> active
+                    product, including those that already have an embedding. Use this after a schema
+                    change (e.g. usage descriptions are now indexed) to ensure the AI has
+                    up-to-date vectors for the full catalog.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-fit"
+                    disabled={reembedAllMutation.isPending}
+                    onClick={() => reembedAllMutation.mutate()}
+                  >
+                    {reembedAllMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+                    Re-embed all products
+                  </Button>
+                </div>
               </CardContent>
             </Card>
             <AdminBusinessAiPanel tenantId={tenant.id} />

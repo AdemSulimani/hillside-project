@@ -491,6 +491,15 @@ export async function postAdminBackfillProductEmbeddings(
   return data.data!;
 }
 
+export async function postAdminReembedAllProducts(
+  tenantId: string,
+): Promise<{ queued: number; product_ids: string[] }> {
+  const { data } = await adminApi.post<
+    ApiResponse<{ queued: number; product_ids: string[] }>
+  >(`/admin/businesses/${tenantId}/products/reembed-all`);
+  return data.data!;
+}
+
 export async function postAdminCreateCatalogBlock(body: {
   key: string;
   title: string;

@@ -3,7 +3,9 @@ import { findTenantById } from '../db/models/tenant';
 import { findMessagesByConversation, type Message } from '../db/models/message';
 import {
   countActiveProducts,
+  countProductsWithoutEmbeddings,
   searchProducts,
+  searchProductsByCatalogPhrases,
   searchProductsByDisjunctiveTerms,
   searchProductsBySimilarity,
   type Product,
@@ -213,6 +215,7 @@ async function loadProductCatalog(tenantId: string): Promise<Product[]> {
 
 export function extractKeywords(text: string): string[] {
   const stopWords = new Set([
+    // English
     'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they',
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
     'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
@@ -223,13 +226,289 @@ export function extractKeywords(text: string): string[] {
     'that', 'this', 'what', 'which', 'who', 'when', 'where', 'how',
     'all', 'each', 'any', 'both', 'few', 'more', 'most', 'some',
     'hi', 'hello', 'hey', 'thanks', 'thank', 'please', 'ok', 'okay',
+    // Albanian — common function words that don't carry product meaning
+    'dhe', 'një', 'nje', 'për', 'per', 'nga', 'me', 'në', 'ne', 'është',
+    'eshte', 'jam', 'jemi', 'janë', 'jane', 'ka', 'kam', 'kemi', 'kanë',
+    'kane', 'do', 'dua', 'duam', 'mund', 'që', 'qe', 'si', 'çfarë',
+    'cfar', 'cfare', 'kur', 'ku', 'kjo', 'ky', 'ato', 'ata', 'ajo',
+    'ai', 'na', 'ju', 'ata', 'ato', 'të', 'te', 'se', 'por', 'ose',
+    'nuk', 'jo', 'po', 'edhe', 'fare', 'shumë', 'shume', 'pak', 'mirë',
+    'mire', 'keq', 'sot', 'dje', 'nesër', 'neser', 'tani', 'keni',
+    'faleminderit', 'pershendetje', 'mirupafshim', 'ndihme',
   ]);
 
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
+    // Keep Unicode letters (including ë, ç, and all other scripts) and digits.
+    // The old [^a-z0-9\s] stripped Albanian characters, producing garbled tokens
+    // like "biobalancn" instead of "biobalancë" which then matched nothing.
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
     .split(/\s+/)
     .filter((w) => w.length > 2 && !stopWords.has(w));
+}
+
+/** Multi-word phrases and known category/tag labels extracted for catalog lookup. */
+export function extractCatalogSearchPhrases(text: string): string[] {
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) return [];
+
+  const phrases = new Set<string>();
+
+  const knownPatterns: Array<{ re: RegExp; phrase: string }> = [
+    { re: /\bshtim\s+peshe\b|\bshtimin\s+e\s+peshes\b|\bne\s+shtim\s+peshe\b/, phrase: 'shtim peshe' },
+    { re: /\bhumbje\s+peshe\b|\bne\s+humbje\s+peshe\b|\bper\s+humbje\s+peshe\b/, phrase: 'humbje peshe' },
+    { re: /\bmasa\s+muskulore\b|\bmuscle\s+mass\b|\bweight\s+gain\b/, phrase: 'masa muskulore' },
+    { re: /\bproteina\b|\bprotein\b/, phrase: 'proteina' },
+    { re: /\bmass\s+gainer\b|\bmassgainer\b/, phrase: 'mass gainer' },
+    { re: /\bwhey\b/, phrase: 'whey' },
+    { re: /\bcreatine\b|\bkreatine\b/, phrase: 'creatine' },
+    { re: /\bvitamina\b|\bvitamins?\b/, phrase: 'vitamina' },
+  ];
+
+  for (const { re, phrase } of knownPatterns) {
+    if (re.test(normalized)) phrases.add(phrase);
+  }
+
+  const words = normalized.split(' ').filter((w) => w.length >= 2);
+  for (let i = 0; i < words.length - 1; i++) {
+    const bigram = `${words[i]} ${words[i + 1]}`;
+    if (bigram.length >= 5) phrases.add(bigram);
+  }
+
+  return [...phrases];
+}
+
+/** Whether the customer is browsing/recommending by goal, category, or tag (not a single SKU). */
+export function hasCategoryShoppingIntent(text: string): boolean {
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) return false;
+
+  return (
+    /\b(shtim|humbje)\s+peshe\b/.test(normalized) ||
+    /\ba\s+keni\b.*\bprodukt/.test(normalized) ||
+    /\bprodukt\b.*\b(per|për|te\s+mire|të\s+mirë)\b/.test(normalized) ||
+    /\b(recommend|suggestion|suggest|what\s+do\s+you\s+have|which\s+product)\b/i.test(
+      normalized,
+    ) ||
+    /\b(cfare|çfarë)\s+produkt/.test(normalized) ||
+    extractCatalogSearchPhrases(text).some((p) => p.includes(' '))
+  );
+}
+
+function mergeMatchedProducts(sources: Product[][], limit: number): Product[] {
+  const seen = new Set<string>();
+  const out: Product[] = [];
+  for (const list of sources) {
+    for (const p of list) {
+      if (!seen.has(p.id)) {
+        seen.add(p.id);
+        out.push(p);
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+  return out;
+}
+
+/** Short follow-up about usage/dosage with no product name (e.g. "Si ta perdor?"). */
+export function isUsageOnlyFollowUp(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s?!.]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!t || t.length > 100) return false;
+
+  const usageCues = [
+    'si ta perdor',
+    'si e perdor',
+    'si duhet ta perdor',
+    'si ta marr',
+    'how to use',
+    'how do i use',
+    'how should i use',
+    'usage',
+    'dozimi',
+    'dozë',
+    'dose',
+    'dosage',
+    'instructions',
+    'udhezime',
+    'udhëzime',
+    'perdorim',
+    'përdorim',
+    'apliko',
+    'apply it',
+    'take it',
+  ];
+
+  const hasUsageCue = usageCues.some((n) => t.includes(n));
+  const words = t.split(/\s+/).filter((w) => w.length > 1);
+  return hasUsageCue && words.length <= 8;
+}
+
+/**
+ * Vague reference to the product just discussed (e.g. "tell me more", "about it").
+ */
+export function isVagueProductReferenceFollowUp(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s?!.]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!t || t.length > 80) return false;
+
+  const patterns = [
+    /^(tell me more|more about (it|this)|about (it|this)|this one|that one)(\s*[.!?]*)?$/,
+    /^(me shum|më shumë|per te|për të|rreth tij|rreth kesaj)(\s*[.!?]*)?$/,
+    /^(what is it|what does it do|cfare eshte|çfarë është)(\s*[.!?]*)?$/,
+    /^(describe (it|this)|description)(\s*[.!?]*)?$/,
+  ];
+
+  if (patterns.some((re) => re.test(t))) return true;
+
+  const vagueCues = ['this product', 'that product', 'ky produkt', 'kete produkt', 'këtë produkt'];
+  const words = t.split(/\s+/).filter((w) => w.length > 1);
+  return vagueCues.some((n) => t.includes(n)) && words.length <= 6;
+}
+
+/** Follow-up that refers to the product from prior turns without naming it. */
+export function needsConversationProductContext(message: string): boolean {
+  return (
+    isPriceOnlyFollowUp(message) ||
+    isUsageOnlyFollowUp(message) ||
+    isVagueProductReferenceFollowUp(message)
+  );
+}
+
+/** Short follow-up asking only for price (e.g. "Sa kushton?") with no product name. */
+export function isPriceOnlyFollowUp(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s?!.]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!t || t.length > 80) return false;
+
+  if (
+    /^(sa\s+)?(kushton|kushtojne|kushtojnë|cmimi|cmim|çmimi|çmim|qmimi|price|cost)(\s*[.!?]*)?$/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+
+  const hasPriceCue = ['kushton', 'kushtojne', 'cmim', 'çmim', 'qmim', 'price', 'how much', 'sa kushton'].some(
+    (n) => t.includes(n),
+  );
+  const words = t.split(/\s+/).filter((w) => w.length > 1);
+  return hasPriceCue && words.length <= 6;
+}
+
+/**
+ * Unified product retrieval: tag/category phrases first for shopping-by-goal queries,
+ * then semantic + keyword. Prevents generic whey matches from hiding tagged catalog rows.
+ */
+export async function matchProductsForCustomerMessage(
+  tenantId: string,
+  searchText: string,
+  limit: number,
+): Promise<Product[]> {
+  const trimmed = searchText.trim();
+  if (!trimmed) return [];
+
+  const phrases = extractCatalogSearchPhrases(trimmed);
+  const categoryTagMatches = await searchProductsByCatalogPhrases(tenantId, phrases, limit);
+  const categoryIntent = hasCategoryShoppingIntent(trimmed);
+
+  let semantic: Product[] = [];
+  try {
+    const queryEmbedding = await generateEmbedding(trimmed);
+    const similar = await searchProductsBySimilarity(tenantId, queryEmbedding, limit);
+    semantic = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
+  } catch {
+    // Fall through — keyword paths still run.
+  }
+
+  const keywords = extractKeywords(trimmed);
+  const keywordMatches =
+    keywords.length > 0
+      ? await searchProductsByDisjunctiveTerms(tenantId, keywords, limit)
+      : [];
+
+  const phraseDirect: Product[] = [];
+  for (const phrase of phrases) {
+    if (!phrase.includes(' ') && phrase.length < 6) continue;
+    phraseDirect.push(...(await searchProducts(tenantId, phrase, limit)));
+  }
+
+  if (categoryIntent && categoryTagMatches.length > 0) {
+    return mergeMatchedProducts([categoryTagMatches, phraseDirect, keywordMatches], limit);
+  }
+
+  return mergeMatchedProducts(
+    [categoryTagMatches, phraseDirect, semantic, keywordMatches],
+    limit,
+  );
+}
+
+/** Products the assistant recently mentioned — used for "Sa kushton?" style follow-ups. */
+export async function resolveProductsFromConversationHistory(
+  tenantId: string,
+  messages: Message[],
+  limit: number,
+): Promise<Product[]> {
+  const assistantTexts = messages
+    .filter((m) => m.sent_by === 'ai')
+    .slice(-4)
+    .map((m) => (m.content ?? '').trim())
+    .filter((t) => t.length > 0);
+
+  if (assistantTexts.length === 0) return [];
+
+  const combined = assistantTexts.join('\n');
+  const matched = await matchProductsForCustomerMessage(tenantId, combined, limit);
+  if (matched.length > 0) return matched;
+
+  const seen = new Set<string>();
+  const out: Product[] = [];
+  for (const text of [...assistantTexts].reverse()) {
+    const rows = await searchProducts(tenantId, text.slice(0, 300), limit);
+    for (const p of rows) {
+      if (!seen.has(p.id)) {
+        seen.add(p.id);
+        out.push(p);
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+
+  return out;
 }
 
 const USAGE_QUESTION_KEYWORDS = [
@@ -659,13 +938,19 @@ async function customerAskedAboutPrice(message: string): Promise<boolean> {
     // Fall through to lightweight lexical fallback if classifier is unavailable.
   }
 
-  const t = inbound.toLowerCase();
+  const t = inbound
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '');
   return [
     'price',
     'cost',
     'how much',
     'sa kushton',
+    'kushton',
+    'kushtojne',
     'cmim',
+    'çmim',
     'qmim',
     '$',
     '€',
@@ -905,34 +1190,13 @@ function assistantAlreadyFinalizedDiscount(conversationHistory: Message[]): bool
   });
 }
 
-/** Lexical catalog lookup for inbound customer text (short phrase or full question). */
+/** Lexical + semantic + tag/category catalog lookup for inbound customer text. */
 export async function findProductsForInboundMessage(
   tenantId: string,
   inboundMessage: string,
   limit = 5,
 ): Promise<Product[]> {
-  const searchText = inboundMessage.trim();
-  if (!searchText) return [];
-
-  // 1. Semantic vector search — same strategy as generateReply so that nicknames,
-  //    abbreviations, and informal spellings that the AI matched are also found here.
-  try {
-    const queryEmbedding = await generateEmbedding(searchText);
-    const similar = await searchProductsBySimilarity(tenantId, queryEmbedding, limit);
-    const semanticMatches = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
-    if (semanticMatches.length > 0) return semanticMatches;
-  } catch {
-    // Embeddings unavailable — fall through to keyword search.
-  }
-
-  // 2. Full-text keyword search.
-  const direct = await searchProducts(tenantId, searchText, limit);
-  if (direct.length > 0) return direct;
-
-  // 3. Disjunctive keyword search on extracted terms.
-  const keywords = extractKeywords(searchText);
-  if (keywords.length === 0) return [];
-  return searchProductsByDisjunctiveTerms(tenantId, keywords, limit);
+  return matchProductsForCustomerMessage(tenantId, inboundMessage, limit);
 }
 
 /**
@@ -2219,34 +2483,90 @@ export async function generateReply(
   let usedFullCatalogFallback = false;
 
   const searchText = inboundMessage.trim();
-  if (searchText) {
+
+  // Context-only follow-ups (price, usage, "tell me more") must use the product the
+  // assistant just discussed — not re-search the short follow-up text itself.
+  if (needsConversationProductContext(searchText)) {
+    const fromHistory = await resolveProductsFromConversationHistory(
+      tenantId,
+      conversationHistoryWindow,
+      FOCUSED_PRODUCT_MATCH_LIMIT,
+    );
+    if (fromHistory.length > 0) {
+      products = fromHistory;
+    }
+  }
+
+  if (products.length === 0 && searchText) {
     try {
-      const queryEmbedding = await generateEmbedding(searchText);
-      const similar = await searchProductsBySimilarity(
+      products = await matchProductsForCustomerMessage(
         tenantId,
-        queryEmbedding,
+        searchText,
         FOCUSED_PRODUCT_MATCH_LIMIT,
       );
-      products = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
     } catch (err) {
-      console.warn('[aiService] Semantic search failed, falling back to keyword search', err);
+      console.warn('[aiService] Product matching failed', err);
     }
   }
 
-  if (products.length === 0) {
-    const keywords = extractKeywords(searchText);
-    if (keywords.length > 0) {
-      products = await searchProductsByDisjunctiveTerms(
-        tenantId,
-        keywords,
-        FOCUSED_PRODUCT_MATCH_LIMIT,
-      );
+  // If matching missed the discussed product on a price/usage/vague follow-up, try history.
+  if (
+    products.length === 0 &&
+    (customerAskedPrice || isUsageOnlyFollowUp(searchText) || isVagueProductReferenceFollowUp(searchText)) &&
+    conversationHistoryWindow.length > 0
+  ) {
+    const fromHistory = await resolveProductsFromConversationHistory(
+      tenantId,
+      conversationHistoryWindow,
+      FOCUSED_PRODUCT_MATCH_LIMIT,
+    );
+    if (fromHistory.length > 0) {
+      products = fromHistory;
     }
   }
 
+  // Warn when both retrieval paths returned 0 results for a non-empty query.
+  // The most common cause for this with large catalogs is products having
+  // embedding = NULL (bulk imports where the embedding job queue fell behind or
+  // errored). This log helps operators diagnose the problem quickly.
+  if (products.length === 0 && searchText.length > 0 && totalCatalogCount > 0) {
+    countProductsWithoutEmbeddings(tenantId)
+      .then((missing) => {
+        if (missing > 0) {
+          console.warn(
+            '[aiService] No products matched for non-empty query — embedding coverage gap detected',
+            {
+              tenantId,
+              conversationId,
+              totalActiveProducts: totalCatalogCount,
+              productsWithoutEmbedding: missing,
+              coveragePct: Math.round(((totalCatalogCount - missing) / totalCatalogCount) * 100),
+              hint: 'Run POST /admin/businesses/:tenantId/products/backfill-embeddings to repair',
+            },
+          );
+        }
+      })
+      .catch(() => {
+        // Diagnostic — never block the reply path
+      });
+  }
+
   if (products.length === 0) {
-    products = cachedCatalogProducts;
-    usedFullCatalogFallback = true;
+    // Only fall back to the alphabetical catalog sample when the customer hasn't
+    // asked about a specific product (empty text, simple greeting, etc.).
+    // For specific product queries that neither semantic nor keyword search could
+    // satisfy — most commonly because embeddings are missing after a bulk import,
+    // or because the product name uses unusual spelling — showing 20 unrelated
+    // alphabetical products is actively harmful: the AI may hallucinate answers
+    // based on those irrelevant rows.  Passing an empty list here instead triggers
+    // the "catalog has N products, ask the customer to clarify" guardrail message
+    // in formatProductCatalog(), which is the safest and most honest response.
+    const meaningfulSearchText = searchText.length > 0 && extractKeywords(searchText).length > 0;
+    if (!meaningfulSearchText) {
+      products = cachedCatalogProducts;
+      usedFullCatalogFallback = true;
+    }
+    // For meaningful queries with 0 matches, products stays [] → guardrail fires.
   }
 
   let visionContext: string | null = null;

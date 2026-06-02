@@ -221,6 +221,11 @@ ownerRoutes.post(
   adminAiController.postBackfillProductEmbeddings,
 );
 ownerRoutes.post(
+  '/businesses/:tenantId/products/reembed-all',
+  validateParams(adminTenantIdParamsSchema),
+  adminAiController.postReembedAllProducts,
+);
+ownerRoutes.post(
   '/businesses/:tenantId/ai/sync-catalog-blocks',
   validateParams(adminTenantIdParamsSchema),
   adminAiController.postSyncTenantCatalogBlocks,

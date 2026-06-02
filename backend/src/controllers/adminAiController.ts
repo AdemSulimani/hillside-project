@@ -555,3 +555,50 @@ export async function postBackfillProductEmbeddings(req: Request, res: Response)
     sendError(res, 'Failed to backfill embeddings', 500, err);
   }
 }
+
+/**
+ * Re-generates embeddings for ALL active products of a tenant, regardless of
+ * whether they already have an embedding.  Use this after any change to the
+ * embedding schema — e.g. adding usage_description to the indexed text — so
+ * that all vectors reflect the current field set.
+ *
+ * POST /admin/businesses/:tenantId/products/reembed-all
+ */
+export async function postReembedAllProducts(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.params.tenantId as string;
+
+    const { rows } = await pool.query<{ id: string; name: string }>(
+      `SELECT id, name FROM products
+       WHERE tenant_id = $1
+         AND deleted_at IS NULL
+         AND is_active = true
+       ORDER BY created_at ASC`,
+      [tenantId],
+    );
+
+    if (rows.length === 0) {
+      sendSuccess(res, { queued: 0 }, 'No active products found for this tenant');
+      return;
+    }
+
+    await Promise.all(
+      rows.map((p) =>
+        defaultQueue.add('product.embedding', { productId: p.id, tenantId }),
+      ),
+    );
+
+    console.info('[admin] Queued full re-embed for all products', {
+      tenantId,
+      count: rows.length,
+    });
+
+    sendSuccess(
+      res,
+      { queued: rows.length, product_ids: rows.map((p) => p.id) },
+      `Queued embedding regeneration for all ${rows.length} product(s)`,
+    );
+  } catch (err) {
+    sendError(res, 'Failed to queue re-embed for all products', 500, err);
+  }
+}

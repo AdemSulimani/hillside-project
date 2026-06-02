@@ -247,12 +247,69 @@ export async function searchProducts(
     `SELECT * FROM products
      WHERE tenant_id = $1 AND deleted_at IS NULL
        AND is_active = true
-       AND (name ILIKE $2 OR (brand IS NOT NULL AND brand ILIKE $2) OR description ILIKE $2 OR tags::text ILIKE $2)
+       AND (
+         name ILIKE $2
+         OR (brand IS NOT NULL AND brand ILIKE $2)
+         OR description ILIKE $2
+         OR (category IS NOT NULL AND category ILIKE $2)
+         OR tags::text ILIKE $2
+       )
      ORDER BY name ASC
      LIMIT $3`,
     [tenantId, `%${query}%`, limit],
   );
   return rows;
+}
+
+/**
+ * Match products whose category or tags contain the phrase (e.g. "shtim peshe").
+ */
+export async function searchProductsByCategoryOrTag(
+  tenantId: string,
+  phrase: string,
+  limit = 10,
+): Promise<Product[]> {
+  const trimmed = phrase.trim();
+  if (trimmed.length < 2) return [];
+
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND (
+         (category IS NOT NULL AND category ILIKE $2)
+         OR tags::text ILIKE $2
+       )
+     ORDER BY name ASC
+     LIMIT $3`,
+    [tenantId, `%${trimmed}%`, limit],
+  );
+  return rows;
+}
+
+/**
+ * Search category/tags for each phrase; de-duplicates by product id.
+ */
+export async function searchProductsByCatalogPhrases(
+  tenantId: string,
+  phrases: string[],
+  limit = 10,
+): Promise<Product[]> {
+  const seen = new Set<string>();
+  const out: Product[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.trim().length < 4) continue;
+    const rows = await searchProductsByCategoryOrTag(tenantId, phrase, limit);
+    for (const p of rows) {
+      if (!seen.has(p.id)) {
+        seen.add(p.id);
+        out.push(p);
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+
+  return out;
 }
 
 /**
@@ -317,6 +374,37 @@ export async function countActiveProducts(tenantId: string): Promise<number> {
     [tenantId],
   );
   return parseInt(rows[0]?.count ?? '0', 10);
+}
+
+/**
+ * Returns the number of active products that have no embedding yet.
+ * Used for diagnostics and to decide when to auto-backfill embeddings.
+ */
+export async function countProductsWithoutEmbeddings(tenantId: string): Promise<number> {
+  const { rows } = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true AND embedding IS NULL`,
+    [tenantId],
+  );
+  return parseInt(rows[0]?.count ?? '0', 10);
+}
+
+/**
+ * Returns IDs and names of active products that have no embedding yet.
+ * Capped at 500 rows so it is safe to call in a job context.
+ */
+export async function findProductsWithoutEmbeddings(
+  tenantId: string,
+  limit = 500,
+): Promise<Array<{ id: string; name: string }>> {
+  const { rows } = await pool.query<{ id: string; name: string }>(
+    `SELECT id, name FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true AND embedding IS NULL
+     ORDER BY created_at ASC
+     LIMIT $2`,
+    [tenantId, limit],
+  );
+  return rows;
 }
 
 export async function appendImageUrls(
