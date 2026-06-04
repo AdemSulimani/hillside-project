@@ -2,8 +2,11 @@ import type { Request, Response } from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { findProductById, appendImageUrls } from '../db/models/product';
+import { deleteFingerprintsForImageUrls } from '../db/models/productImageFingerprint';
 import { sendSuccess, sendError } from '../utils/response';
 import { uploadImage } from '../services/cloudinaryService';
+import { defaultQueue } from '../jobs/queues';
+import { queueProductImageFingerprintJobs } from '../services/productImageFingerprintService';
 
 export async function upload(req: Request, res: Response): Promise<void> {
   try {
@@ -37,6 +40,8 @@ export async function upload(req: Request, res: Response): Promise<void> {
       }),
     );
     const updated = await appendImageUrls(id, tenantId, newUrls);
+
+    await queueProductImageFingerprintJobs(defaultQueue, id, tenantId, newUrls, 1);
 
     sendSuccess(
       res,

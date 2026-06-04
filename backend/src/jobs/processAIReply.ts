@@ -33,6 +33,7 @@ import {
   classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
+  classifyProductKnowledgeQuestionIntent,
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
   detectPostPurchaseSupportIntent,
@@ -40,9 +41,11 @@ import {
   detectReplyLanguage,
   generateReply,
   isOutOfStockProductReply,
+  isProductKnowledgeQuestionUnanswered,
   isUsageQuestionUnanswered,
   type ReplyLocale,
 } from '../services/aiService';
+import { buildProductKnowledgeContext } from '../services/productRetrievalService';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -1541,8 +1544,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // Re-running a separate search here would risk missing products referenced by nickname,
   // abbreviation, or follow-up pronoun (e.g. "kit produkt" / "this product").
   const usageCandidates = isOosCannedReply ? [] : matchedProducts;
-  const productWithUsage = usageCandidates.find((p) => typeof p.usage_description === 'string' && p.usage_description.trim() !== '');
-  const usageDescription = productWithUsage?.usage_description?.trim() ?? null;
+  const usageTexts = usageCandidates
+    .map((p) => p.usage_description?.trim())
+    .filter((text): text is string => Boolean(text));
+  const usageDescription = usageTexts.length > 0 ? usageTexts.join('\n---\n') : null;
 
   const usedVerbatimUsageDescription = usageDescription
     ? normalizeVerbatimComparison(replyText) === normalizeVerbatimComparison(usageDescription)
@@ -1765,8 +1770,76 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
+  let productKnowledgeEscalated = false;
+  const productKnowledgeIntent =
+    !usageEscalated && inboundText
+      ? await classifyProductKnowledgeQuestionIntent(inboundText)
+      : false;
+
+  if (productKnowledgeIntent && !isOosCannedReply) {
+    const knowledgeContext = buildProductKnowledgeContext(matchedProducts);
+    let shouldEscalate = matchedProducts.length === 0;
+
+    if (!shouldEscalate) {
+      try {
+        shouldEscalate = await isProductKnowledgeQuestionUnanswered(inboundText, knowledgeContext);
+      } catch (err) {
+        console.warn('[ai.reply] product knowledge unanswered classifier failed', {
+          conversationId,
+          tenantId,
+          err,
+        });
+      }
+    }
+
+    if (shouldEscalate) {
+      const client = await pool.connect();
+      let alert: AIAlert | undefined;
+      try {
+        await client.query('BEGIN');
+        await setConversationAiPaused(conversationId, tenantId, true, client);
+        await setConversationHumanReplied(conversationId, tenantId, false, client);
+        alert = await createAIAlert(
+          {
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            message_id: lastInbound?.id ?? null,
+            reason: 'product_question_unanswered',
+          },
+          client,
+        );
+        await client.query('COMMIT');
+        productKnowledgeEscalated = true;
+        finalReplyText = usageHoldingMessage;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[ai.reply] Product knowledge escalation transaction failed', {
+          conversationId,
+          tenantId,
+          err,
+        });
+      } finally {
+        client.release();
+      }
+
+      if (alert) {
+        const contactForAlert = await findContactById(conversation.contact_id);
+        socketService.emitAIAlert(tenantId, {
+          ...alert,
+          message_content: inboundText || null,
+          contact_name: contactForAlert?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+        socketService.emitConversationUpdated(tenantId, conversationId);
+      }
+    }
+  }
+
+  const knowledgeGapEscalated = usageEscalated || productKnowledgeEscalated;
+
   let isOrderConfirmationReply = false;
-  if (!usageEscalated && inboundText && !isOosCannedReply) {
+  if (!knowledgeGapEscalated && inboundText && !isOosCannedReply) {
     isOrderConfirmationReply = await classifyOrderConfirmationReplyIntent(inboundText, finalReplyText);
     if (isOrderConfirmationReply) {
       const orderFollowUp = ORDER_CONFIRMATION_FOLLOW_UP[replyLocale];
@@ -1794,7 +1867,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     // the customer has not yet been asked to verify their phone + address, override the reply
     // with the structured data-confirmation message. The order will only be registered once
     // the customer confirms their details in the next turn.
-    if (!usageEscalated && !isOosCannedReply) {
+    if (!knowledgeGapEscalated && !isOosCannedReply) {
       const dataConfirmationAlreadySent = hasAssistantAskedDataConfirmation(recentMessages);
       const inboundProvidesDetails = messageLooksLikeOrderDetailsPayload(inboundText);
       const shouldForceDataConfirmation =
@@ -1844,16 +1917,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const hasNoMatchingProducts =
     productCatalogContext.trim() === 'No matching products found in the catalog.';
   const skipEvaluationForHonestNegative =
-    !usageEscalated && containsNegativeAvailabilityPhrase && hasNoMatchingProducts;
-  const skipEvaluationForOutOfStockCanned = !usageEscalated && isOosCannedReply;
+    !knowledgeGapEscalated && containsNegativeAvailabilityPhrase && hasNoMatchingProducts;
+  const skipEvaluationForOutOfStockCanned = !knowledgeGapEscalated && isOosCannedReply;
   const skipEvaluationForClosingReply =
-    !usageEscalated &&
+    !knowledgeGapEscalated &&
     explicitClosingReplies.some(
       (sentence) =>
         normalizeForIncludesCheck(finalReplyText) ===
         normalizeForIncludesCheck(sentence),
     );
-  const qualityEval = usageEscalated
+  const qualityEval = knowledgeGapEscalated
     ? null
     : skipEvaluationForHonestNegative ||
         skipEvaluationForOutOfStockCanned ||
@@ -1899,9 +1972,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     );
   }
 
-  if (usageEscalated) {
+  if (knowledgeGapEscalated) {
     console.info(
-      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: usage_escalated`,
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} skipped: knowledge_gap_escalated`,
     );
   } else if (skipEvaluationForHonestNegative) {
     console.info(
@@ -1937,7 +2010,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // shouldStillSendAutomatedReply would read that flag and abort the send,
   // preventing the holding message from ever reaching the customer.
   // Skip the precheck in that case — we still need to deliver the holding message.
-  const mainSendPrecheck = usageEscalated
+  const mainSendPrecheck = knowledgeGapEscalated
     ? ({ ok: true } as const)
     : await shouldStillSendAutomatedReply({
         tenantId,

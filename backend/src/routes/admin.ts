@@ -226,6 +226,11 @@ ownerRoutes.post(
   adminAiController.postReembedAllProducts,
 );
 ownerRoutes.post(
+  '/businesses/:tenantId/products/backfill-image-fingerprints',
+  validateParams(adminTenantIdParamsSchema),
+  adminAiController.postBackfillProductImageFingerprints,
+);
+ownerRoutes.post(
   '/businesses/:tenantId/ai/sync-catalog-blocks',
   validateParams(adminTenantIdParamsSchema),
   adminAiController.postSyncTenantCatalogBlocks,

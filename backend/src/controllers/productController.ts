@@ -17,6 +17,8 @@ import type { CreateProductInput, UpdateProductInput } from '../validators/produ
 import type { ProductQuery } from '../validators/product';
 import { redisConnection } from '../jobs/redisConnection';
 import { deleteImage, getPublicIdFromUrl } from '../services/cloudinaryService';
+import { deleteFingerprintsForImageUrls } from '../db/models/productImageFingerprint';
+import { queueProductImageFingerprintJobs } from '../services/productImageFingerprintService';
 
 export async function index(req: Request, res: Response): Promise<void> {
   try {
@@ -131,6 +133,7 @@ export async function update(req: Request, res: Response): Promise<void> {
 
     if (existing && Array.isArray(fieldsWithImages.image_urls)) {
       const removedUrls = existing.image_urls.filter((url) => !fieldsWithImages.image_urls!.includes(url));
+      const addedUrls = fieldsWithImages.image_urls.filter((url) => !existing.image_urls.includes(url));
       for (const url of removedUrls) {
         try {
           await deleteImage(getPublicIdFromUrl(url));
@@ -138,12 +141,21 @@ export async function update(req: Request, res: Response): Promise<void> {
           console.warn('[products.update] Failed to delete Cloudinary image', { url, err });
         }
       }
+      if (removedUrls.length > 0) {
+        await deleteFingerprintsForImageUrls(tenantId, removedUrls);
+      }
+      if (addedUrls.length > 0) {
+        await queueProductImageFingerprintJobs(defaultQueue, product.id, tenantId, addedUrls, 1);
+      }
     }
 
     // usage_description was previously missing from this list — any update to it would
     // leave the embedding pointing at the old text, silently breaking "how do I use X?"
     // semantic queries. All fields that feed buildProductText() must be listed here.
-    const embeddingRelevantFields = ['name', 'brand', 'description', 'tags', 'category', 'usage_description'] as const;
+    const embeddingRelevantFields = [
+      'name', 'brand', 'description', 'tags', 'category', 'usage_description',
+      'flavor', 'size', 'color', 'variant', 'weight',
+    ] as const;
     const touchesEmbedding = embeddingRelevantFields.some(
       (f) => f in fields,
     );
@@ -259,6 +271,17 @@ export async function uploadDocument(req: Request, res: Response): Promise<void>
         defaultQueue.add('product.embedding', { productId: p.id, tenantId }, { priority: 2 }),
       ),
     );
+    await Promise.all(
+      products.flatMap((p) =>
+        (p.image_urls ?? []).map((imageUrl) =>
+          defaultQueue.add(
+            'product.imageFingerprint',
+            { productId: p.id, tenantId, imageUrl },
+            { priority: 2 },
+          ),
+        ),
+      ),
+    );
     await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(
@@ -308,6 +331,9 @@ export async function uploadOcrImage(req: Request, res: Response): Promise<void>
     // bypassing the single-product controller that normally enqueues this job.
     // Priority 2 — higher than reconciliation (5) but slightly below live edits (1).
     await defaultQueue.add('product.embedding', { productId: product.id, tenantId }, { priority: 2 });
+    if (Array.isArray(product.image_urls) && product.image_urls.length > 0) {
+      await queueProductImageFingerprintJobs(defaultQueue, product.id, tenantId, product.image_urls, 2);
+    }
     await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(res, { product }, 'Product imported from image', 201);

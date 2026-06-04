@@ -8,9 +8,17 @@ import { processInboundMessage } from './processInboundMessage';
 import { processAIReply, type AIReplyJobData } from './processAIReply';
 import { processGenerateProductEmbedding, type GenerateProductEmbeddingJobData } from './generateProductEmbedding';
 import {
+  processGenerateProductImageFingerprint,
+  type GenerateProductImageFingerprintJobData,
+} from './generateProductImageFingerprint';
+import {
   processReconcileProductEmbeddings,
   initEmbeddingReconcileScheduler,
 } from './reconcileProductEmbeddings';
+import {
+  processReconcileProductImageFingerprints,
+  initImageFingerprintReconcileScheduler,
+} from './reconcileProductImageFingerprints';
 import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
 import { initRefreshMetaTokensScheduler, processRefreshMetaTokens } from './refreshMetaTokens';
 import { checkFinetuningStatus, startFinetuningJob } from './checkFinetuningStatus';
@@ -120,7 +128,9 @@ export const finetuningWorker = new Worker(
   },
 );
 
-export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
+export const defaultWorker = new Worker<
+  GenerateProductEmbeddingJobData | GenerateProductImageFingerprintJobData | Record<string, never>
+>(
   'default',
   async (job) => {
     if (job.name === 'refreshMetaTokens') {
@@ -135,7 +145,15 @@ export const defaultWorker = new Worker<GenerateProductEmbeddingJobData>(
       await processReconcileProductEmbeddings();
       return;
     }
-    await processGenerateProductEmbedding(job.data);
+    if (job.name === 'imageFingerprintReconcile') {
+      await processReconcileProductImageFingerprints();
+      return;
+    }
+    if (job.name === 'product.imageFingerprint') {
+      await processGenerateProductImageFingerprint(job.data as GenerateProductImageFingerprintJobData);
+      return;
+    }
+    await processGenerateProductEmbedding(job.data as GenerateProductEmbeddingJobData);
   },
   { connection: createWorkerConnection(), concurrency: DEFAULT_CONCURRENCY, ...redisOptimizedWorkerOptions },
 );
@@ -164,6 +182,10 @@ void initPrepareFinetuningScheduler().catch((err) => {
 
 void initEmbeddingReconcileScheduler().catch((err) => {
   console.error('[jobs] Failed to register embedding reconciliation scheduler', err);
+});
+
+void initImageFingerprintReconcileScheduler().catch((err) => {
+  console.error('[jobs] Failed to register image fingerprint reconciliation scheduler', err);
 });
 
 void initRefreshMetaTokensScheduler().catch((err) => {

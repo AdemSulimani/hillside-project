@@ -74,6 +74,9 @@ function getAlertToastDescription(reason: string): string {
   if (reason === 'usage_question_unanswered') {
     return `IA nuk mundi të përgjigjej për përdorimin e produktit. ${AI_ALERT_RESOLUTION_HINT}`;
   }
+  if (reason === 'product_question_unanswered') {
+    return `IA nuk ka informacion të mjaftueshëm për pyetjen e produktit. ${AI_ALERT_RESOLUTION_HINT}`;
+  }
   return AI_ALERT_RESOLUTION_HINT;
 }
 

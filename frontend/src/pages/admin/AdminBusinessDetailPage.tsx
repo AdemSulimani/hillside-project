@@ -17,6 +17,7 @@ import {
   postAdminGenerateReport,
   postAdminBackfillProductEmbeddings,
   postAdminReembedAllProducts,
+  postAdminBackfillProductImageFingerprints,
   type AdminUseCaseRow,
   type CommissionableOrderRow,
 } from '@/api/platformAdminApi';
@@ -205,6 +206,26 @@ export default function AdminBusinessDetailPage() {
     },
   });
 
+  const backfillImageFingerprintsMutation = useMutation({
+    mutationFn: () => postAdminBackfillProductImageFingerprints(tenantId!),
+    onSuccess: (result) => {
+      if (result.queued === 0) {
+        toast.info('All catalog images already have visual fingerprints — nothing to backfill.');
+      } else {
+        toast.success(
+          `Queued visual fingerprint generation for ${result.queued} catalog image(s). Customer photo matching will improve once complete.`,
+        );
+      }
+    },
+    onError: (e) => {
+      toast.error(
+        e instanceof AxiosError
+          ? ((e.response?.data?.message as string) ?? 'Image fingerprint backfill failed')
+          : 'Image fingerprint backfill failed',
+      );
+    },
+  });
+
   const tenant = overviewQuery.data?.tenant;
   const channels = overviewQuery.data?.channels ?? [];
   const stats = statsQuery.data;
@@ -270,10 +291,11 @@ export default function AdminBusinessDetailPage() {
           <TabsContent value="ai" className="mt-4 space-y-6">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Product embeddings</CardTitle>
+                <CardTitle className="text-base">Product embeddings & image matching</CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Semantic embeddings power the AI's product search. Use these actions to repair
-                  or refresh them when the AI is missing products or giving inaccurate answers.
+                  Semantic embeddings power text-based product search; visual fingerprints power
+                  customer photo matching. Use these actions to repair or refresh indexing when the
+                  AI is missing products or giving inaccurate answers.
                 </p>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
@@ -311,6 +333,27 @@ export default function AdminBusinessDetailPage() {
                   >
                     {reembedAllMutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
                     Re-embed all products
+                  </Button>
+                </div>
+                <div className="border-t pt-4 flex flex-col gap-1">
+                  <p className="text-sm font-medium">Backfill catalog image fingerprints</p>
+                  <p className="text-xs text-muted-foreground mb-2">
+                    Queues visual fingerprint generation for catalog product photos that are not yet
+                    indexed. Required for reliable customer photo → product matching (e.g. &quot;Do
+                    you have this?&quot; with an image). Safe to run multiple times — only missing
+                    images are queued.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-fit"
+                    disabled={backfillImageFingerprintsMutation.isPending}
+                    onClick={() => backfillImageFingerprintsMutation.mutate()}
+                  >
+                    {backfillImageFingerprintsMutation.isPending && (
+                      <Loader2 className="mr-2 size-4 animate-spin" />
+                    )}
+                    Backfill catalog image fingerprints
                   </Button>
                 </div>
               </CardContent>

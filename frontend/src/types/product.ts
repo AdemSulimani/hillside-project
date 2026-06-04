@@ -12,6 +12,11 @@ export interface Product {
   sku: string | null;
   category: string | null;
   tags: string[];
+  flavor: string | null;
+  size: string | null;
+  color: string | null;
+  variant: string | null;
+  weight: string | null;
   image_urls: string[];
   is_active: boolean;
   in_stock: boolean;
@@ -41,6 +46,11 @@ export interface CreateProductBody {
   sku?: string | null;
   category?: string | null;
   tags?: string[];
+  flavor?: string | null;
+  size?: string | null;
+  color?: string | null;
+  variant?: string | null;
+  weight?: string | null;
   is_active?: boolean;
   in_stock?: boolean;
 }

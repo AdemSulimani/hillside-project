@@ -74,7 +74,7 @@ function isCancellationOrRefundReason(reason: string): boolean {
 }
 
 function isUsageEscalationReason(reason: string): boolean {
-  return reason === 'usage_question_unanswered';
+  return reason === 'usage_question_unanswered' || reason === 'product_question_unanswered';
 }
 
 export default function AIAlertsPage() {
