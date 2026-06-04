@@ -12,7 +12,10 @@ export const adminAiVersionIdParamsSchema = z.object({
 });
 
 export const adminUpdateTenantAiConfigSchema = updateAIConfigSchema.extend({
-  platform_restrictions: z.array(z.string()).optional(),
+  platform_restrictions: z
+    .array(z.string().max(5000, 'Each platform policy bullet must be at most 5000 characters'))
+    .max(50, 'Cannot exceed 50 platform policy bullets')
+    .optional(),
 });
 
 export const adminPatchTenantPromptBlockSchema = z

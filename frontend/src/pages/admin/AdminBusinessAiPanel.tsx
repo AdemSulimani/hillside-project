@@ -34,9 +34,30 @@ import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 
 function extractErr(e: unknown): string {
-  return e instanceof AxiosError && e.response?.data?.message
-    ? String(e.response.data.message)
-    : 'Request failed';
+  if (!(e instanceof AxiosError) || !e.response?.data) return 'Request failed';
+  const data = e.response.data as {
+    message?: string;
+    error?: { body?: Record<string, string[] | { [key: string]: string[] }[]> };
+  };
+  const bodyErrors = data.error?.body;
+  if (bodyErrors) {
+    const parts: string[] = [];
+    for (const [field, messages] of Object.entries(bodyErrors)) {
+      if (Array.isArray(messages)) {
+        if (typeof messages[0] === 'string') {
+          parts.push(`${field}: ${(messages as string[]).join(', ')}`);
+        } else {
+          for (const [idx, nested] of (messages as { [key: string]: string[] }[]).entries()) {
+            for (const [key, msgs] of Object.entries(nested)) {
+              parts.push(`${field}[${idx}].${key}: ${msgs.join(', ')}`);
+            }
+          }
+        }
+      }
+    }
+    if (parts.length > 0) return parts.join(' · ');
+  }
+  return data.message ? String(data.message) : 'Request failed';
 }
 
 const tableClass = 'w-full min-w-[720px] text-sm';
