@@ -39,10 +39,6 @@ function parseAttributeIntentJson(raw: string): ProductAttributeIntentResult | n
       'weight',
       'brand',
       'category',
-      'material',
-      'ingredient',
-      'packaging',
-      'spec',
     ]);
 
     const attributes = Array.isArray(parsed.attributes)
@@ -126,13 +122,13 @@ Return JSON only:
   "attributes": string[]
 }
 
-Set is_attribute_question true when the customer asks about or selects product attributes: flavor, size, color, variant, weight, brand, product type, material, ingredients, packaging, specs, compatibility, vegan/organic/allergen, etc.
+Set is_attribute_question true when the customer asks about or selects catalog attributes: flavor, size, color, variant, weight, brand, or category (product type).
 
-Set is_product_knowledge_question true when the customer needs factual catalog information (including attribute questions). False for: usage/dosage/how-to-take ONLY, price-only, pure recommendations, greetings, order placement.
+Set is_product_knowledge_question true when the customer needs factual catalog information (including attribute questions, or ingredients/material/details from the product description). False for: usage/dosage/how-to-take ONLY, price-only, pure recommendations, greetings, order placement.
 
 For mixed messages (e.g. size + how to take), set BOTH is_attribute_question and is_product_knowledge_question true and list relevant attributes.
 
-attributes: subset of [flavor, size, color, variant, weight, brand, category, material, ingredient, packaging, spec] — empty if not attribute-specific. Use category for product type questions.`,
+attributes: subset of [flavor, size, color, variant, weight, brand, category] only — empty for ingredient/material/packaging/spec questions (those use description, not structured attributes). Use category for product type questions.`,
         },
         { role: 'user', content: trimmed },
       ],

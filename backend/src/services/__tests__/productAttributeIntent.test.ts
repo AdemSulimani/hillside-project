@@ -22,10 +22,11 @@ describe('productAttributeIntentService', () => {
     assert.ok(intent?.attributes.includes('flavor'));
   });
 
-  it('detects material questions via keywords', () => {
+  it('detects ingredient questions as product knowledge not structured attributes', () => {
     const intent = detectAttributeIntentFromKeywords('What material is this made of?');
-    assert.equal(intent?.is_attribute_question, true);
-    assert.ok(intent?.attributes.includes('material'));
+    assert.equal(intent?.is_product_knowledge_question, true);
+    assert.equal(intent?.is_attribute_question, false);
+    assert.equal(intent?.attributes.length, 0);
   });
 
   it('detects implicit flavor selection', () => {
@@ -59,8 +60,9 @@ describe('productAttributeIntentService', () => {
     assert.equal(intent?.source, 'regex');
   });
 
-  it('detects packaging attribute questions', () => {
+  it('detects packaging questions as product knowledge without catalog attribute keys', () => {
     const intent = detectAttributeIntentFromKeywords('Which packaging options do you offer?');
-    assert.ok(intent?.attributes.includes('packaging'));
+    assert.equal(intent?.is_product_knowledge_question, true);
+    assert.equal(intent?.attributes.length, 0);
   });
 });
