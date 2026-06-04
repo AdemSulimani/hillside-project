@@ -191,7 +191,7 @@ export default function AdminDashboardPage() {
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} className="fill-muted-foreground" />
                 <YAxis
-                  tickFormatter={(v) => `$${v}`}
+                  tickFormatter={(v) => formatCurrency(Number(v))}
                   tick={{ fontSize: 11 }}
                   className="fill-muted-foreground"
                 />

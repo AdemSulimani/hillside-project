@@ -1,4 +1,5 @@
 import { Pencil, Trash2, Package } from 'lucide-react';
+import { formatCurrency } from '@/lib/formatCurrency';
 import { assetUrl, cn } from '@/lib/utils';
 import type { Product } from '@/types/product';
 import { Badge } from '@/components/ui/badge';
@@ -55,15 +56,15 @@ export function ProductCard({ product, onEdit, onDelete, className }: ProductCar
           {product.discounted_price != null ? (
             <div className="flex items-baseline gap-2">
               <p className="text-lg font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
-                ${product.discounted_price.toFixed(2)}
+                {formatCurrency(product.discounted_price)}
               </p>
               <p className="text-sm text-muted-foreground line-through tabular-nums">
-                ${product.price.toFixed(2)}
+                {formatCurrency(product.price)}
               </p>
             </div>
           ) : (
             <p className="text-lg font-semibold tabular-nums">
-              ${product.price.toFixed(2)}
+              {formatCurrency(product.price)}
             </p>
           )}
         </div>

@@ -1,8 +1,14 @@
 import type { Message } from '../db/models/message';
 import {
+  findVariantSiblingProducts,
   searchProducts,
   type Product,
 } from '../db/models/product';
+
+export interface AttributeQueryIntentHint {
+  is_attribute_question?: boolean;
+  attributes?: StructuredAttributeKey[];
+}
 
 /** Max products retrieved when the customer is browsing or asking about a product group. */
 export const CATEGORY_GROUP_MATCH_LIMIT = 25;
@@ -22,7 +28,25 @@ export type StructuredAttributeKey =
   | 'variant'
   | 'weight'
   | 'brand'
-  | 'category';
+  | 'category'
+  | 'material'
+  | 'ingredient'
+  | 'packaging'
+  | 'spec';
+
+export const ALL_STRUCTURED_ATTRIBUTE_KEYS: StructuredAttributeKey[] = [
+  'flavor',
+  'size',
+  'color',
+  'variant',
+  'weight',
+  'brand',
+  'category',
+  'material',
+  'ingredient',
+  'packaging',
+  'spec',
+];
 
 const ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
   /\b(what|which|cfare|çfarë|cfare)\s+(flavou?rs?|tastes?|shije(?:t|sh)?)\b/i,
@@ -31,13 +55,16 @@ const ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
   /\b(what|which|cfare|çfarë|cfare)\s+(variants?|variantet?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(brands?|marka(?:t|ve)?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(weights?|pesha(?:t|ve)?)\b/i,
-  /\b(what|which|cfare|çfarë|cfare)\s+(types?|lloje(?:t|ve)?)\b/i,
+  /\b(what|which|cfare|çfarë|cfare)\s+(types?|lloje(?:t|ve)?|product types?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(options?|opsione(?:t|ve)?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(packaging|packages?|paketim(?:et)?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(ingredients?|perber[eë]s(?:it|et)?)\b/i,
+  /\b(what|which|cfare|çfarë|cfare)\s+(materials?|materiale?t?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(specs?|specifications?|specifikime(?:t|ve)?)\b/i,
+  /\b(is it|a eshte|a është)\s+(vegan|organic|gluten[- ]?free)\b/i,
   /\b(cilat|cila|sa)\s+(shije(?:t|sh)?|madh[eë]si(?:t|ve)?|ngjyra(?:t|ve)?|variantet?|marka(?:t|ve)?)\b/i,
   /\b(do you have|a keni|keni)\s+(other|tjet[eë]r|different|ndryshme)\s+(flavou?rs?|sizes?|colors?|variants?)\b/i,
+  /\b(tell me|show me|list)\s+(the\s+)?(flavou?rs?|sizes?|colors?|variants?|options?)\b/i,
   /^(flavou?rs?|sizes?|colors?|variants?|brands?|shije(?:t|sh)?|madh[eë]si(?:t|ve)?|ngjyra(?:t|ve)?)(\s*[.!?]*)?$/i,
 ];
 
@@ -59,9 +86,9 @@ function normalizeMessageText(message: string): string {
 }
 
 /** Whether the customer is asking about an attribute across a product group (e.g. "What flavors?"). */
-export function isCategoryAttributeFollowUp(message: string): boolean {
+export function isCategoryAttributeFollowUp(message: string, maxLength = 250): boolean {
   const t = normalizeMessageText(message);
-  if (!t || t.length > 120) return false;
+  if (!t || t.length > maxLength) return false;
   return ATTRIBUTE_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
 }
 
@@ -234,8 +261,13 @@ export function inboundTextLikelyReferencesProduct(
 export function detectProductQueryScope(
   message: string,
   products: Product[],
+  attributeIntent?: AttributeQueryIntentHint,
 ): ProductQueryScope {
-  if (isCategoryAttributeFollowUp(message) || isContextOnlyFollowUp(message)) {
+  if (
+    isCategoryAttributeFollowUp(message) ||
+    isContextOnlyFollowUp(message) ||
+    attributeIntent?.is_attribute_question
+  ) {
     return 'attribute_followup';
   }
 
@@ -258,13 +290,22 @@ export function getProductStructuredAttributes(
     weight: product.weight?.trim() || null,
     brand: product.brand?.trim() || null,
     category: product.category?.trim() || null,
+    material: null,
+    ingredient: null,
+    packaging: null,
+    spec: null,
   };
 }
 
 const NAME_ATTRIBUTE_PATTERNS: Array<{ key: StructuredAttributeKey; re: RegExp }> = [
-  { key: 'flavor', re: /\b(chocolate|vanilla|strawberry|berry|unflavored|unflavoured|banana|cookies?\s*&?\s*cream|mango|lemon|orange|mint|caramel|coffee|neutral)\b/i },
+  {
+    key: 'flavor',
+    re: /\b(chocolate|vanilla|strawberry|berry|unflavored|unflavoured|banana|cookies?\s*&?\s*cream|mango|lemon|orange|mint|caramel|coffee|neutral|cookies? and cream)\b/i,
+  },
+  { key: 'color', re: /\b(red|blue|black|white|green|yellow|pink|purple|grey|gray|silver|gold)\b/i },
   { key: 'size', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|ml|l|oz|lb|lbs|capsules?|caps|tablets?|servings?))\b/i },
   { key: 'weight', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|oz|lb|lbs))\b/i },
+  { key: 'material', re: /\b(cotton|polyester|wool|silk|leather|stainless steel|plastic|glass|wood|ceramic|silicone|nylon)\b/i },
 ];
 
 function inferAttributeFromText(
@@ -274,9 +315,32 @@ function inferAttributeFromText(
   const structured = getProductStructuredAttributes(product)[key];
   if (structured) return structured;
 
-  const hay = `${product.name} ${product.description ?? ''} ${product.tags.join(' ')}`;
+  const hay = [
+    product.name,
+    product.description ?? '',
+    product.extracted_text ?? '',
+    product.tags.join(' '),
+  ].join(' ');
+
   if (key === 'brand' && product.brand) return product.brand.trim();
   if (key === 'category' && product.category) return product.category.trim();
+
+  if (key === 'ingredient' && product.description) {
+    const ingredientMatch = product.description.match(
+      /\b(ingredients?|perber[eë]s(?:it)?)\s*[:]\s*([^.;\n]+)/i,
+    );
+    if (ingredientMatch?.[2]) return ingredientMatch[2].trim();
+  }
+
+  if (key === 'packaging' && product.description) {
+    const packMatch = product.description.match(/\b(packaging|paketim)\s*[:]\s*([^.;\n]+)/i);
+    if (packMatch?.[2]) return packMatch[2].trim();
+  }
+
+  if (key === 'spec' && product.description) {
+    const specMatch = product.description.match(/\b(specs?|specifications?|specifikim)\s*[:]\s*([^.;\n]+)/i);
+    if (specMatch?.[2]) return specMatch[2].trim();
+  }
 
   for (const { key: patternKey, re } of NAME_ATTRIBUTE_PATTERNS) {
     if (patternKey !== key) continue;
@@ -295,14 +359,25 @@ function attributeLabel(key: StructuredAttributeKey): string {
     variant: 'Variants',
     weight: 'Weights',
     brand: 'Brands',
-    category: 'Categories',
+    category: 'Categories / product types',
+    material: 'Materials',
+    ingredient: 'Ingredients',
+    packaging: 'Packaging',
+    spec: 'Specifications',
   };
   return labels[key];
 }
 
-function detectRequestedAttributes(message: string): StructuredAttributeKey[] {
+export function detectRequestedAttributes(
+  message: string,
+  intentAttributes?: StructuredAttributeKey[],
+): StructuredAttributeKey[] {
   const t = normalizeMessageText(message);
   const requested = new Set<StructuredAttributeKey>();
+
+  if (intentAttributes?.length) {
+    for (const attr of intentAttributes) requested.add(attr);
+  }
 
   if (/\b(flavou?r|taste|shije)\b/.test(t)) requested.add('flavor');
   if (/\b(size|madh[eë]si)\b/.test(t)) requested.add('size');
@@ -311,12 +386,35 @@ function detectRequestedAttributes(message: string): StructuredAttributeKey[] {
   if (/\b(weight|pesha)\b/.test(t)) requested.add('weight');
   if (/\b(brand|marka)\b/.test(t)) requested.add('brand');
   if (/\b(type|lloj|product type|categor)\b/.test(t)) requested.add('category');
+  if (/\b(material|made of|materiale)\b/.test(t)) requested.add('material');
+  if (/\b(ingredients?|perberes|përberës)\b/.test(t)) requested.add('ingredient');
+  if (/\b(packaging|paketim|packages?)\b/.test(t)) requested.add('packaging');
+  if (/\b(specs?|specifications?|specifikim(?:et)?)\b/.test(t)) requested.add('spec');
+  if (/\b(vegan|organic|gluten|allergen)\b/.test(t)) requested.add('ingredient');
 
   if (requested.size === 0 && isCategoryAttributeFollowUp(message)) {
-    return ['flavor', 'size', 'color', 'variant', 'weight', 'brand', 'category'];
+    return ALL_STRUCTURED_ATTRIBUTE_KEYS;
   }
 
   return [...requested];
+}
+
+/**
+ * When an attribute question resolves to a single SKU, expand to variant siblings
+ * so aggregation and answers cover all flavors/sizes in the product family.
+ */
+export async function expandProductsForAttributeQuery(
+  tenantId: string,
+  products: Product[],
+  attributeIntent?: AttributeQueryIntentHint,
+  limit = CATEGORY_GROUP_MATCH_LIMIT,
+): Promise<Product[]> {
+  if (!attributeIntent?.is_attribute_question) return products;
+  if (products.length === 0) return products;
+  if (products.length > 1) return dedupeProducts(products).slice(0, limit);
+
+  const siblings = await findVariantSiblingProducts(tenantId, products[0], limit - 1);
+  return dedupeProducts([...products, ...siblings]).slice(0, limit);
 }
 
 /**
@@ -326,14 +424,12 @@ function detectRequestedAttributes(message: string): StructuredAttributeKey[] {
 export function buildProductAttributeAggregation(
   products: Product[],
   queryMessage: string,
+  intentAttributes?: StructuredAttributeKey[],
 ): string | null {
   if (products.length <= 1) return null;
 
-  const requested = detectRequestedAttributes(queryMessage);
-  const keys =
-    requested.length > 0
-      ? requested
-      : (['flavor', 'size', 'color', 'variant', 'weight', 'brand', 'category'] as StructuredAttributeKey[]);
+  const requested = detectRequestedAttributes(queryMessage, intentAttributes);
+  const keys = requested.length > 0 ? requested : ALL_STRUCTURED_ATTRIBUTE_KEYS;
 
   const sections: string[] = [];
 
@@ -410,6 +506,7 @@ export function buildProductKnowledgeContext(products: Product[]): string {
         p.category ? `Category: ${p.category}` : null,
         attrLines ? `Attributes: ${attrLines}` : null,
         p.description ? `Description: ${p.description}` : null,
+        p.extracted_text ? `Extracted catalog text: ${p.extracted_text.slice(0, 800)}` : null,
         p.usage_description ? `Usage: ${p.usage_description}` : null,
         p.tags.length ? `Tags: ${p.tags.join(', ')}` : null,
       ]

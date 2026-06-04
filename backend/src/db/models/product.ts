@@ -365,6 +365,62 @@ export async function searchProducts(
   return rows;
 }
 
+/** Strip size/flavor tokens to find variant siblings in the same product family. */
+export function extractProductFamilyBaseName(name: string): string {
+  let base = name
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(
+      /\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|oz|lb|lbs|capsules?|caps|tablets?|servings?)\b/gi,
+      ' ',
+    )
+    .replace(
+      /\b(chocolate|vanilla|strawberry|berry|unflavored|unflavoured|banana|mango|lemon|orange|mint|caramel|coffee|neutral|red|blue|black|white|green)\b/gi,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const words = base.split(/\s+/).filter((w) => w.length > 1);
+  if (words.length > 6) {
+    base = words.slice(0, 6).join(' ');
+  }
+  return base.length >= 3 ? base : name.trim().slice(0, 40);
+}
+
+/**
+ * Find other active SKUs likely belonging to the same product family (variants).
+ */
+export async function findVariantSiblingProducts(
+  tenantId: string,
+  product: Product,
+  limit = 24,
+): Promise<Product[]> {
+  const baseName = extractProductFamilyBaseName(product.name);
+  const pattern = `%${baseName.slice(0, 48)}%`;
+
+  const brand = product.brand?.trim() || null;
+  const category = product.category?.trim() || null;
+
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND id <> $2
+       AND (
+         name ILIKE $3
+         OR (
+           $4::text IS NOT NULL
+           AND brand = $4
+           AND ($5::text IS NULL OR category = $5)
+         )
+       )
+     ORDER BY name ASC
+     LIMIT $6`,
+    [tenantId, product.id, pattern, brand, category, limit],
+  );
+
+  return rows;
+}
+
 /**
  * Match products whose category or tags contain the phrase (e.g. "shtim peshe").
  */
