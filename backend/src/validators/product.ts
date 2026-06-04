@@ -48,6 +48,11 @@ export const createProductSchema = z
       .optional()
       .default(true),
     in_stock: z.boolean().optional().default(true),
+    flavor: z.string().max(255).nullable().optional(),
+    size: z.string().max(255).nullable().optional(),
+    color: z.string().max(255).nullable().optional(),
+    variant: z.string().max(255).nullable().optional(),
+    weight: z.string().max(255).nullable().optional(),
   })
   .refine(
     (data) =>
@@ -110,6 +115,11 @@ export const updateProductSchema = z
       .boolean()
       .optional(),
     in_stock: z.boolean().optional(),
+    flavor: z.string().max(255).nullable().optional(),
+    size: z.string().max(255).nullable().optional(),
+    color: z.string().max(255).nullable().optional(),
+    variant: z.string().max(255).nullable().optional(),
+    weight: z.string().max(255).nullable().optional(),
   })
   .refine(
     (data) =>

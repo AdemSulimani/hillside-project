@@ -640,6 +640,18 @@ export default function InboxPage() {
                 </div>
               ) : null}
 
+              {openQualityAlert?.reason === 'product_question_unanswered' ? (
+                <div className="border-b border-orange-500/35 bg-orange-500/10 px-4 py-3 dark:bg-orange-950/35">
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-foreground">
+                      The customer asked a product question we could not answer from the catalog. AI is paused.
+                      Please reply manually or update the product attributes in the catalog.
+                    </p>
+                    <p className="text-sm text-muted-foreground">{AI_ALERT_RESOLUTION_HINT}</p>
+                  </div>
+                </div>
+              ) : null}
+
               {hasCancellationOrRefundAlert && cancellationRefundType ? (
                 <CancellationRefundConversationBanner requestType={cancellationRefundType} />
               ) : null}
@@ -658,6 +670,7 @@ export default function InboxPage() {
 
               {openQualityAlert &&
               openQualityAlert.reason !== 'usage_question_unanswered' &&
+              openQualityAlert.reason !== 'product_question_unanswered' &&
               openQualityAlert.reason !== 'cancellation_request' &&
               openQualityAlert.reason !== 'refund_request' &&
               openQualityAlert.reason !== 'post_purchase_support_request' ? (

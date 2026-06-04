@@ -13,6 +13,11 @@ export interface Product {
   sku: string | null;
   category: string | null;
   tags: string[];
+  flavor: string | null;
+  size: string | null;
+  color: string | null;
+  variant: string | null;
+  weight: string | null;
   image_urls: string[];
   is_active: boolean;
   in_stock: boolean;
@@ -35,6 +40,11 @@ export interface CreateProductInput {
   sku?: string | null;
   category?: string | null;
   tags?: string[];
+  flavor?: string | null;
+  size?: string | null;
+  color?: string | null;
+  variant?: string | null;
+  weight?: string | null;
   image_urls?: string[];
   is_active?: boolean;
   in_stock?: boolean;
@@ -53,6 +63,11 @@ export interface UpdateProductInput {
   sku?: string | null;
   category?: string | null;
   tags?: string[];
+  flavor?: string | null;
+  size?: string | null;
+  color?: string | null;
+  variant?: string | null;
+  weight?: string | null;
   image_urls?: string[];
   is_active?: boolean;
   in_stock?: boolean;
@@ -71,8 +86,8 @@ export interface ProductSearchParams {
 
 export async function createProduct(input: CreateProductInput): Promise<Product> {
   const { rows } = await pool.query<Product>(
-    `INSERT INTO products (tenant_id, name, brand, price, discounted_price, description, usage_description, sku, category, tags, image_urls, is_active, in_stock, source_type, extracted_text, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb)
+    `INSERT INTO products (tenant_id, name, brand, price, discounted_price, description, usage_description, sku, category, tags, flavor, size, color, variant, weight, image_urls, is_active, in_stock, source_type, extracted_text, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21::jsonb)
      RETURNING *`,
     [
       input.tenant_id,
@@ -85,6 +100,11 @@ export async function createProduct(input: CreateProductInput): Promise<Product>
       input.sku?.trim() || null,
       input.category?.trim() || null,
       JSON.stringify(input.tags ?? []),
+      input.flavor?.trim() || null,
+      input.size?.trim() || null,
+      input.color?.trim() || null,
+      input.variant?.trim() || null,
+      input.weight?.trim() || null,
       JSON.stringify(input.image_urls ?? []),
       input.is_active ?? true,
       input.in_stock ?? true,
@@ -113,10 +133,10 @@ export async function upsertProductByName(
   const { rows } = await pool.query<Product & { xmax: string }>(
     `INSERT INTO products (
        tenant_id, name, brand, price, discounted_price, description,
-       usage_description, sku, category, tags, image_urls, is_active,
-       in_stock, source_type, extracted_text, metadata
+       usage_description, sku, category, tags, flavor, size, color, variant, weight,
+       image_urls, is_active, in_stock, source_type, extracted_text, metadata
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21::jsonb)
      ON CONFLICT (tenant_id, LOWER(TRIM(name))) WHERE deleted_at IS NULL
      DO UPDATE SET
        brand              = EXCLUDED.brand,
@@ -127,6 +147,11 @@ export async function upsertProductByName(
        sku                = EXCLUDED.sku,
        category           = EXCLUDED.category,
        tags               = EXCLUDED.tags,
+       flavor             = EXCLUDED.flavor,
+       size               = EXCLUDED.size,
+       color              = EXCLUDED.color,
+       variant            = EXCLUDED.variant,
+       weight             = EXCLUDED.weight,
        image_urls         = CASE
                               WHEN array_length(EXCLUDED.image_urls::text[]::text[], 1) > 0
                               THEN EXCLUDED.image_urls
@@ -150,6 +175,11 @@ export async function upsertProductByName(
       input.sku?.trim() || null,
       input.category?.trim() || null,
       JSON.stringify(input.tags ?? []),
+      input.flavor?.trim() || null,
+      input.size?.trim() || null,
+      input.color?.trim() || null,
+      input.variant?.trim() || null,
+      input.weight?.trim() || null,
       JSON.stringify(input.image_urls ?? []),
       input.is_active ?? true,
       input.in_stock ?? true,
@@ -178,7 +208,7 @@ export async function findProductsByTenant(
 
   if (params.search) {
     conditions.push(
-      `(name ILIKE $${paramIdx} OR (brand IS NOT NULL AND brand ILIKE $${paramIdx}) OR description ILIKE $${paramIdx} OR (sku IS NOT NULL AND sku ILIKE $${paramIdx}) OR (category IS NOT NULL AND category ILIKE $${paramIdx}))`,
+      `(name ILIKE $${paramIdx} OR (brand IS NOT NULL AND brand ILIKE $${paramIdx}) OR description ILIKE $${paramIdx} OR (sku IS NOT NULL AND sku ILIKE $${paramIdx}) OR (category IS NOT NULL AND category ILIKE $${paramIdx}) OR (flavor IS NOT NULL AND flavor ILIKE $${paramIdx}) OR (size IS NOT NULL AND size ILIKE $${paramIdx}) OR (color IS NOT NULL AND color ILIKE $${paramIdx}) OR (variant IS NOT NULL AND variant ILIKE $${paramIdx}) OR (weight IS NOT NULL AND weight ILIKE $${paramIdx}))`,
     );
     values.push(`%${params.search}%`);
     paramIdx++;
@@ -322,6 +352,11 @@ export async function searchProducts(
          OR description ILIKE $2
          OR (category IS NOT NULL AND category ILIKE $2)
          OR tags::text ILIKE $2
+         OR (flavor IS NOT NULL AND flavor ILIKE $2)
+         OR (size IS NOT NULL AND size ILIKE $2)
+         OR (color IS NOT NULL AND color ILIKE $2)
+         OR (variant IS NOT NULL AND variant ILIKE $2)
+         OR (weight IS NOT NULL AND weight ILIKE $2)
        )
      ORDER BY name ASC
      LIMIT $3`,
@@ -345,7 +380,8 @@ export async function searchProductsByCategoryOrTag(
     `SELECT * FROM products
      WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
        AND (
-         (category IS NOT NULL AND category ILIKE $2)
+         name ILIKE $2
+         OR (category IS NOT NULL AND category ILIKE $2)
          OR tags::text ILIKE $2
        )
      ORDER BY name ASC

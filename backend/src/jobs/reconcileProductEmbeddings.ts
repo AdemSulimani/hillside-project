@@ -41,6 +41,11 @@ interface ReconcileCandidateRow {
   usage_description: string | null;
   tags: string[] | null;
   category: string | null;
+  flavor: string | null;
+  size: string | null;
+  color: string | null;
+  variant: string | null;
+  weight: string | null;
   embedding_input_hash: string | null;
   embedding_model: string | null;
   embedding_is_null: boolean;
@@ -66,6 +71,11 @@ export async function processReconcileProductEmbeddings(): Promise<void> {
        usage_description,
        tags,
        category,
+       flavor,
+       size,
+       color,
+       variant,
+       weight,
        embedding_input_hash,
        embedding_model,
        (embedding IS NULL) AS embedding_is_null
@@ -97,6 +107,13 @@ export async function processReconcileProductEmbeddings(): Promise<void> {
       row.brand,
       row.category,
       row.usage_description,
+      {
+        flavor: row.flavor,
+        size: row.size,
+        color: row.color,
+        variant: row.variant,
+        weight: row.weight,
+      },
     );
     const currentHash = computeHash(text);
 
@@ -117,7 +134,7 @@ export async function processReconcileProductEmbeddings(): Promise<void> {
         // Lower priority than live product edits (priority 5 vs default 0).
         // BullMQ: lower number = higher priority.
         priority: 5,
-        jobId: `embed-reconcile:${row.id}`,
+        jobId: `embed-reconcile-${row.id}`,
         // De-duplicate: if a job for this product is already pending, don't add another.
         // jobId dedup is handled by BullMQ — it silently drops the add if the id exists.
       },

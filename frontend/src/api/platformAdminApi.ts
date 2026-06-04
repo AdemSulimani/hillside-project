@@ -500,6 +500,15 @@ export async function postAdminReembedAllProducts(
   return data.data!;
 }
 
+export async function postAdminBackfillProductImageFingerprints(
+  tenantId: string,
+): Promise<{ queued: number }> {
+  const { data } = await adminApi.post<ApiResponse<{ queued: number }>>(
+    `/admin/businesses/${tenantId}/products/backfill-image-fingerprints`,
+  );
+  return data.data!;
+}
+
 export async function postAdminCreateCatalogBlock(body: {
   key: string;
   title: string;

@@ -64,6 +64,7 @@ export interface ListAIAlertsParams {
 /** Open escalation alerts surfaced on Porositë → Veprim i nevojshëm (with order-based rows). */
 export const ORDERS_ACTION_TAB_ALERT_REASONS = [
   'usage_question_unanswered',
+  'product_question_unanswered',
   'post_purchase_support_request',
   'cancellation_request',
   'refund_request',
@@ -111,6 +112,7 @@ export async function listEscalationAlertsForOrdersActionTab(
        AND a.status IN ('unread', 'read')
        AND a.reason IN (
          'usage_question_unanswered',
+         'product_question_unanswered',
          'post_purchase_support_request',
          'cancellation_request',
          'refund_request'

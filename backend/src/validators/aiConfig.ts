@@ -13,7 +13,7 @@ export const updateAIConfigSchema = z.object({
     .optional(),
   personality_description: z.string().max(2000).nullable().optional(),
   restrictions: z
-    .array(z.string().max(500, 'Each restriction must be at most 500 characters'))
+    .array(z.string().max(5000, 'Each business rule must be at most 5000 characters'))
     .max(50, 'Cannot exceed 50 business rules')
     .optional(),
   sales_strategy: z.string().max(5000).nullable().optional(),
@@ -31,7 +31,7 @@ export const testAIConfigSchema = z.object({
   tone: z.string().min(1).max(255).optional(),
   personality_description: z.string().max(2000).nullable().optional(),
   restrictions: z
-    .array(z.string().max(500))
+    .array(z.string().max(5000))
     .max(50)
     .optional(),
   sales_strategy: z.string().max(5000).nullable().optional(),

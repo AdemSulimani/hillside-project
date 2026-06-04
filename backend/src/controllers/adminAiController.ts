@@ -21,6 +21,7 @@ import type { TenantAiSnapshot } from '../validators/adminAi';
 import { findAIConfigVersion, insertAIConfigVersion, listAIConfigVersions } from '../db/models/aiConfigVersion';
 import { findTenantById } from '../db/models/tenant';
 import { searchProducts } from '../db/models/product';
+import { findImageUrlsWithoutFingerprints } from '../db/models/productImageFingerprint';
 import { defaultQueue } from '../jobs/queues';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
 import { buildRetailAISystemPrompt, formatProductCatalog } from '../services/aiService';
@@ -604,5 +605,46 @@ export async function postReembedAllProducts(req: Request, res: Response): Promi
     );
   } catch (err) {
     sendError(res, 'Failed to queue re-embed for all products', 500, err);
+  }
+}
+
+/**
+ * Queues visual fingerprint generation for catalog product images that lack
+ * embeddings (used for customer photo → product matching).
+ *
+ * POST /admin/businesses/:tenantId/products/backfill-image-fingerprints
+ */
+export async function postBackfillProductImageFingerprints(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantId = req.params.tenantId as string;
+    const candidates = await findImageUrlsWithoutFingerprints(tenantId, 500);
+
+    if (candidates.length === 0) {
+      sendSuccess(res, { queued: 0 }, 'All catalog images already have visual fingerprints');
+      return;
+    }
+
+    await Promise.all(
+      candidates.map((row) =>
+        defaultQueue.add(
+          'product.imageFingerprint',
+          { productId: row.product_id, tenantId: row.tenant_id, imageUrl: row.image_url },
+          { priority: 3 },
+        ),
+      ),
+    );
+
+    console.info('[admin] Queued image fingerprint backfill', {
+      tenantId,
+      count: candidates.length,
+    });
+
+    sendSuccess(
+      res,
+      { queued: candidates.length },
+      `Queued visual fingerprint generation for ${candidates.length} catalog image(s)`,
+    );
+  } catch (err) {
+    sendError(res, 'Failed to backfill image fingerprints', 500, err);
   }
 }

@@ -38,6 +38,11 @@ const emptyValues = (): ProductFormValues => ({
   usage_description: '',
   sku: '',
   category: '',
+  flavor: '',
+  size: '',
+  color: '',
+  variant: '',
+  weight: '',
   tagsInput: '',
   in_stock: true,
   is_active: true,
@@ -56,6 +61,11 @@ function productToValues(p: Product): ProductFormValues {
     usage_description: p.usage_description ?? '',
     sku: p.sku ?? '',
     category: p.category ?? '',
+    flavor: p.flavor ?? '',
+    size: p.size ?? '',
+    color: p.color ?? '',
+    variant: p.variant ?? '',
+    weight: p.weight ?? '',
     tagsInput: p.tags.join(', '),
     in_stock: p.in_stock !== false,
     is_active: p.is_active,
@@ -345,6 +355,60 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
               {fieldErrors.category && (
                 <p className="text-xs text-destructive">{fieldErrors.category}</p>
               )}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label className="text-sm font-medium">Atribute produkti</Label>
+            <p className="text-xs text-muted-foreground">
+              Ndihmojnë IA-në të përgjigjet saktë për shijet, madhësitë, ngjyrat dhe variante kur klientët pyesin për një kategori produktesh.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label htmlFor="pf-flavor">Shija</Label>
+                <Input
+                  id="pf-flavor"
+                  value={values.flavor}
+                  onChange={(e) => setField('flavor', e.target.value)}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pf-size">Madhësia</Label>
+                <Input
+                  id="pf-size"
+                  value={values.size}
+                  onChange={(e) => setField('size', e.target.value)}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pf-color">Ngjyra</Label>
+                <Input
+                  id="pf-color"
+                  value={values.color}
+                  onChange={(e) => setField('color', e.target.value)}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pf-variant">Varianti</Label>
+                <Input
+                  id="pf-variant"
+                  value={values.variant}
+                  onChange={(e) => setField('variant', e.target.value)}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pf-weight">Pesha</Label>
+                <Input
+                  id="pf-weight"
+                  value={values.weight}
+                  onChange={(e) => setField('weight', e.target.value)}
+                  className="h-10"
+                />
+              </div>
             </div>
           </div>
 

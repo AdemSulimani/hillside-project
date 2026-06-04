@@ -39,6 +39,13 @@ export async function processGenerateProductEmbedding(
     product.brand ?? null,
     product.category ?? null,
     product.usage_description ?? null,
+    {
+      flavor: product.flavor ?? null,
+      size: product.size ?? null,
+      color: product.color ?? null,
+      variant: product.variant ?? null,
+      weight: product.weight ?? null,
+    },
   );
 
   const inputHash = hashEmbeddingInput(text);
