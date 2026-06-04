@@ -39,6 +39,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AI_ALERT_RESOLUTION_HINT } from '@/lib/aiAlertLabels';
+import { formatCurrency } from '@/lib/formatCurrency';
 import { cn } from '@/lib/utils';
 import { useIntersectionObserver } from '@/hooks/useIntersectionObserver';
 import { useRealtimeInbox } from '@/hooks/useRealtimeInbox';
@@ -708,7 +709,7 @@ export default function InboxPage() {
                           </span>
                           <span className="tabular-nums">
                             {' '}
-                            · ${draftOrderForThread.total_price.toFixed(2)}
+                            · {formatCurrency(draftOrderForThread.total_price)}
                           </span>
                         </p>
                       </div>

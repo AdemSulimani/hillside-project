@@ -48,11 +48,8 @@ import {
   fetchAllAiUseCases,
   fetchAiOrders,
 } from '@/api/creditsApi';
+import { formatCurrency } from '@/lib/formatCurrency';
 import { buildCompletedCountsByMonth, getUseCaseDisplayFee } from '@/lib/useCaseFees';
-
-function formatEur(value: number): string {
-  return `€${value.toFixed(2)}`;
-}
 
 function formatMonthKey(key: string): string {
   const [y, m] = key.split('-');
@@ -201,7 +198,7 @@ function ConversationPreviewSheet({
               })}
             </span>
             {useCase.fee_amount != null ? (
-              <span>· {formatEur(useCase.fee_amount)}</span>
+              <span>· {formatCurrency(useCase.fee_amount)}</span>
             ) : null}
             <UseCaseBillingBadge status={useCase.billing_status} />
           </SheetDescription>
@@ -326,8 +323,8 @@ function AiOrderPreviewSheet({
             AI Order — {order.contact_name}
           </SheetTitle>
           <SheetDescription>
-            {order.product_name} · {formatEur(order.total_price)} ·{' '}
-            Commission: {formatEur(order.commission_amount)}
+            {order.product_name} · {formatCurrency(order.total_price)} ·{' '}
+            Commission: {formatCurrency(order.commission_amount)}
             {' · '}
             <CommissionStatusBadge status={order.commission_status} />
           </SheetDescription>
@@ -531,25 +528,25 @@ export default function CreditsPage() {
           <>
             <StatCard
               label="Commission This Month"
-              value={formatEur(summary?.commission_this_month ?? 0)}
+              value={formatCurrency(summary?.commission_this_month ?? 0)}
               sub={`${summary?.ai_orders_this_month ?? 0} unpaid AI orders`}
               icon={ShoppingCart}
             />
             <StatCard
               label="Use Case Fees This Month"
-              value={formatEur(summary?.use_case_fees_this_month ?? 0)}
+              value={formatCurrency(summary?.use_case_fees_this_month ?? 0)}
               sub={`${summary?.use_case_count_this_month ?? 0} unpaid cases`}
               icon={Bot}
             />
             <StatCard
               label="Estimated Invoice"
-              value={formatEur(summary?.estimated_invoice ?? 0)}
+              value={formatCurrency(summary?.estimated_invoice ?? 0)}
               sub="Outstanding commission + use case fees"
               icon={Receipt}
             />
             <StatCard
               label="Total Outstanding"
-              value={formatEur(
+              value={formatCurrency(
                 (summary?.total_unpaid_commission ?? 0) +
                   (summary?.total_unpaid_use_case_fees ?? 0),
               )}
@@ -592,14 +589,14 @@ export default function CreditsPage() {
                   <span>
                     Current rate:{' '}
                     <span className="font-medium text-foreground">
-                      €{tier.current_tier.rate.toFixed(2)}/case
+                      {formatCurrency(tier.current_tier.rate)}/case
                     </span>{' '}
                     <span className="text-xs">({tier.current_tier.label})</span>
                   </span>
                   <span>
                     Outstanding fee:{' '}
                     <span className="font-semibold text-foreground">
-                      {formatEur(tier.projected_fee)}
+                      {formatCurrency(tier.projected_fee)}
                     </span>
                   </span>
                 </div>
@@ -616,7 +613,7 @@ export default function CreditsPage() {
               {tier.next_tier && tier.cases_to_next_tier != null ? (
                 <p className="text-xs text-muted-foreground">
                   {tier.cases_to_next_tier} more cases until the next tier (
-                  €{tier.next_tier.rate.toFixed(2)}/case for cases above {tier.next_tier.lowerBound - 1})
+                  {formatCurrency(tier.next_tier.rate)}/case for cases above {tier.next_tier.lowerBound - 1})
                 </p>
               ) : !tier.next_tier ? (
                 <p className="text-xs text-muted-foreground">
@@ -668,7 +665,7 @@ export default function CreditsPage() {
                   axisLine={false}
                 />
                 <YAxis
-                  tickFormatter={(v: number) => `€${v}`}
+                  tickFormatter={(v: number) => formatCurrency(v)}
                   tick={{ fontSize: 11 }}
                   tickLine={false}
                   axisLine={false}
@@ -678,7 +675,7 @@ export default function CreditsPage() {
                   formatter={(value, name) => {
                     const n = typeof value === 'number' ? value : Number(value);
                     return [
-                      formatEur(Number.isFinite(n) ? n : 0),
+                      formatCurrency(Number.isFinite(n) ? n : 0),
                       name === 'commission' ? 'Commission' : 'Use Case Fees',
                     ];
                   }}
@@ -823,7 +820,7 @@ export default function CreditsPage() {
                             })}
                           </td>
                           <td className="px-4 py-3 text-right tabular-nums font-medium">
-                            {displayFee != null ? formatEur(displayFee) : '—'}
+                            {displayFee != null ? formatCurrency(displayFee) : '—'}
                           </td>
                           <td className="px-4 py-3">
                             <UseCaseBillingBadge status={billingStatus} />
@@ -942,8 +939,8 @@ export default function CreditsPage() {
                         >
                           <td className="px-4 py-3 font-medium">{row.contact_name}</td>
                           <td className="px-4 py-3 text-muted-foreground">{row.product_name}</td>
-                          <td className="px-4 py-3">{formatEur(row.total_price)}</td>
-                          <td className="px-4 py-3 font-medium">{formatEur(row.commission_amount)}</td>
+                          <td className="px-4 py-3">{formatCurrency(row.total_price)}</td>
+                          <td className="px-4 py-3 font-medium">{formatCurrency(row.commission_amount)}</td>
                           <td className="px-4 py-3 text-muted-foreground">
                             {new Date(row.created_at).toLocaleDateString('en-GB', {
                               day: '2-digit',
@@ -1058,10 +1055,10 @@ export default function CreditsPage() {
                           >
                             <td className="px-4 py-3 font-medium">{periodLabel}</td>
                             <td className="px-4 py-3 text-muted-foreground">{row.total_orders}</td>
-                            <td className="px-4 py-3">{formatEur(row.commission_amount)}</td>
+                            <td className="px-4 py-3">{formatCurrency(row.commission_amount)}</td>
                             <td className="px-4 py-3 text-muted-foreground">{row.use_case_count}</td>
-                            <td className="px-4 py-3">{formatEur(row.use_case_amount)}</td>
-                            <td className="px-4 py-3 font-semibold">{formatEur(row.total_amount)}</td>
+                            <td className="px-4 py-3">{formatCurrency(row.use_case_amount)}</td>
+                            <td className="px-4 py-3 font-semibold">{formatCurrency(row.total_amount)}</td>
                             <td className="px-4 py-3">
                               <BillingStatusBadge status={row.status} />
                             </td>

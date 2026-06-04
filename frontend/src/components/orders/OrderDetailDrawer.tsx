@@ -12,6 +12,7 @@ import {
   updateDraftOrder,
 } from '@/api/ordersApi';
 import { buildInferredOrderTimeline } from '@/lib/orderTimeline';
+import { formatCurrency } from '@/lib/formatCurrency';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
 import { OrderStatusBadge } from '@/components/orders/orderStatusBadge';
@@ -215,12 +216,12 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                   </div>
                   <div className="mt-2 flex justify-between gap-2">
                     <span className="text-muted-foreground">Çmimi për njësi</span>
-                    <span className="tabular-nums">${order.unit_price.toFixed(2)}</span>
+                    <span className="tabular-nums">{formatCurrency(order.unit_price)}</span>
                   </div>
                   <div className="mt-2 flex justify-between gap-2">
                     <span className="text-muted-foreground">Totali i rreshtit</span>
                     <span className="font-semibold tabular-nums">
-                      ${order.total_price.toFixed(2)}
+                      {formatCurrency(order.total_price)}
                     </span>
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">

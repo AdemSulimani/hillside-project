@@ -1,3 +1,4 @@
+import { formatCurrency } from '@/lib/formatCurrency';
 import type {
   StatisticsChannelSlice,
   StatisticsDailyMessages,
@@ -63,14 +64,8 @@ export function formatChartTickDate(ymd: string): string {
   return `${m}/${d}`;
 }
 
-const moneyFmt = new Intl.NumberFormat(undefined, {
-  style: 'currency',
-  currency: 'USD',
-  maximumFractionDigits: 2,
-});
-
 export function formatMoney(n: number): string {
-  return moneyFmt.format(n);
+  return formatCurrency(n);
 }
 
 export function totalMessagesInSummary(summary: {

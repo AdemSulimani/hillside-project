@@ -33,7 +33,6 @@ import {
   classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
-  classifyProductKnowledgeQuestionIntent,
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
   detectPostPurchaseSupportIntent,
@@ -360,18 +359,25 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
   return looksLikeAlbanianEscalation || looksLikeEnglishEscalation;
 }
 
-const HOLDING_MESSAGES: Record<ReplyLocale, { postPurchaseSupport: string; usageEscalation: string }> = {
+const HOLDING_MESSAGES: Record<
+  ReplyLocale,
+  { postPurchaseSupport: string; usageEscalation: string; productKnowledgeEscalation: string }
+> = {
   sq: {
     postPurchaseSupport:
       'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet.',
     usageEscalation:
       'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
+    productKnowledgeEscalation:
+      'Përshëndetje, së shpejti do t’ju kontaktojë një specialist me informacion të saktë për produktin.',
   },
   en: {
     postPurchaseSupport:
       'Hello, we are sorry for the issue. A member of our team will get back to you shortly.',
     usageEscalation:
       'Hello, a specialist from our team will contact you shortly regarding this matter.',
+    productKnowledgeEscalation:
+      'Hello, a product specialist from our team will contact you shortly with accurate product details.',
   },
 };
 
@@ -757,11 +763,13 @@ const FIXED_PHRASES_BY_LOCALE: Record<ReplyLocale, readonly string[]> = {
   sq: [
     HOLDING_MESSAGES.sq.postPurchaseSupport,
     HOLDING_MESSAGES.sq.usageEscalation,
+    HOLDING_MESSAGES.sq.productKnowledgeEscalation,
     ORDER_CONFIRMATION_FOLLOW_UP.sq,
   ],
   en: [
     HOLDING_MESSAGES.en.postPurchaseSupport,
     HOLDING_MESSAGES.en.usageEscalation,
+    HOLDING_MESSAGES.en.productKnowledgeEscalation,
     ORDER_CONFIRMATION_FOLLOW_UP.en,
     // Legacy English variants previously authored by the model — kept so we still strip them
     // when running in Albanian mode and the model accidentally falls back to old wording.
@@ -1521,8 +1529,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  const { reply: replyText, productCatalogContext, language: generatedLanguage, matchedProducts } =
-    await generateReply(
+  const {
+    reply: replyText,
+    productCatalogContext,
+    language: generatedLanguage,
+    matchedProducts,
+    attributeIntent,
+  } = await generateReply(
       conversationId,
       tenantId,
       inboundText,
@@ -1772,9 +1785,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   let productKnowledgeEscalated = false;
   const productKnowledgeIntent =
-    !usageEscalated && inboundText
-      ? await classifyProductKnowledgeQuestionIntent(inboundText)
-      : false;
+    !usageEscalated && inboundText && attributeIntent.is_product_knowledge_question;
+
+  const productKnowledgeHoldingMessage =
+    HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText, replyLocale)].productKnowledgeEscalation;
 
   if (productKnowledgeIntent && !isOosCannedReply) {
     const knowledgeContext = buildProductKnowledgeContext(matchedProducts);
@@ -1782,13 +1796,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     if (!shouldEscalate) {
       try {
-        shouldEscalate = await isProductKnowledgeQuestionUnanswered(inboundText, knowledgeContext);
+        shouldEscalate = await isProductKnowledgeQuestionUnanswered(inboundText, knowledgeContext, {
+          failClosed: true,
+        });
       } catch (err) {
-        console.warn('[ai.reply] product knowledge unanswered classifier failed', {
+        console.warn('[ai.reply] product knowledge unanswered classifier failed — escalating', {
           conversationId,
           tenantId,
           err,
         });
+        shouldEscalate = true;
       }
     }
 
@@ -1810,7 +1827,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         );
         await client.query('COMMIT');
         productKnowledgeEscalated = true;
-        finalReplyText = usageHoldingMessage;
+        finalReplyText = productKnowledgeHoldingMessage;
       } catch (err) {
         await client.query('ROLLBACK');
         console.error('[ai.reply] Product knowledge escalation transaction failed', {

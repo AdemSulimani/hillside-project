@@ -26,9 +26,16 @@ import {
   buildProductAttributeAggregation,
   CATEGORY_GROUP_MATCH_LIMIT,
   detectProductQueryScope,
+  expandProductsForAttributeQuery,
   isCategoryAttributeFollowUp,
   resolveProductsForContextualQuery,
+  type AttributeQueryIntentHint,
 } from './productRetrievalService';
+import {
+  classifyProductAttributeIntent,
+  isAttributeQuestionMessage,
+  type ProductAttributeIntentResult,
+} from './productAttributeIntentService';
 import {
   formatCatalogDescriptionLine,
   formatCatalogUsageLine,
@@ -452,7 +459,8 @@ export function needsConversationProductContext(message: string): boolean {
     isPriceOnlyFollowUp(message) ||
     isUsageOnlyFollowUp(message) ||
     isVagueProductReferenceFollowUp(message) ||
-    isCategoryAttributeFollowUp(message)
+    isCategoryAttributeFollowUp(message) ||
+    isAttributeQuestionMessage(message)
   );
 }
 
@@ -1751,97 +1759,28 @@ Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
   }
 }
 
-const PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS = [
-  'flavor',
-  'flavour',
-  'taste',
-  'size',
-  'color',
-  'colour',
-  'variant',
-  'weight',
-  'brand',
-  'ingredient',
-  'specification',
-  'spec',
-  'packaging',
-  'contain',
-  'made of',
-  'material',
-  'shije',
-  'madhesi',
-  'madhësi',
-  'ngjyr',
-  'variant',
-  'pesha',
-  'marka',
-  'perberes',
-  'përberës',
-  'specifikim',
-  'paketim',
-];
-
 export async function classifyProductKnowledgeQuestionIntent(message: string): Promise<boolean> {
-  const trimmed = message.trim();
-  if (!trimmed) return false;
-
-  const normalized = trimmed.toLowerCase();
-  if (USAGE_QUESTION_KEYWORDS.some((kw) => normalized.includes(kw))) {
-    return false;
-  }
-
-  if (isCategoryAttributeFollowUp(trimmed)) return true;
-
-  const hasKnowledgeCue =
-    trimmed.includes('?') ||
-    PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS.some((kw) => normalized.includes(kw));
-  if (!hasKnowledgeCue) return false;
-
-  const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
-    messages: [
-      {
-        role: 'system',
-        content: `You classify whether a customer is asking for factual product information from the catalog (attributes, specs, ingredients, variants, flavors, sizes, colors, brands, packaging, materials, compatibility, etc.).
-
-Return {"is_product_knowledge_question": true} when the customer wants product facts that must come from the catalog — not general chit-chat, not price-only, not order placement, not usage/dosage instructions.
-
-Return {"is_product_knowledge_question": false} for usage/dosage/how-to-take questions, price-only questions, recommendations, greetings, or order flow.
-
-Return only JSON.`,
-      },
-      { role: 'user', content: trimmed },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0,
-    max_tokens: 64,
-  });
-
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw?.trim()) {
-    return PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS.some((kw) => normalized.includes(kw));
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as { is_product_knowledge_question?: boolean };
-    return parsed.is_product_knowledge_question === true;
-  } catch {
-    return PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS.some((kw) => normalized.includes(kw));
-  }
+  const intent = await classifyProductAttributeIntent(message);
+  return intent.is_product_knowledge_question;
 }
+
+export { classifyProductAttributeIntent, type ProductAttributeIntentResult };
 
 export async function isProductKnowledgeQuestionUnanswered(
   inboundMessage: string,
   catalogKnowledgeContext: string,
+  options?: { failClosed?: boolean },
 ): Promise<boolean> {
+  const failClosed = options?.failClosed !== false;
   if (!catalogKnowledgeContext.trim()) return true;
 
-  const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
-    messages: [
-      {
-        role: 'system',
-        content: `You are a semantic classifier. Determine whether the provided catalog knowledge contains enough information to answer the customer's product question with HIGH confidence.
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a semantic classifier. Determine whether the provided catalog knowledge contains enough information to answer the customer's product question with HIGH confidence.
 
 The text may be in Albanian or English.
 
@@ -1849,25 +1788,24 @@ Return {"is_unanswered": false} when the catalog knowledge contains information 
 Return {"is_unanswered": true} when the catalog knowledge lacks the requested attribute/spec/detail, is ambiguous, or would require guessing.
 
 Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
-      },
-      {
-        role: 'user',
-        content: `Customer message:\n${inboundMessage}\n\nCatalog knowledge:\n${catalogKnowledgeContext}`,
-      },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0,
-    max_tokens: 64,
-  });
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inboundMessage}\n\nCatalog knowledge:\n${catalogKnowledgeContext}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
 
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw?.trim()) return true;
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw?.trim()) return failClosed;
 
-  try {
     const parsed = JSON.parse(raw) as { is_unanswered?: boolean };
     return parsed.is_unanswered === true;
   } catch {
-    return true;
+    return failClosed;
   }
 }
 
@@ -2648,7 +2586,13 @@ export async function generateReply(
   attachmentUrlsRaw: unknown = [],
   productCatalogContext?: string,
   precomputedLanguage?: ReplyLocale,
-): Promise<{ reply: string; productCatalogContext: string; language: ReplyLocale; matchedProducts: Product[] }> {
+): Promise<{
+  reply: string;
+  productCatalogContext: string;
+  language: ReplyLocale;
+  matchedProducts: Product[];
+  attributeIntent: ProductAttributeIntentResult;
+}> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
@@ -2668,13 +2612,15 @@ export async function generateReply(
     conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
       ? conversationHistoryWindow.slice(-RECENT_RAW_HISTORY_MESSAGES)
       : conversationHistoryWindow;
-  const [customerAskedPrice, customerAskedDiscount, detectedLanguage] = await Promise.all([
-    customerAskedAboutPrice(inboundMessage),
-    customerAskedAboutDiscount(inboundMessage),
-    precomputedLanguage
-      ? Promise.resolve(precomputedLanguage)
-      : detectReplyLanguage(inboundMessage, conversationHistoryWindow),
-  ]);
+  const [customerAskedPrice, customerAskedDiscount, detectedLanguage, attributeIntent] =
+    await Promise.all([
+      customerAskedAboutPrice(inboundMessage),
+      customerAskedAboutDiscount(inboundMessage),
+      precomputedLanguage
+        ? Promise.resolve(precomputedLanguage)
+        : detectReplyLanguage(inboundMessage, conversationHistoryWindow),
+      classifyProductAttributeIntent(inboundMessage),
+    ]);
   const language: ReplyLocale = detectedLanguage;
 
   if (!tenant) {
@@ -2701,6 +2647,7 @@ export async function generateReply(
           : '',
       language,
       matchedProducts: [],
+      attributeIntent,
     };
   }
 
@@ -2708,8 +2655,11 @@ export async function generateReply(
   let usedFullCatalogFallback = false;
 
   const searchText = inboundMessage.trim();
+  const attributeIntentHint: AttributeQueryIntentHint = attributeIntent;
   const contextualMatchLimit =
-    needsConversationProductContext(searchText) || isCategoryAttributeFollowUp(searchText)
+    needsConversationProductContext(searchText) ||
+    isCategoryAttributeFollowUp(searchText) ||
+    attributeIntent.is_attribute_question
       ? CATEGORY_GROUP_MATCH_LIMIT
       : FOCUSED_PRODUCT_MATCH_LIMIT;
 
@@ -2846,7 +2796,14 @@ export async function generateReply(
     }
   }
 
-  const queryScope = detectProductQueryScope(searchText, products);
+  products = await expandProductsForAttributeQuery(
+    tenantId,
+    products,
+    attributeIntentHint,
+    contextualMatchLimit,
+  );
+
+  const queryScope = detectProductQueryScope(searchText, products, attributeIntentHint);
 
   const usageQuestionTurn = isUsageOnlyFollowUp(searchText);
   const descriptionQuestionTurn =
@@ -2864,7 +2821,11 @@ export async function generateReply(
         });
 
   if (products.length > 1) {
-    const aggregation = buildProductAttributeAggregation(products, searchText);
+    const aggregation = buildProductAttributeAggregation(
+      products,
+      searchText,
+      attributeIntent.attributes,
+    );
     if (aggregation) {
       resolvedProductCatalogContext += `\n\n${aggregation}`;
     }
@@ -2910,6 +2871,7 @@ export async function generateReply(
       productCatalogContext: resolvedProductCatalogContext,
       language,
       matchedProducts: products,
+      attributeIntent,
     };
   }
 
@@ -2952,6 +2914,14 @@ Product-image match uncertainty (IMPORTANT):
   systemPrompt += PRODUCT_DESCRIPTION_CONCISE_APPEND;
   if (descriptionQuestionTurn) {
     systemPrompt += PRODUCT_DESCRIPTION_TARGETED_APPEND;
+  }
+  if (attributeIntent.is_attribute_question) {
+    systemPrompt += `
+
+Product attribute question (IMPORTANT):
+- Answer using ONLY catalog facts and the aggregated attribute summary when present.
+- List every distinct attribute value across ALL matching products in scope.
+- If the requested attribute is missing from the catalog, say you do not have that detail — do not guess.`;
   }
 
   const systemPromptTokenEstimate = estimateTokens(systemPrompt);
@@ -3023,6 +2993,7 @@ Product-image match uncertainty (IMPORTANT):
         productCatalogContext: resolvedProductCatalogContext,
         language,
         matchedProducts: products,
+        attributeIntent,
       };
     }
 
@@ -3070,5 +3041,6 @@ Product-image match uncertainty (IMPORTANT):
     productCatalogContext: resolvedProductCatalogContext,
     language,
     matchedProducts: products,
+    attributeIntent,
   };
 }

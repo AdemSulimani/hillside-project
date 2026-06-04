@@ -1,0 +1,158 @@
+import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
+import {
+  detectAttributeIntentFromKeywords,
+  type ProductAttributeIntentResult,
+  type ProductAttributeKey,
+} from './productAttributeIntentHeuristics';
+
+export type { ProductAttributeIntentResult, ProductAttributeKey };
+export {
+  detectAttributeIntentFromKeywords,
+  detectImplicitAttributeSelection,
+  hasProductKnowledgeKeywordCue,
+  isAttributeQuestionMessage,
+  PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS,
+} from './productAttributeIntentHeuristics';
+
+const EMPTY_INTENT: ProductAttributeIntentResult = {
+  is_attribute_question: false,
+  is_product_knowledge_question: false,
+  attributes: [],
+  source: 'none',
+};
+
+const SUBSTANTIVE_MESSAGE_MIN_LEN = 2;
+
+function parseAttributeIntentJson(raw: string): ProductAttributeIntentResult | null {
+  try {
+    const parsed = JSON.parse(raw) as {
+      is_attribute_question?: boolean;
+      is_product_knowledge_question?: boolean;
+      attributes?: unknown;
+    };
+
+    const validKeys = new Set<string>([
+      'flavor',
+      'size',
+      'color',
+      'variant',
+      'weight',
+      'brand',
+      'category',
+      'material',
+      'ingredient',
+      'packaging',
+      'spec',
+    ]);
+
+    const attributes = Array.isArray(parsed.attributes)
+      ? parsed.attributes
+          .filter((k): k is ProductAttributeKey => typeof k === 'string' && validKeys.has(k))
+      : [];
+
+    const isAttribute = parsed.is_attribute_question === true;
+    const isKnowledge = parsed.is_product_knowledge_question === true;
+
+    if (!isAttribute && !isKnowledge) {
+      return {
+        is_attribute_question: false,
+        is_product_knowledge_question: false,
+        attributes: [],
+        source: 'llm',
+      };
+    }
+
+    return {
+      is_attribute_question: isAttribute,
+      is_product_knowledge_question: isKnowledge || isAttribute,
+      attributes,
+      source: 'llm',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mergeKeywordFallback(
+  llmResult: ProductAttributeIntentResult,
+  keywordHint: ProductAttributeIntentResult | null,
+): ProductAttributeIntentResult {
+  if (!keywordHint) return llmResult;
+  if (llmResult.is_product_knowledge_question) {
+    if (llmResult.attributes.length === 0 && keywordHint.attributes.length > 0) {
+      return { ...llmResult, attributes: keywordHint.attributes };
+    }
+    return llmResult;
+  }
+
+  return {
+    is_attribute_question: keywordHint.is_attribute_question || llmResult.is_attribute_question,
+    is_product_knowledge_question: true,
+    attributes:
+      llmResult.attributes.length > 0 ? llmResult.attributes : keywordHint.attributes,
+    source: 'llm_with_keyword_fallback',
+  };
+}
+
+/**
+ * Classifies product-attribute questions and broader catalog-fact (product knowledge) questions.
+ * Always attempts an LLM pass for substantive messages; keyword/regex fast paths avoid veto gaps.
+ */
+export async function classifyProductAttributeIntent(
+  message: string,
+): Promise<ProductAttributeIntentResult> {
+  const trimmed = message.trim();
+  if (!trimmed || trimmed.length < SUBSTANTIVE_MESSAGE_MIN_LEN) {
+    return EMPTY_INTENT;
+  }
+
+  const keywordHint = detectAttributeIntentFromKeywords(trimmed);
+  if (keywordHint?.source === 'regex') {
+    return keywordHint;
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `You classify customer messages about product catalog facts.
+
+Return JSON only:
+{
+  "is_attribute_question": boolean,
+  "is_product_knowledge_question": boolean,
+  "attributes": string[]
+}
+
+Set is_attribute_question true when the customer asks about or selects product attributes: flavor, size, color, variant, weight, brand, product type, material, ingredients, packaging, specs, compatibility, vegan/organic/allergen, etc.
+
+Set is_product_knowledge_question true when the customer needs factual catalog information (including attribute questions). False for: usage/dosage/how-to-take ONLY, price-only, pure recommendations, greetings, order placement.
+
+For mixed messages (e.g. size + how to take), set BOTH is_attribute_question and is_product_knowledge_question true and list relevant attributes.
+
+attributes: subset of [flavor, size, color, variant, weight, brand, category, material, ingredient, packaging, spec] — empty if not attribute-specific. Use category for product type questions.`,
+        },
+        { role: 'user', content: trimmed },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 128,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const llmResult = parseAttributeIntentJson(raw.trim());
+      if (llmResult) {
+        return mergeKeywordFallback(llmResult, keywordHint);
+      }
+    }
+  } catch {
+    // Fall through to keyword hint
+  }
+
+  if (keywordHint) return keywordHint;
+
+  return EMPTY_INTENT;
+}

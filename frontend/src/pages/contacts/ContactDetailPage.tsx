@@ -16,6 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { formatCurrency } from '@/lib/formatCurrency';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -358,7 +359,7 @@ export default function ContactDetailPage() {
                         </td>
                         <td className="px-3 py-2 tabular-nums">{o.quantity}</td>
                         <td className="px-3 py-2 text-right tabular-nums font-medium">
-                          ${o.total_price.toFixed(2)}
+                          {formatCurrency(o.total_price)}
                         </td>
                         <td className="px-3 py-2 text-center">
                           {renderOrderChannelIcon(o.channel_type)}

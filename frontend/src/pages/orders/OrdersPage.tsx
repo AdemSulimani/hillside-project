@@ -23,6 +23,7 @@ import { OrderDetailDrawer } from '@/components/orders/OrderDetailDrawer';
 import { orderChannelIcon } from '@/components/orders/orderChannelIcon';
 import { OrderStatusBadge } from '@/components/orders/orderStatusBadge';
 import { formatFlagReason } from '@/lib/aiAlertLabels';
+import { formatCurrency } from '@/lib/formatCurrency';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/authStore';
@@ -469,7 +470,7 @@ export default function OrdersPage() {
                         <p className="truncate text-base font-semibold">{order.customer_name}</p>
                       </div>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {order.product_name} · Sasia {order.quantity} · ${order.total_price.toFixed(2)} ·{' '}
+                        {order.product_name} · Sasia {order.quantity} · {formatCurrency(order.total_price)} ·{' '}
                         {formatRelativeShort(order.created_at)}
                       </p>
                     </div>
@@ -740,7 +741,7 @@ export default function OrdersPage() {
                       </td>
                       <td className="px-3 py-2.5 tabular-nums">{row.quantity}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums font-medium">
-                        ${row.total_price.toFixed(2)}
+                        {formatCurrency(row.total_price)}
                       </td>
                       <td className="px-3 py-2.5 text-center">
                         <span className="inline-flex justify-center" title={row.channel_type}>
