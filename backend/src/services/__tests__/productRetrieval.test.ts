@@ -44,15 +44,14 @@ describe('productRetrievalService', () => {
     assert.equal(isCategoryAttributeFollowUp('tell me the flavors'), true);
   });
 
-  it('detectRequestedAttributes maps ingredient and spec', () => {
+  it('detectRequestedAttributes ignores non-catalog topics like ingredients', () => {
     const attrs = detectRequestedAttributes('What are the ingredients and specs?');
-    assert.ok(attrs.includes('ingredient'));
-    assert.ok(attrs.includes('spec'));
+    assert.equal(attrs.length, 0);
   });
 
-  it('detectRequestedAttributes merges intent attributes', () => {
-    const attrs = detectRequestedAttributes('tell me more', ['material']);
-    assert.deepEqual(attrs, ['material']);
+  it('detectRequestedAttributes merges intent attributes from classifier', () => {
+    const attrs = detectRequestedAttributes('tell me more', ['flavor']);
+    assert.deepEqual(attrs, ['flavor']);
   });
 
   it('buildProductAttributeAggregation lists flavors across SKUs', () => {

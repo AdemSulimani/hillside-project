@@ -28,11 +28,7 @@ export type StructuredAttributeKey =
   | 'variant'
   | 'weight'
   | 'brand'
-  | 'category'
-  | 'material'
-  | 'ingredient'
-  | 'packaging'
-  | 'spec';
+  | 'category';
 
 export const ALL_STRUCTURED_ATTRIBUTE_KEYS: StructuredAttributeKey[] = [
   'flavor',
@@ -42,10 +38,6 @@ export const ALL_STRUCTURED_ATTRIBUTE_KEYS: StructuredAttributeKey[] = [
   'weight',
   'brand',
   'category',
-  'material',
-  'ingredient',
-  'packaging',
-  'spec',
 ];
 
 const ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
@@ -57,11 +49,6 @@ const ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
   /\b(what|which|cfare|çfarë|cfare)\s+(weights?|pesha(?:t|ve)?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(types?|lloje(?:t|ve)?|product types?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(options?|opsione(?:t|ve)?)\b/i,
-  /\b(what|which|cfare|çfarë|cfare)\s+(packaging|packages?|paketim(?:et)?)\b/i,
-  /\b(what|which|cfare|çfarë|cfare)\s+(ingredients?|perber[eë]s(?:it|et)?)\b/i,
-  /\b(what|which|cfare|çfarë|cfare)\s+(materials?|materiale?t?)\b/i,
-  /\b(what|which|cfare|çfarë|cfare)\s+(specs?|specifications?|specifikime(?:t|ve)?)\b/i,
-  /\b(is it|a eshte|a është)\s+(vegan|organic|gluten[- ]?free)\b/i,
   /\b(cilat|cila|sa)\s+(shije(?:t|sh)?|madh[eë]si(?:t|ve)?|ngjyra(?:t|ve)?|variantet?|marka(?:t|ve)?)\b/i,
   /\b(do you have|a keni|keni)\s+(other|tjet[eë]r|different|ndryshme)\s+(flavou?rs?|sizes?|colors?|variants?)\b/i,
   /\b(tell me|show me|list)\s+(the\s+)?(flavou?rs?|sizes?|colors?|variants?|options?)\b/i,
@@ -290,10 +277,6 @@ export function getProductStructuredAttributes(
     weight: product.weight?.trim() || null,
     brand: product.brand?.trim() || null,
     category: product.category?.trim() || null,
-    material: null,
-    ingredient: null,
-    packaging: null,
-    spec: null,
   };
 }
 
@@ -305,7 +288,6 @@ const NAME_ATTRIBUTE_PATTERNS: Array<{ key: StructuredAttributeKey; re: RegExp }
   { key: 'color', re: /\b(red|blue|black|white|green|yellow|pink|purple|grey|gray|silver|gold)\b/i },
   { key: 'size', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|ml|l|oz|lb|lbs|capsules?|caps|tablets?|servings?))\b/i },
   { key: 'weight', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|oz|lb|lbs))\b/i },
-  { key: 'material', re: /\b(cotton|polyester|wool|silk|leather|stainless steel|plastic|glass|wood|ceramic|silicone|nylon)\b/i },
 ];
 
 function inferAttributeFromText(
@@ -325,23 +307,6 @@ function inferAttributeFromText(
   if (key === 'brand' && product.brand) return product.brand.trim();
   if (key === 'category' && product.category) return product.category.trim();
 
-  if (key === 'ingredient' && product.description) {
-    const ingredientMatch = product.description.match(
-      /\b(ingredients?|perber[eë]s(?:it)?)\s*[:]\s*([^.;\n]+)/i,
-    );
-    if (ingredientMatch?.[2]) return ingredientMatch[2].trim();
-  }
-
-  if (key === 'packaging' && product.description) {
-    const packMatch = product.description.match(/\b(packaging|paketim)\s*[:]\s*([^.;\n]+)/i);
-    if (packMatch?.[2]) return packMatch[2].trim();
-  }
-
-  if (key === 'spec' && product.description) {
-    const specMatch = product.description.match(/\b(specs?|specifications?|specifikim)\s*[:]\s*([^.;\n]+)/i);
-    if (specMatch?.[2]) return specMatch[2].trim();
-  }
-
   for (const { key: patternKey, re } of NAME_ATTRIBUTE_PATTERNS) {
     if (patternKey !== key) continue;
     const match = hay.match(re);
@@ -360,10 +325,6 @@ function attributeLabel(key: StructuredAttributeKey): string {
     weight: 'Weights',
     brand: 'Brands',
     category: 'Categories / product types',
-    material: 'Materials',
-    ingredient: 'Ingredients',
-    packaging: 'Packaging',
-    spec: 'Specifications',
   };
   return labels[key];
 }
@@ -376,7 +337,9 @@ export function detectRequestedAttributes(
   const requested = new Set<StructuredAttributeKey>();
 
   if (intentAttributes?.length) {
-    for (const attr of intentAttributes) requested.add(attr);
+    for (const attr of intentAttributes) {
+      if (ALL_STRUCTURED_ATTRIBUTE_KEYS.includes(attr)) requested.add(attr);
+    }
   }
 
   if (/\b(flavou?r|taste|shije)\b/.test(t)) requested.add('flavor');
@@ -386,11 +349,6 @@ export function detectRequestedAttributes(
   if (/\b(weight|pesha)\b/.test(t)) requested.add('weight');
   if (/\b(brand|marka)\b/.test(t)) requested.add('brand');
   if (/\b(type|lloj|product type|categor)\b/.test(t)) requested.add('category');
-  if (/\b(material|made of|materiale)\b/.test(t)) requested.add('material');
-  if (/\b(ingredients?|perberes|përberës)\b/.test(t)) requested.add('ingredient');
-  if (/\b(packaging|paketim|packages?)\b/.test(t)) requested.add('packaging');
-  if (/\b(specs?|specifications?|specifikim(?:et)?)\b/.test(t)) requested.add('spec');
-  if (/\b(vegan|organic|gluten|allergen)\b/.test(t)) requested.add('ingredient');
 
   if (requested.size === 0 && isCategoryAttributeFollowUp(message)) {
     return ALL_STRUCTURED_ATTRIBUTE_KEYS;
