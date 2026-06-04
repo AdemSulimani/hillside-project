@@ -134,7 +134,7 @@ export async function processReconcileProductEmbeddings(): Promise<void> {
         // Lower priority than live product edits (priority 5 vs default 0).
         // BullMQ: lower number = higher priority.
         priority: 5,
-        jobId: `embed-reconcile:${row.id}`,
+        jobId: `embed-reconcile-${row.id}`,
         // De-duplicate: if a job for this product is already pending, don't add another.
         // jobId dedup is handled by BullMQ — it silently drops the add if the id exists.
       },
