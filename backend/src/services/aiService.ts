@@ -1467,6 +1467,8 @@ export type FormatProductCatalogOptions = {
   /** Brief summaries by default to prevent the model from copying long descriptions. */
   descriptionMode?: CatalogTextMode;
   usageDescriptionMode?: CatalogTextMode | 'omit';
+  /** Customer photo did not match any catalog product — do not ask for more details. */
+  productNotInCatalog?: boolean;
 };
 
 export function formatProductCatalog(
@@ -1481,6 +1483,14 @@ export function formatProductCatalog(
     options?.usageDescriptionMode ?? 'brief';
 
   if (products.length === 0) {
+    if (options?.productNotInCatalog) {
+      return (
+        '[The customer\'s product photo does not match anything in the catalog. ' +
+        'Tell the customer honestly and briefly that you do not carry this product. ' +
+        'Do NOT ask for a clearer photo or more product details. ' +
+        'Do NOT provide general product information from the image.]'
+      );
+    }
     if (totalCatalogCount > 0) {
       return (
         `[This business has ${totalCatalogCount} active product(s) in its catalog. ` +
@@ -2776,6 +2786,7 @@ export async function generateReply(
   let visionContext: string | null = null;
   let imageMatchConfidence = 1;
   let shouldAskImageClarification = false;
+  let productNotInCatalog = false;
 
   if (hasImages) {
     const imageMatchOutcome = await matchProductsFromCustomerImages({
@@ -2788,9 +2799,13 @@ export async function generateReply(
 
     imageMatchConfidence = imageMatchOutcome.matchConfidence;
     shouldAskImageClarification = imageMatchOutcome.shouldAskClarification;
+    productNotInCatalog = imageMatchOutcome.productNotInCatalog;
     visionContext = imageMatchOutcome.visionContext;
 
-    if (imageMatchOutcome.products.length > 0) {
+    if (productNotInCatalog) {
+      products = [];
+      usedFullCatalogFallback = false;
+    } else if (imageMatchOutcome.products.length > 0) {
       products = imageMatchOutcome.products;
       usedFullCatalogFallback = false;
     }
@@ -2818,6 +2833,7 @@ export async function generateReply(
           totalCatalogCount,
           descriptionMode: descriptionQuestionTurn ? 'full' : 'brief',
           usageDescriptionMode: usageQuestionTurn ? 'full' : 'brief',
+          productNotInCatalog,
         });
 
   if (products.length > 1) {
@@ -2895,13 +2911,21 @@ export async function generateReply(
     }
   }
 
-  if (hasImages && shouldAskImageClarification) {
+  if (hasImages && productNotInCatalog) {
+    systemPrompt += `
+
+Product not in catalog (IMPORTANT):
+- The customer's photo does not match any product in the catalog.
+- Tell the customer honestly and briefly that you do not carry this product.
+- Do NOT ask for a clearer photo, product name, or any additional details.
+- Do NOT describe ingredients, benefits, or other general information about the product.
+- You may offer to help find something else from the catalog.`;
+  } else if (hasImages && shouldAskImageClarification) {
     systemPrompt += `
 
 Product-image match uncertainty (IMPORTANT):
-- The customer's photo could not be matched to the catalog with high confidence.
+- The customer's photo shows multiple products — ask which one they mean.
 - Do NOT claim you have the exact product shown unless match confidence is high.
-- Ask a brief clarifying question (clearer photo, product name, or which item if multiple visible).
 - You may mention similar catalog items only if listed in the product catalog context, with honest uncertainty.
 - Never invent product names, prices, or availability.`;
   }
@@ -3021,7 +3045,9 @@ Product attribute question (IMPORTANT):
     : (config.custom_model_id || process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o');
 
   const replyTemperature =
-    hasImages && (shouldAskImageClarification || imageMatchConfidence < 0.65) ? 0.3 : 0.7;
+    hasImages && (productNotInCatalog || shouldAskImageClarification || imageMatchConfidence < 0.65)
+      ? 0.3
+      : 0.7;
 
   const completion = await openai.chat.completions.create({
     model,
