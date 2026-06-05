@@ -64,6 +64,8 @@ export interface CustomerImageMatchOutcome {
   imageQuality: ImageQuality;
   extraction: CustomerVisionExtraction | null;
   brandLikelyAbsent: boolean;
+  /** True when the photo has no confident catalog match — reply should state we do not carry it. */
+  productNotInCatalog: boolean;
 }
 
 function resolveImageUrls(attachmentUrls: string[]): string[] {
@@ -402,16 +404,76 @@ function buildClarificationReason(
   if (extraction?.multiple_products_detected && extraction.product_count_estimate > 1) {
     return 'multiple_products_in_image';
   }
+
+  // Brand identified and absent from catalog — no point asking for a better photo.
+  if (brandLikelyAbsent && extraction?.brand_name) {
+    return null;
+  }
+
   if (extraction?.image_quality === 'poor' && matchConfidence < 0.65) {
     return 'poor_image_quality';
   }
   if (extraction && extraction.confidence < VISION_EXTRACTION_CONFIDENCE_MIN) {
     return 'low_extraction_confidence';
   }
-  if (matchConfidence < IMAGE_MATCH_CONFIDENCE_THRESHOLD) {
-    return brandLikelyAbsent ? 'brand_not_in_catalog' : 'uncertain_product_match';
-  }
   return null;
+}
+
+function computeProductNotInCatalog(input: {
+  extraction: CustomerVisionExtraction | null;
+  shouldAskClarification: boolean;
+  matchConfidence: number;
+  products: Product[];
+  brandLikelyAbsent: boolean;
+}): boolean {
+  if (!input.extraction || input.shouldAskClarification) return false;
+  if (input.products.length > 0) return false;
+  if (input.matchConfidence >= IMAGE_MATCH_CONFIDENCE_THRESHOLD) return false;
+
+  // Brand read from the image and not in catalog — definitive miss.
+  if (input.brandLikelyAbsent && input.extraction.brand_name) return true;
+
+  // Image was readable enough to search; nothing matched — not a photo-quality issue.
+  const readableEnough =
+    input.extraction.image_quality !== 'poor' &&
+    input.extraction.confidence >= VISION_EXTRACTION_CONFIDENCE_MIN;
+
+  return readableEnough;
+}
+
+function buildVisionContextRules(
+  productNotInCatalog: boolean,
+  clarificationReason: string | null,
+): string[] {
+  if (productNotInCatalog) {
+    return [
+      'Rules:',
+      '- This product is NOT in the catalog. Tell the customer honestly and briefly that you do not carry it.',
+      '- Do NOT ask for a clearer photo, product name, or any additional details.',
+      '- Do NOT describe ingredients, benefits, or other general product information from the image.',
+      '- You may briefly name the brand/product visible in the photo only to confirm what you do not carry.',
+      '- You may offer to help find something else from the catalog.',
+    ];
+  }
+
+  const rules = [
+    'Rules:',
+    '- Never claim an exact match when confidence is below threshold or brand is absent.',
+    '- If packaging looks similar but brand differs, state you carry a similar product, not the exact brand.',
+    '- Mention out-of-stock status honestly; inactive products must not be offered.',
+  ];
+
+  if (clarificationReason === 'multiple_products_in_image') {
+    rules.push('- If multiple products visible, ask which one they mean.');
+  }
+  if (
+    clarificationReason === 'poor_image_quality' ||
+    clarificationReason === 'low_extraction_confidence'
+  ) {
+    rules.push('- For poor image quality, ask for a clearer photo showing the label.');
+  }
+
+  return rules;
 }
 
 export async function matchProductsFromCustomerImages(input: {
@@ -436,6 +498,7 @@ export async function matchProductsFromCustomerImages(input: {
       imageQuality: 'fair',
       extraction: null,
       brandLikelyAbsent: false,
+      productNotInCatalog: false,
     };
   }
 
@@ -505,24 +568,51 @@ export async function matchProductsFromCustomerImages(input: {
 
   const topMatch = scoredMatches[0] ?? null;
   const matchConfidence = computeMatchConfidence(extraction, topMatch);
-  const clarificationReason = buildClarificationReason(extraction, matchConfidence, brandLikelyAbsent);
+  const clarificationReason = buildClarificationReason(
+    extraction,
+    matchConfidence,
+    brandLikelyAbsent,
+  );
   const shouldAskClarification = clarificationReason !== null;
 
-  const products =
-    matchConfidence >= IMAGE_MATCH_CONFIDENCE_THRESHOLD && !shouldAskClarification
-      ? scoredMatches.map((s) => s.product)
-      : scoredMatches.length > 0 && topMatch && (topMatch.imageSimilarity ?? 0) >= IMAGE_SIMILARITY_THRESHOLD
-        ? scoredMatches.slice(0, 3).map((s) => s.product)
-        : exactBrandMatches.length > 0
-          ? exactBrandMatches
-          : textSearchMatches.length > 0
-            ? textSearchMatches.slice(0, limit)
-            : input.textMatchedProducts ?? [];
+  let products: Product[];
+  if (matchConfidence >= IMAGE_MATCH_CONFIDENCE_THRESHOLD && !shouldAskClarification) {
+    products = scoredMatches.map((s) => s.product);
+  } else if (topMatch && (topMatch.imageSimilarity ?? 0) >= IMAGE_SIMILARITY_THRESHOLD) {
+    products = scoredMatches.slice(0, 3).map((s) => s.product);
+  } else if (exactBrandMatches.length > 0) {
+    products = exactBrandMatches;
+  } else if (brandLikelyAbsent && textSearchMatches.length > 0) {
+    // Response B: similar alternative from a different brand may still be offered.
+    products = textSearchMatches.slice(0, limit);
+  } else if (!extraction) {
+    products = input.textMatchedProducts ?? [];
+  } else {
+    products = [];
+  }
+
+  const productNotInCatalog = computeProductNotInCatalog({
+    extraction,
+    shouldAskClarification,
+    matchConfidence,
+    products,
+    brandLikelyAbsent,
+  });
 
   const visionContext = extraction
     ? [
-        'Enhanced product-image analysis:',
-        JSON.stringify(extraction),
+        productNotInCatalog
+          ? 'Product-image analysis: no catalog match for this photo.'
+          : 'Enhanced product-image analysis:',
+        productNotInCatalog
+          ? [
+              extraction.brand_name ? `Identified brand: ${extraction.brand_name}` : null,
+              extraction.product_name ? `Identified product: ${extraction.product_name}` : null,
+              extraction.product_type ? `Product type: ${extraction.product_type}` : null,
+            ]
+              .filter(Boolean)
+              .join('\n') || 'Product details could not be read clearly from the image.'
+          : JSON.stringify(extraction),
         '',
         'Visual catalog matches (image fingerprint similarity):',
         visualMatches.length > 0
@@ -537,14 +627,13 @@ export async function matchProductsFromCustomerImages(input: {
         '',
         `Composite match confidence: ${matchConfidence.toFixed(3)} (threshold: ${IMAGE_MATCH_CONFIDENCE_THRESHOLD})`,
         `Brand likely absent from catalog: ${brandLikelyAbsent ? 'yes' : 'no'}`,
-        shouldAskClarification ? `Clarification required: ${clarificationReason}` : 'Match confidence acceptable.',
+        productNotInCatalog
+          ? 'Outcome: product not in catalog — state this honestly; do not ask for more details.'
+          : shouldAskClarification
+            ? `Clarification required: ${clarificationReason}`
+            : 'Match confidence acceptable.',
         '',
-        'Rules:',
-        '- Never claim an exact match when confidence is below threshold or brand is absent.',
-        '- If multiple products visible, ask which one they mean.',
-        '- If packaging looks similar but brand differs, state you carry a similar product, not the exact brand.',
-        '- Mention out-of-stock status honestly; inactive products must not be offered.',
-        '- For poor image quality, ask for a clearer photo showing the label.',
+        ...buildVisionContextRules(productNotInCatalog, clarificationReason),
       ].join('\n')
     : null;
 
@@ -556,6 +645,7 @@ export async function matchProductsFromCustomerImages(input: {
     shouldAskClarification,
     clarificationReason,
     brandLikelyAbsent,
+    productNotInCatalog,
   });
 
   return {
@@ -564,11 +654,12 @@ export async function matchProductsFromCustomerImages(input: {
     visionContext,
     matchConfidence,
     shouldAskClarification,
-    clarificationReason,
+    clarificationReason: productNotInCatalog ? 'product_not_in_catalog' : clarificationReason,
     multipleProductsDetected: extraction?.multiple_products_detected ?? false,
     imageQuality: extraction?.image_quality ?? 'fair',
     extraction,
     brandLikelyAbsent,
+    productNotInCatalog,
   };
 }
 
