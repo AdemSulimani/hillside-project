@@ -396,9 +396,25 @@ function computeMatchConfidence(
   );
 }
 
-function buildClarificationReason(extraction: CustomerVisionExtraction | null): string | null {
+function buildClarificationReason(
+  extraction: CustomerVisionExtraction | null,
+  matchConfidence: number,
+  brandLikelyAbsent: boolean,
+): string | null {
   if (extraction?.multiple_products_detected && extraction.product_count_estimate > 1) {
     return 'multiple_products_in_image';
+  }
+
+  // Brand identified and absent from catalog — no point asking for a better photo.
+  if (brandLikelyAbsent && extraction?.brand_name) {
+    return null;
+  }
+
+  if (extraction?.image_quality === 'poor' && matchConfidence < 0.65) {
+    return 'poor_image_quality';
+  }
+  if (extraction && extraction.confidence < VISION_EXTRACTION_CONFIDENCE_MIN) {
+    return 'low_extraction_confidence';
   }
   return null;
 }
@@ -408,13 +424,27 @@ function computeProductNotInCatalog(input: {
   shouldAskClarification: boolean;
   matchConfidence: number;
   products: Product[];
+  brandLikelyAbsent: boolean;
 }): boolean {
   if (!input.extraction || input.shouldAskClarification) return false;
   if (input.products.length > 0) return false;
-  return input.matchConfidence < IMAGE_MATCH_CONFIDENCE_THRESHOLD;
+  if (input.matchConfidence >= IMAGE_MATCH_CONFIDENCE_THRESHOLD) return false;
+
+  // Brand read from the image and not in catalog — definitive miss.
+  if (input.brandLikelyAbsent && input.extraction.brand_name) return true;
+
+  // Image was readable enough to search; nothing matched — not a photo-quality issue.
+  const readableEnough =
+    input.extraction.image_quality !== 'poor' &&
+    input.extraction.confidence >= VISION_EXTRACTION_CONFIDENCE_MIN;
+
+  return readableEnough;
 }
 
-function buildVisionContextRules(productNotInCatalog: boolean, shouldAskClarification: boolean): string[] {
+function buildVisionContextRules(
+  productNotInCatalog: boolean,
+  clarificationReason: string | null,
+): string[] {
   if (productNotInCatalog) {
     return [
       'Rules:',
@@ -433,8 +463,14 @@ function buildVisionContextRules(productNotInCatalog: boolean, shouldAskClarific
     '- Mention out-of-stock status honestly; inactive products must not be offered.',
   ];
 
-  if (shouldAskClarification) {
+  if (clarificationReason === 'multiple_products_in_image') {
     rules.push('- If multiple products visible, ask which one they mean.');
+  }
+  if (
+    clarificationReason === 'poor_image_quality' ||
+    clarificationReason === 'low_extraction_confidence'
+  ) {
+    rules.push('- For poor image quality, ask for a clearer photo showing the label.');
   }
 
   return rules;
@@ -532,7 +568,11 @@ export async function matchProductsFromCustomerImages(input: {
 
   const topMatch = scoredMatches[0] ?? null;
   const matchConfidence = computeMatchConfidence(extraction, topMatch);
-  const clarificationReason = buildClarificationReason(extraction);
+  const clarificationReason = buildClarificationReason(
+    extraction,
+    matchConfidence,
+    brandLikelyAbsent,
+  );
   const shouldAskClarification = clarificationReason !== null;
 
   let products: Product[];
@@ -556,6 +596,7 @@ export async function matchProductsFromCustomerImages(input: {
     shouldAskClarification,
     matchConfidence,
     products,
+    brandLikelyAbsent,
   });
 
   const visionContext = extraction
@@ -592,7 +633,7 @@ export async function matchProductsFromCustomerImages(input: {
             ? `Clarification required: ${clarificationReason}`
             : 'Match confidence acceptable.',
         '',
-        ...buildVisionContextRules(productNotInCatalog, shouldAskClarification),
+        ...buildVisionContextRules(productNotInCatalog, clarificationReason),
       ].join('\n')
     : null;
 

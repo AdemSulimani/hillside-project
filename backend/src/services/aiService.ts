@@ -2924,8 +2924,9 @@ Product not in catalog (IMPORTANT):
     systemPrompt += `
 
 Product-image match uncertainty (IMPORTANT):
-- The customer's photo shows multiple products — ask which one they mean.
+- The customer's photo could not be matched to the catalog with high confidence.
 - Do NOT claim you have the exact product shown unless match confidence is high.
+- Ask a brief clarifying question (clearer photo showing the label, product name, or which item if multiple visible).
 - You may mention similar catalog items only if listed in the product catalog context, with honest uncertainty.
 - Never invent product names, prices, or availability.`;
   }
