@@ -153,7 +153,7 @@ export async function upsertProductByName(
        variant            = EXCLUDED.variant,
        weight             = EXCLUDED.weight,
        image_urls         = CASE
-                              WHEN array_length(EXCLUDED.image_urls::text[]::text[], 1) > 0
+                              WHEN jsonb_array_length(COALESCE(EXCLUDED.image_urls, '[]'::jsonb)) > 0
                               THEN EXCLUDED.image_urls
                               ELSE products.image_urls
                             END,
