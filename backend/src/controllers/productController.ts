@@ -4,9 +4,11 @@ import {
   createProduct,
   findProductsByTenant,
   findProductById,
+  findConflictingProductIdByName,
   updateProduct,
   softDeleteProduct,
   softDeleteAllProducts,
+  type Product,
 } from '../db/models/product';
 import { sendSuccess, sendError, sendPaginated } from '../utils/response';
 import { getDocumentService } from '../services/documents';
@@ -19,6 +21,91 @@ import { redisConnection } from '../jobs/redisConnection';
 import { deleteImage, getPublicIdFromUrl } from '../services/cloudinaryService';
 import { deleteFingerprintsForImageUrls } from '../db/models/productImageFingerprint';
 import { queueProductImageFingerprintJobs } from '../services/productImageFingerprintService';
+import { isPgCheckViolation, isPgUniqueViolation, pgConstraintName } from '../utils/pgErrors';
+import { repairOptionalUtf8Text } from '../utils/textEncoding';
+
+function withRepairedTextFields<T extends Product>(product: T): T {
+  return {
+    ...product,
+    name: repairOptionalUtf8Text(product.name) ?? product.name,
+    brand: repairOptionalUtf8Text(product.brand),
+    description: repairOptionalUtf8Text(product.description),
+    usage_description: repairOptionalUtf8Text(product.usage_description),
+    sku: repairOptionalUtf8Text(product.sku),
+    category: repairOptionalUtf8Text(product.category),
+    flavor: repairOptionalUtf8Text(product.flavor),
+    size: repairOptionalUtf8Text(product.size),
+    color: repairOptionalUtf8Text(product.color),
+    variant: repairOptionalUtf8Text(product.variant),
+    weight: repairOptionalUtf8Text(product.weight),
+    tags: product.tags.map((tag) => repairOptionalUtf8Text(tag) ?? tag),
+  };
+}
+
+function normalizeUpdateFields(fields: UpdateProductInput): UpdateProductInput {
+  const normalized: UpdateProductInput = { ...fields };
+
+  if ('name' in fields && fields.name !== undefined) {
+    normalized.name = repairOptionalUtf8Text(fields.name) ?? fields.name;
+  }
+  if ('brand' in fields) normalized.brand = repairOptionalUtf8Text(fields.brand);
+  if ('description' in fields) normalized.description = repairOptionalUtf8Text(fields.description);
+  if ('usage_description' in fields) {
+    normalized.usage_description = repairOptionalUtf8Text(fields.usage_description);
+  }
+  if ('sku' in fields) normalized.sku = repairOptionalUtf8Text(fields.sku);
+  if ('category' in fields) normalized.category = repairOptionalUtf8Text(fields.category);
+  if ('flavor' in fields) normalized.flavor = repairOptionalUtf8Text(fields.flavor);
+  if ('size' in fields) normalized.size = repairOptionalUtf8Text(fields.size);
+  if ('color' in fields) normalized.color = repairOptionalUtf8Text(fields.color);
+  if ('variant' in fields) normalized.variant = repairOptionalUtf8Text(fields.variant);
+  if ('weight' in fields) normalized.weight = repairOptionalUtf8Text(fields.weight);
+  if ('tags' in fields && Array.isArray(fields.tags)) {
+    normalized.tags = fields.tags.map((tag) => repairOptionalUtf8Text(tag) ?? tag);
+  }
+
+  return normalized;
+}
+
+function validateEffectivePricing(
+  existing: Product | null,
+  fields: UpdateProductInput,
+): string | null {
+  const effectivePrice = fields.price ?? existing?.price;
+  const effectiveDiscounted =
+    fields.discounted_price !== undefined ? fields.discounted_price : existing?.discounted_price;
+
+  if (
+    effectiveDiscounted != null &&
+    effectivePrice != null &&
+    effectiveDiscounted >= effectivePrice
+  ) {
+    return 'Discounted price must be lower than the regular price';
+  }
+
+  return null;
+}
+
+async function invalidateProductCaches(tenantId: string, productId: string, fields: UpdateProductInput): Promise<void> {
+  const embeddingRelevantFields = [
+    'name', 'brand', 'description', 'tags', 'category', 'usage_description',
+    'flavor', 'size', 'color', 'variant', 'weight',
+  ] as const;
+  const touchesEmbedding = embeddingRelevantFields.some((f) => f in fields);
+
+  try {
+    if (touchesEmbedding) {
+      await defaultQueue.add('product.embedding', { productId, tenantId }, { priority: 1 });
+    }
+    await redisConnection.del(`products:${tenantId}`);
+  } catch (err) {
+    console.warn('[products] Post-update cache/queue work failed; product row was saved', {
+      tenantId,
+      productId,
+      err,
+    });
+  }
+}
 
 export async function index(req: Request, res: Response): Promise<void> {
   try {
@@ -38,7 +125,14 @@ export async function index(req: Request, res: Response): Promise<void> {
       limit: query.limit,
     });
 
-    sendPaginated(res, products, query.page, query.limit, total, 'Products retrieved successfully');
+    sendPaginated(
+      res,
+      products.map(withRepairedTextFields),
+      query.page,
+      query.limit,
+      total,
+      'Products retrieved successfully',
+    );
   } catch (err) {
     sendError(res, 'Failed to retrieve products', 500, err);
   }
@@ -70,7 +164,18 @@ export async function getTags(req: Request, res: Response): Promise<void> {
 export async function store(req: Request, res: Response): Promise<void> {
   try {
     const tenantId = req.user!.tenantId!;
-    const input = req.body as CreateProductInput;
+    const input = normalizeUpdateFields(req.body as CreateProductInput) as CreateProductInput;
+
+    const conflictId = await findConflictingProductIdByName(tenantId, input.name);
+    if (conflictId) {
+      sendError(
+        res,
+        'A product with this name already exists in your catalog',
+        409,
+        { body: { name: ['A product with this name already exists in your catalog'] } },
+      );
+      return;
+    }
 
     const product = await createProduct({
       tenant_id: tenantId,
@@ -88,12 +193,24 @@ export async function store(req: Request, res: Response): Promise<void> {
       source_type: 'manual',
     });
 
-    // Priority 1 = highest — live edits always run before bulk reconciliation jobs (priority 5).
-    await defaultQueue.add('product.embedding', { productId: product.id, tenantId }, { priority: 1 });
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCaches(tenantId, product.id, {
+      name: product.name,
+      description: product.description,
+      tags: product.tags,
+    });
 
-    sendSuccess(res, { product }, 'Product created successfully', 201);
+    sendSuccess(res, { product: withRepairedTextFields(product) }, 'Product created successfully', 201);
   } catch (err) {
+    if (isPgUniqueViolation(err) && pgConstraintName(err) === 'idx_products_tenant_name_unique') {
+      sendError(
+        res,
+        'A product with this name already exists in your catalog',
+        409,
+        { body: { name: ['A product with this name already exists in your catalog'] } },
+      );
+      return;
+    }
+
     sendError(res, 'Failed to create product', 500, err);
   }
 }
@@ -110,7 +227,7 @@ export async function show(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    sendSuccess(res, { product }, 'Product retrieved successfully');
+    sendSuccess(res, { product: withRepairedTextFields(product) }, 'Product retrieved successfully');
   } catch (err) {
     sendError(res, 'Failed to retrieve product', 500, err);
   }
@@ -121,19 +238,42 @@ export async function update(req: Request, res: Response): Promise<void> {
     const tenantId = req.user!.tenantId!;
     const validated = req.validated?.params as { id: string } | undefined;
     const id = validated?.id ?? (req.params.id as string);
-    const fields = req.body as UpdateProductInput;
-    const fieldsWithImages = fields as UpdateProductInput & { image_urls?: string[] };
+    const fields = normalizeUpdateFields(req.body as UpdateProductInput);
 
     const existing = await findProductById(id, tenantId);
+    if (!existing) {
+      sendError(res, 'Product not found', 404);
+      return;
+    }
+
+    const pricingError = validateEffectivePricing(existing, fields);
+    if (pricingError) {
+      sendError(res, pricingError, 400, { body: { discounted_price: [pricingError] } });
+      return;
+    }
+
+    if (fields.name !== undefined) {
+      const conflictId = await findConflictingProductIdByName(tenantId, fields.name, id);
+      if (conflictId) {
+        sendError(
+          res,
+          'A product with this name already exists in your catalog',
+          409,
+          { body: { name: ['A product with this name already exists in your catalog'] } },
+        );
+        return;
+      }
+    }
+
     const product = await updateProduct(id, tenantId, fields);
     if (!product) {
       sendError(res, 'Product not found', 404);
       return;
     }
 
-    if (existing && Array.isArray(fieldsWithImages.image_urls)) {
-      const removedUrls = existing.image_urls.filter((url) => !fieldsWithImages.image_urls!.includes(url));
-      const addedUrls = fieldsWithImages.image_urls.filter((url) => !existing.image_urls.includes(url));
+    if (Array.isArray(fields.image_urls)) {
+      const removedUrls = existing.image_urls.filter((url) => !fields.image_urls!.includes(url));
+      const addedUrls = fields.image_urls.filter((url) => !existing.image_urls.includes(url));
       for (const url of removedUrls) {
         try {
           await deleteImage(getPublicIdFromUrl(url));
@@ -145,28 +285,38 @@ export async function update(req: Request, res: Response): Promise<void> {
         await deleteFingerprintsForImageUrls(tenantId, removedUrls);
       }
       if (addedUrls.length > 0) {
-        await queueProductImageFingerprintJobs(defaultQueue, product.id, tenantId, addedUrls, 1);
+        try {
+          await queueProductImageFingerprintJobs(defaultQueue, product.id, tenantId, addedUrls, 1);
+        } catch (err) {
+          console.warn('[products.update] Failed to queue image fingerprint jobs', { productId: product.id, err });
+        }
       }
     }
 
-    // usage_description was previously missing from this list — any update to it would
-    // leave the embedding pointing at the old text, silently breaking "how do I use X?"
-    // semantic queries. All fields that feed buildProductText() must be listed here.
-    const embeddingRelevantFields = [
-      'name', 'brand', 'description', 'tags', 'category', 'usage_description',
-      'flavor', 'size', 'color', 'variant', 'weight',
-    ] as const;
-    const touchesEmbedding = embeddingRelevantFields.some(
-      (f) => f in fields,
-    );
-    if (touchesEmbedding) {
-      // Priority 1 = highest — live edits always run before bulk reconciliation (priority 5).
-      await defaultQueue.add('product.embedding', { productId: product.id, tenantId }, { priority: 1 });
-    }
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCaches(tenantId, product.id, fields);
 
-    sendSuccess(res, { product }, 'Product updated successfully');
+    sendSuccess(res, { product: withRepairedTextFields(product) }, 'Product updated successfully');
   } catch (err) {
+    if (isPgUniqueViolation(err) && pgConstraintName(err) === 'idx_products_tenant_name_unique') {
+      sendError(
+        res,
+        'A product with this name already exists in your catalog',
+        409,
+        { body: { name: ['A product with this name already exists in your catalog'] } },
+      );
+      return;
+    }
+
+    if (isPgCheckViolation(err) && pgConstraintName(err) === 'products_discounted_price_check') {
+      sendError(
+        res,
+        'Discounted price must be lower than the regular price',
+        400,
+        { body: { discounted_price: ['Discounted price must be lower than the regular price'] } },
+      );
+      return;
+    }
+
     sendError(res, 'Failed to update product', 500, err);
   }
 }

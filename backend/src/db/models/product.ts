@@ -242,6 +242,27 @@ export async function findProductsByTenant(
   return { products: rows, total };
 }
 
+/** Returns another active product id with the same normalized name, if any. */
+export async function findConflictingProductIdByName(
+  tenantId: string,
+  name: string,
+  excludeId?: string,
+): Promise<string | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+
+  const { rows } = await pool.query<{ id: string }>(
+    `SELECT id FROM products
+     WHERE tenant_id = $1
+       AND deleted_at IS NULL
+       AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+       AND ($3::uuid IS NULL OR id <> $3)
+     LIMIT 1`,
+    [tenantId, trimmed, excludeId ?? null],
+  );
+  return rows[0]?.id ?? null;
+}
+
 export async function findProductById(
   id: string,
   tenantId: string,
