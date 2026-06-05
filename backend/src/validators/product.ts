@@ -120,6 +120,7 @@ export const updateProductSchema = z
     color: z.string().max(255).nullable().optional(),
     variant: z.string().max(255).nullable().optional(),
     weight: z.string().max(255).nullable().optional(),
+    image_urls: z.array(z.string().min(1)).optional(),
   })
   .refine(
     (data) =>

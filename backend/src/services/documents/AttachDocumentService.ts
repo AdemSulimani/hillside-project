@@ -1,4 +1,5 @@
 import { createProduct, upsertProductByName, type Product, type CreateProductInput } from '../../db/models/product';
+import { repairOptionalUtf8Text } from '../../utils/textEncoding';
 
 export interface ExtractedProductData {
   name?: string;
@@ -30,17 +31,19 @@ export function extractedDataToProductInput(
     discounted_price = null;
   }
 
+  const category = repairOptionalUtf8Text(data.category)?.slice(0, 255) ?? null;
+
   return {
     tenant_id: tenantId,
-    name: data.name || defaultName,
-    brand: data.brand?.trim().slice(0, 255) || null,
+    name: repairOptionalUtf8Text(data.name) || defaultName,
+    brand: repairOptionalUtf8Text(data.brand)?.slice(0, 255) ?? null,
     price,
     discounted_price,
-    description: data.description?.trim().slice(0, 5000) || null,
-    usage_description: data.usage_description?.trim().slice(0, 10000) || null,
-    sku: data.sku?.trim().slice(0, 100) || null,
-    category: data.category?.trim().slice(0, 255) || null,
-    tags: data.tags ?? (data.category ? [data.category] : []),
+    description: repairOptionalUtf8Text(data.description)?.slice(0, 5000) ?? null,
+    usage_description: repairOptionalUtf8Text(data.usage_description)?.slice(0, 10000) ?? null,
+    sku: repairOptionalUtf8Text(data.sku)?.slice(0, 100) ?? null,
+    category,
+    tags: (data.tags ?? (category ? [category] : [])).map((tag) => repairOptionalUtf8Text(tag) ?? tag),
     source_type: sourceType,
     extracted_text: rawText,
     metadata,

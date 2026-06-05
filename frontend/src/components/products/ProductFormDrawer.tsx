@@ -89,17 +89,36 @@ function flattenZodErrors(err: { flatten: () => { fieldErrors: Record<string, st
 }
 
 function extractServerFieldErrors(err: unknown): Record<string, string> | null {
-  if (err instanceof AxiosError && err.response?.data) {
-    const data = err.response.data as { error?: { body?: Record<string, string[]> } };
-    const body = data.error?.body;
-    if (body && typeof body === 'object') {
-      const out: Record<string, string> = {};
-      for (const [k, v] of Object.entries(body)) {
-        if (Array.isArray(v) && v[0]) out[k] = v[0];
+  if (!(err instanceof AxiosError) || !err.response?.data) return null;
+
+  const data = err.response.data as {
+    error?: { body?: Record<string, string[]> };
+    message?: string;
+  };
+
+  const out: Record<string, string> = {};
+  const body = data.error?.body;
+  if (body && typeof body === 'object') {
+    for (const [k, v] of Object.entries(body)) {
+      if (Array.isArray(v) && v[0]) {
+        if (k === 'discounted_price') out.discountedPriceInput = v[0];
+        else out[k] = v[0];
       }
-      return Object.keys(out).length ? out : null;
     }
   }
+
+  if (Object.keys(out).length > 0) return out;
+
+  const message = data.message?.trim();
+  if (!message) return null;
+
+  if (message.toLowerCase().includes('name already exists')) {
+    return { name: 'Një produkt me këtë emër ekziston tashmë në katalog.' };
+  }
+  if (message.toLowerCase().includes('discounted price')) {
+    return { discountedPriceInput: 'Çmimi i zbritur duhet të jetë më i ulët se çmimi i rregullt.' };
+  }
+
   return null;
 }
 
@@ -211,6 +230,8 @@ export function ProductFormDrawer({ open, onOpenChange, mode, product }: Product
       const server = extractServerFieldErrors(err);
       if (server) {
         setFieldErrors(server);
+      } else if (err instanceof AxiosError && err.response?.status === 409) {
+        setFieldErrors({ name: 'Një produkt me këtë emër ekziston tashmë në katalog.' });
       } else if (err instanceof AxiosError && err.response?.data?.message) {
         setGeneralError(String(err.response.data.message));
       } else {

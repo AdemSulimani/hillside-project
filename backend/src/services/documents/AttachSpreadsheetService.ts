@@ -4,6 +4,7 @@ import {
   type DocumentParseResult,
   type ExtractedProductData,
 } from './AttachDocumentService';
+import { decodeLegacyTextBuffer, repairMojibake } from '../../utils/textEncoding';
 
 interface SpreadsheetRow {
   [key: string]: unknown;
@@ -16,7 +17,7 @@ export class AttachSpreadsheetService extends AttachDocumentService {
 
   async parse(source: Buffer | string): Promise<DocumentParseResult> {
     const workbook = Buffer.isBuffer(source)
-      ? XLSX.read(source, { type: 'buffer' })
+      ? this.readWorkbookFromBuffer(source)
       : XLSX.readFile(source);
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
@@ -27,7 +28,21 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       .join('\n');
 
     const products = this.extractProducts(rows);
-    return { rawText, products };
+    return { rawText: repairMojibake(rawText), products };
+  }
+
+  private readWorkbookFromBuffer(source: Buffer) {
+    const isCsvLike =
+      source.length > 0 &&
+      !source.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) &&
+      !source.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+
+    if (!isCsvLike) {
+      return XLSX.read(source, { type: 'buffer' });
+    }
+
+    const decoded = decodeLegacyTextBuffer(source);
+    return XLSX.read(decoded, { type: 'string', raw: false });
   }
 
   private extractProducts(rows: SpreadsheetRow[]): ExtractedProductData[] {
@@ -40,10 +55,10 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       const product: ExtractedProductData = {};
 
       if (fieldMap.name) {
-        product.name = String(row[fieldMap.name] ?? '').trim() || undefined;
+        product.name = repairMojibake(String(row[fieldMap.name] ?? '').trim()) || undefined;
       }
       if (fieldMap.description) {
-        product.description = String(row[fieldMap.description] ?? '').trim() || undefined;
+        product.description = repairMojibake(String(row[fieldMap.description] ?? '').trim()) || undefined;
       }
       if (fieldMap.price) {
         const parsed = this.parsePrice(row[fieldMap.price]);
@@ -54,14 +69,14 @@ export class AttachSpreadsheetService extends AttachDocumentService {
         if (parsed != null) product.discounted_price = parsed;
       }
       if (fieldMap.brand) {
-        product.brand = String(row[fieldMap.brand] ?? '').trim() || undefined;
+        product.brand = repairMojibake(String(row[fieldMap.brand] ?? '').trim()) || undefined;
       }
       if (fieldMap.sku) {
-        product.sku = String(row[fieldMap.sku] ?? '').trim() || undefined;
+        product.sku = repairMojibake(String(row[fieldMap.sku] ?? '').trim()) || undefined;
       }
       if (fieldMap.usage_description) {
         product.usage_description =
-          String(row[fieldMap.usage_description] ?? '').trim() || undefined;
+          repairMojibake(String(row[fieldMap.usage_description] ?? '').trim()) || undefined;
       }
       if (fieldMap.tags) {
         const val = row[fieldMap.tags];
@@ -70,7 +85,7 @@ export class AttachSpreadsheetService extends AttachDocumentService {
         }
       }
       if (fieldMap.category) {
-        product.category = String(row[fieldMap.category] ?? '').trim() || undefined;
+        product.category = repairMojibake(String(row[fieldMap.category] ?? '').trim()) || undefined;
       }
 
       return product;
