@@ -322,6 +322,7 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
       assembled,
       tenant.niche,
       tenant.description,
+      tenant.delivery_methods,
     );
 
     const model = config.custom_model_id?.trim() || OPENAI_CHAT_MODEL;

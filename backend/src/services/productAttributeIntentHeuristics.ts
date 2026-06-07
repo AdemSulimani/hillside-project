@@ -83,10 +83,7 @@ export const ATTRIBUTE_FOLLOW_UP_MAX_LEN = 250;
 export function hasProductKnowledgeKeywordCue(message: string): boolean {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return false;
-  return (
-    normalized.includes('?') ||
-    PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS.some((kw) => normalized.includes(kw))
-  );
+  return PRODUCT_KNOWLEDGE_QUESTION_KEYWORDS.some((kw) => normalized.includes(kw));
 }
 
 export function detectImplicitAttributeSelection(message: string): ProductAttributeKey[] {

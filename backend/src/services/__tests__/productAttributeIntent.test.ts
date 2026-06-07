@@ -65,4 +65,11 @@ describe('productAttributeIntentService', () => {
     assert.equal(intent?.is_product_knowledge_question, true);
     assert.equal(intent?.attributes.length, 0);
   });
+
+  it('does not keyword-match bare business or location questions', () => {
+    assert.equal(detectAttributeIntentFromKeywords('Where are you located?'), null);
+    assert.equal(detectAttributeIntentFromKeywords('Pershendetje, ku gjendeni me Lokacion?'), null);
+    assert.equal(hasProductKnowledgeKeywordCue('Ku jeni?'), false);
+    assert.equal(hasProductKnowledgeKeywordCue('Where are you located?'), false);
+  });
 });

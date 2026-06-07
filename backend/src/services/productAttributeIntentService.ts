@@ -69,25 +69,16 @@ function parseAttributeIntentJson(raw: string): ProductAttributeIntentResult | n
   }
 }
 
+/** Trust the LLM verdict; keywords may only enrich attributes when the LLM already flagged product knowledge. */
 function mergeKeywordFallback(
   llmResult: ProductAttributeIntentResult,
   keywordHint: ProductAttributeIntentResult | null,
 ): ProductAttributeIntentResult {
-  if (!keywordHint) return llmResult;
-  if (llmResult.is_product_knowledge_question) {
-    if (llmResult.attributes.length === 0 && keywordHint.attributes.length > 0) {
-      return { ...llmResult, attributes: keywordHint.attributes };
-    }
-    return llmResult;
+  if (!keywordHint || !llmResult.is_product_knowledge_question) return llmResult;
+  if (llmResult.attributes.length === 0 && keywordHint.attributes.length > 0) {
+    return { ...llmResult, attributes: keywordHint.attributes, source: 'llm_with_keyword_fallback' };
   }
-
-  return {
-    is_attribute_question: keywordHint.is_attribute_question || llmResult.is_attribute_question,
-    is_product_knowledge_question: true,
-    attributes:
-      llmResult.attributes.length > 0 ? llmResult.attributes : keywordHint.attributes,
-    source: 'llm_with_keyword_fallback',
-  };
+  return llmResult;
 }
 
 /**
@@ -124,7 +115,9 @@ Return JSON only:
 
 Set is_attribute_question true when the customer asks about or selects catalog attributes: flavor, size, color, variant, weight, brand, or category (product type).
 
-Set is_product_knowledge_question true when the customer needs factual catalog information (including attribute questions, or ingredients/material/details from the product description). False for: usage/dosage/how-to-take ONLY, price-only, pure recommendations, greetings, order placement.
+Set is_product_knowledge_question true when the customer needs factual catalog information (including attribute questions, or ingredients/material/details from the product description). False for: usage/dosage/how-to-take ONLY, price-only, pure recommendations, greetings, order placement, and business-info questions (location, address, opening hours, contact details, delivery methods/policy, about the business).
+
+Business-info examples (always false): "Where are you located?", "Ku gjendeni?", "What are your opening hours?", "Do you offer home delivery?"
 
 For mixed messages (e.g. size + how to take), set BOTH is_attribute_question and is_product_knowledge_question true and list relevant attributes.
 

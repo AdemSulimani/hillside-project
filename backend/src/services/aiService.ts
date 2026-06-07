@@ -1648,17 +1648,26 @@ function sanitizeSingleLineField(value: string): string {
   return value.replace(/[\r\n]+/g, ' ').trim();
 }
 
-/** CRM "My Business" niche + description; injected so the model can answer location / about-us style questions. */
+/** CRM "My Business" profile; injected so the model can answer location / about-us style questions. */
 export function formatBusinessProfileForPrompt(
   tenantNiche?: string | null,
   tenantDescription?: string | null,
+  tenantDeliveryMethods?: string[] | null,
 ): string | null {
   const niche = typeof tenantNiche === 'string' ? sanitizeSingleLineField(tenantNiche) : '';
   const desc = typeof tenantDescription === 'string' ? tenantDescription.trim() : '';
-  if (!niche && !desc) return null;
+  const deliveryMethods = Array.isArray(tenantDeliveryMethods)
+    ? tenantDeliveryMethods.map((m) => sanitizeSingleLineField(String(m))).filter(Boolean)
+    : [];
+
+  if (!niche && !desc && deliveryMethods.length === 0) return null;
+
   const parts: string[] = ['Business profile (from My Business in the CRM):'];
   if (niche) parts.push(`Industry / niche: ${niche}`);
   if (desc) parts.push(`Details:\n${desc}`);
+  if (deliveryMethods.length > 0) {
+    parts.push(`Delivery methods: ${deliveryMethods.join(', ')}`);
+  }
   return parts.join('\n');
 }
 
@@ -1670,6 +1679,7 @@ export function buildRetailAISystemPrompt(
   assembledGuidelines: string,
   tenantNiche?: string | null,
   tenantDescription?: string | null,
+  tenantDeliveryMethods?: string[] | null,
 ): string {
   const safeName = sanitizeSingleLineField(businessName);
   const safeTone = sanitizeSingleLineField(config.tone);
@@ -1691,7 +1701,11 @@ export function buildRetailAISystemPrompt(
     lines.push('', `Objection handling approach: ${config.objection_handling}`);
   }
 
-  const businessProfile = formatBusinessProfileForPrompt(tenantNiche, tenantDescription);
+  const businessProfile = formatBusinessProfileForPrompt(
+    tenantNiche,
+    tenantDescription,
+    tenantDeliveryMethods,
+  );
   if (businessProfile) {
     lines.push('', businessProfile);
   }
@@ -2902,6 +2916,7 @@ export async function generateReply(
     assembledGuidelines,
     tenant.niche,
     tenant.description,
+    tenant.delivery_methods,
   );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
