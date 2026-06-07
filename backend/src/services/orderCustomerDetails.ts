@@ -12,8 +12,9 @@ function normalizeLine(value: string): string {
 function extractPhoneDigits(line: string): string | null {
   const raw = line.trim();
   const candidates = raw.match(/\+?\d[\d\s().-]{5,}\d/g) ?? [];
-  if (candidates.length === 0) return null;
-  const digits = candidates[0].replace(/[^\d]/g, '');
+  const firstCandidate = candidates[0];
+  if (!firstCandidate) return null;
+  const digits = firstCandidate.replace(/[^\d]/g, '');
   return digits.length >= 7 && digits.length <= 15 ? digits : null;
 }
 
