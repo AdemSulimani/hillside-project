@@ -44,6 +44,11 @@ import {
   isUsageQuestionUnanswered,
   type ReplyLocale,
 } from '../services/aiService';
+import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
+import {
+  buildOrderConfirmationDeliveryLine,
+  ensureOrderConfirmationDeliveryAndFollowUp,
+} from '../services/orderConfirmationFormatting';
 import { buildProductKnowledgeContext } from '../services/productRetrievalService';
 import {
   evaluateReply,
@@ -146,6 +151,7 @@ function resolveCustomerNameForOrder(args: {
   customerLastNameFromIntent: string | null;
   contactName: string;
   contactMetadata: Record<string, unknown>;
+  conversationMessages: Array<Pick<Message, 'sent_by' | 'content'>>;
 }): { firstName: string | null; lastName: string | null; fullName: string | null } {
   const meta = args.contactMetadata ?? {};
   let firstName = args.customerFirstNameFromIntent?.trim() || null;
@@ -156,6 +162,12 @@ function resolveCustomerNameForOrder(args: {
   }
   if (!lastName) {
     lastName = readMetaString(meta, ['last_name', 'lastName', 'family_name']);
+  }
+
+  if (!firstName || !lastName) {
+    const fromMessages = extractCustomerNameFromMessages(args.conversationMessages);
+    if (!firstName) firstName = fromMessages.firstName;
+    if (!lastName) lastName = fromMessages.lastName;
   }
 
   const contactName = args.contactName.trim();
@@ -424,79 +436,6 @@ function normalizeForIncludesCheck(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
-}
-
-/** CRM-configured ETA line for order-confirmation replies (before the standard follow-up). */
-function buildOrderConfirmationDeliveryLine(
-  deliveryTime: DeliveryTime,
-  locale: ReplyLocale,
-): string {
-  const hours = DELIVERY_TIME_LABEL_HOURS[deliveryTime];
-  return locale === 'sq'
-    ? `Produkti do të mbërrijë brenda ${hours} orëve.`
-    : `Your product will arrive within ${hours} hours.`;
-}
-
-function insertDeliveryLineBeforeOrderFollowUp(
-  text: string,
-  deliveryLine: string,
-  orderFollowUp: string,
-): string {
-  const fuNorm = normalizeForIncludesCheck(orderFollowUp);
-  const paragraphs = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-  const paraIdx = paragraphs.findIndex((p) => normalizeForIncludesCheck(p) === fuNorm);
-  if (paraIdx >= 0) {
-    return [...paragraphs.slice(0, paraIdx), deliveryLine, ...paragraphs.slice(paraIdx)].join('\n\n');
-  }
-
-  const needles = [
-    orderFollowUp.trim(),
-    orderFollowUp.trim().replace(/\u2019/g, "'"),
-    orderFollowUp.trim().replace(/'/g, '\u2019'),
-  ];
-  for (const needle of needles) {
-    const idx = text.lastIndexOf(needle);
-    if (idx !== -1) {
-      const before = text.slice(0, idx).trimEnd();
-      const fromFollowUp = text.slice(idx).trimStart();
-      return `${before}\n\n${deliveryLine}\n\n${fromFollowUp}`;
-    }
-  }
-
-  const marker = '\nNëse keni ndonjë pyetje tjetër';
-  const mIdx = text.lastIndexOf(marker);
-  if (mIdx >= 0) {
-    const before = text.slice(0, mIdx).trimEnd();
-    const fromFollowUp = text.slice(mIdx + 1).trimStart();
-    return `${before}\n\n${deliveryLine}\n\n${fromFollowUp}`;
-  }
-
-  return `${text.trim()}\n\n${deliveryLine}`;
-}
-
-function ensureOrderConfirmationDeliveryAndFollowUp(
-  replyText: string,
-  deliveryLine: string | null,
-  orderFollowUp: string,
-): string {
-  let text = replyText.trim();
-  const fuNorm = normalizeForIncludesCheck(orderFollowUp);
-  const hasFollowUp = normalizeForIncludesCheck(text).includes(fuNorm);
-
-  if (
-    deliveryLine &&
-    !normalizeForIncludesCheck(text).includes(normalizeForIncludesCheck(deliveryLine))
-  ) {
-    text = hasFollowUp
-      ? insertDeliveryLineBeforeOrderFollowUp(text, deliveryLine, orderFollowUp)
-      : `${text}\n\n${deliveryLine}`;
-  }
-
-  if (!normalizeForIncludesCheck(text).includes(fuNorm)) {
-    text = `${text.trim()}\n\n${orderFollowUp}`;
-  }
-
-  return text;
 }
 
 function messageLooksLikeOrderDetailsPayload(text: string): boolean {
@@ -2233,6 +2172,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       customerLastNameFromIntent: intent.customer_last_name,
       contactName: contact.name,
       contactMetadata: meta,
+      conversationMessages: messagesForIntent,
     });
     const hasCustomerName = resolvedCustomerName.fullName !== null;
 
@@ -2254,7 +2194,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     // This ensures the customer explicitly verified their name, phone, and address in the previous turn.
     // Exception: explicit new-order signals (customer asking for a repeat/additional order) are
     // allowed to bypass this gate since the details are already on file from the current session.
-    const dataConfirmationSentBeforeCurrentTurn = hasAssistantAskedDataConfirmation(recentMessages);
+    const dataConfirmationSentBeforeCurrentTurn =
+      hasAssistantAskedDataConfirmation(messagesForIntent);
     const shouldAffirmOrder =
       explicitNewOrder ||
       (dataConfirmationSentBeforeCurrentTurn &&

@@ -115,9 +115,10 @@ export const PRODUCT_DESCRIPTION_CONCISE_APPEND = `
 
 Product description rules (IMPORTANT):
 - NEVER send the full product description to the customer, even when a longer "Full description" appears in the catalog context.
-- For recommendations, comparisons, or general product suggestions: at most 1–2 short lines per product with only the key benefits or selling points from the catalog — do not copy or paraphrase long catalog text.
+- For recommendations, comparisons, or general product suggestions: mention at most 2 products — pick the best fits. For each, write at most 1–2 short lines with only the key benefits or selling points from the catalog — do not copy or paraphrase long catalog text.
 - When the customer asks a specific question about a product: answer ONLY what they asked using relevant facts from the catalog; do not dump the entire description.
-- If a broader overview is needed, write a very short summary (1–2 lines) of the most important points — never paste the full description verbatim.`;
+- If a broader overview is needed, write a very short summary (1–2 lines) of the most important points — never paste the full description verbatim.
+- NEVER use markdown formatting in your replies: no bold (**text**), no asterisks, no bullet point lists, no numbered lists, no headers. Write plain conversational text only.`;
 
 export const PRODUCT_DESCRIPTION_TARGETED_APPEND = `
 
