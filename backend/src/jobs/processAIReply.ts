@@ -24,7 +24,7 @@ import {
   markOrderCancellationRequested,
   markOrderRefundRequested,
 } from '../db/models/order';
-import { findProductByNameCaseInsensitive } from '../db/models/product';
+import { findProductByNameCaseInsensitive, findActiveProductNamesForTenant } from '../db/models/product';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   classifyNegativeAvailabilityReply,
@@ -146,42 +146,65 @@ function readMetaString(meta: Record<string, unknown>, keys: string[]): string |
   return null;
 }
 
+/**
+ * Returns true when a candidate first name extracted by the intent LLM (or from contact
+ * metadata) looks like a city name, street keyword, or address fragment rather than a
+ * person's name.  These can slip through when the LLM misreads the first line of a
+ * multi-line address submission (e.g. "Prishtina\n049…\nRruga…") as the customer name.
+ */
+function looksLikeAddressWord(candidate: string): boolean {
+  const norm = candidate
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+  if (!norm) return false;
+  // Known Albanian / Kosovar city names and address keywords that the intent LLM
+  // frequently misidentifies as first names when they appear on the first line.
+  return /\b(prishtin|prizren|peje|gjakove|gjakova|ferizaj|mitrovic|mitrovica|lipjan|gjilan|vushtrri|skenderaj|malishev|rahovec|suhareke|decan|istog|klina|drenas|podujeve|fushe|kosov|tirane|tirana|shkoder|durres|vlore|elbasan|korce|adres|address|rrug|street|banes|bllok|lagja|zona|qyteti)\b/.test(
+    norm,
+  );
+}
+
 function resolveCustomerNameForOrder(args: {
   customerFirstNameFromIntent: string | null;
-  customerLastNameFromIntent: string | null;
   contactName: string;
   contactMetadata: Record<string, unknown>;
   conversationMessages: Array<Pick<Message, 'sent_by' | 'content'>>;
-}): { firstName: string | null; lastName: string | null; fullName: string | null } {
+}): { firstName: string | null; fullName: string | null } {
   const meta = args.contactMetadata ?? {};
+
+  // Intent LLM extraction — highest priority, but validate it is not an address word.
   let firstName = args.customerFirstNameFromIntent?.trim() || null;
-  let lastName = args.customerLastNameFromIntent?.trim() || null;
+  if (firstName && looksLikeAddressWord(firstName)) {
+    console.info(
+      '[resolveCustomerNameForOrder] Discarding intent-extracted name that looks like an address word',
+      { candidate: firstName },
+    );
+    firstName = null;
+  }
 
   if (!firstName) {
     firstName = readMetaString(meta, ['first_name', 'firstName', 'given_name']);
   }
-  if (!lastName) {
-    lastName = readMetaString(meta, ['last_name', 'lastName', 'family_name']);
-  }
 
-  if (!firstName || !lastName) {
+  if (!firstName) {
     const fromMessages = extractCustomerNameFromMessages(args.conversationMessages);
-    if (!firstName) firstName = fromMessages.firstName;
-    if (!lastName) lastName = fromMessages.lastName;
+    firstName = fromMessages.firstName;
   }
 
-  const contactName = args.contactName.trim();
-  if (contactName && !isFallbackContactLabel(contactName)) {
-    const parts = contactName.split(/\s+/).filter((part) => part.length > 0);
-    if (!firstName && !lastName && parts.length >= 2) {
-      firstName = parts[0];
-      lastName = parts.slice(1).join(' ');
+  if (!firstName) {
+    const contactName = args.contactName.trim();
+    if (contactName && !isFallbackContactLabel(contactName)) {
+      const parts = contactName.split(/\s+/).filter((part) => part.length > 0);
+      if (parts.length >= 1) {
+        firstName = parts[0];
+      }
     }
   }
 
-  const fullName =
-    firstName && lastName ? `${firstName} ${lastName}`.trim() : null;
-  return { firstName, lastName, fullName };
+  const fullName = firstName ? firstName.trim() : null;
+  return { firstName, fullName };
 }
 
 function normalizeQuestionForSimilarity(value: string): string {
@@ -420,6 +443,16 @@ const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
 const DATA_CONFIRMATION_MESSAGES: Record<ReplyLocale, string> = {
   sq: 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që të dhënat që keni dhënë janë korrekte?',
   en: 'Thank you for your order! To avoid any mistakes, could you please confirm that the information you provided is correct?',
+};
+
+/**
+ * Sent when the customer has provided phone and delivery address but has not yet given
+ * their first name. Overrides any AI-generated reply (which might incorrectly confirm the
+ * order) to ensure the name is explicitly collected before the data-confirmation step.
+ */
+const MISSING_CUSTOMER_NAME_MESSAGES: Record<ReplyLocale, string> = {
+  sq: 'Faleminderit për të dhënat tuaja! Për të plotësuar porosinë, ju lutem na tregoni edhe emrin tuaj.',
+  en: 'Thank you for your details! To complete your order, could you please also share your first name?',
 };
 
 function normalizeForIncludesCheck(value: string): string {
@@ -774,10 +807,19 @@ function looksLikeOrderAffirmation(text: string): boolean {
   const normalized = normalizeEscalationMessage(text);
   if (!normalized) return false;
   return (
+    // Explicit short affirmations
     /^(po|ok|okej|yes|yep|sure|alright)\b/.test(normalized) ||
+    // Direct order expressions: "dua ta porosis", "do order", "please order"
     /(dua|dush|do|doni|please|ju lutem).*(porosi|order)/.test(normalized) ||
     /(beje porosine|beje porosin|place the order|make the order)/.test(normalized) ||
-    /^(po ju lutem|po beje|beje|ok beje)$/.test(normalized)
+    /^(po ju lutem|po beje|beje|ok beje)$/.test(normalized) ||
+    // Question-form order intent: "can I order", "a mund ta porosis", "how do I order",
+    // "i want to order", "want to order", "wish to order" — user is expressing ordering
+    // intent even if phrased as a question or request.
+    /(can|could|may|i want to|i'd like to|i would like to|wish to|how (do|can) i).*(order|porosi)/.test(normalized) ||
+    /(a mund|mund ta|a mund ta).*(porosi|order)/.test(normalized) ||
+    /(want|dua|dëshiroj|deshiroj).*(order|porosi)/.test(normalized) ||
+    /(order|porosi).*(this|këtë|kete|product|produkt|it|ate)/.test(normalized)
   );
 }
 
@@ -1474,6 +1516,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     language: generatedLanguage,
     matchedProducts,
     attributeIntent,
+    hadImages,
+    productNotInCatalog: visionProductNotInCatalog,
+    customerAskedPrice,
   } = await generateReply(
       conversationId,
       tenantId,
@@ -1570,7 +1615,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // Problem 2 safety net: customer asked a usage question but no usage_description
   // exists for the matched product (or no product was matched at all).
   // We must not let the AI answer from its general knowledge — escalate immediately.
-  if (!usageEscalated && usageQuestionIntent && !usageDescription && !isOosCannedReply) {
+  // Guard: skip when the intent classifier already identified this as a pure attribute
+  // question (flavor, size, color, etc.) — those are answered from structured catalog
+  // fields, not from usage_description, so missing usage text is expected and should
+  // not trigger a usage escalation.
+  if (!usageEscalated && usageQuestionIntent && !attributeIntent.is_attribute_question && !usageDescription && !isOosCannedReply) {
     const client = await pool.connect();
     let alert: AIAlert | undefined;
     try {
@@ -1723,17 +1772,52 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   let productKnowledgeEscalated = false;
+  // Price questions must never trigger product-knowledge escalation: the catalog always
+  // carries price and the AI is fully equipped to answer them. A price query that also
+  // mentions an attribute qualifier (e.g. "price of the orange-flavored one") can
+  // otherwise be mis-classified as a product-knowledge question and then fail the
+  // isProductKnowledgeQuestionUnanswered check because buildProductKnowledgeContext
+  // previously omitted price — even though the catalog does have the answer.
   const productKnowledgeIntent =
-    !usageEscalated && inboundText && attributeIntent.is_product_knowledge_question;
+    !usageEscalated && inboundText && attributeIntent.is_product_knowledge_question && !customerAskedPrice;
 
   const productKnowledgeHoldingMessage =
     HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText, replyLocale)].productKnowledgeEscalation;
 
   if (productKnowledgeIntent && !isOosCannedReply) {
+    // When the customer sent a photo, the vision pipeline inside generateReply already
+    // handled the response (either matched a catalog product, stated the product is not
+    // carried, or asked for clarification). Escalating here would discard that correct
+    // reply and replace it with a generic holding message — exactly the wrong behaviour.
+    if (hadImages) {
+      console.info('[ai.reply] Skipping product knowledge escalation — vision pipeline handled image query', {
+        conversationId,
+        tenantId,
+        productNotInCatalog: visionProductNotInCatalog,
+        matchedProductsCount: matchedProducts.length,
+      });
+    } else {
     const knowledgeContext = buildProductKnowledgeContext(matchedProducts);
-    let shouldEscalate = matchedProducts.length === 0;
 
-    if (!shouldEscalate) {
+    // When zero products match the customer's query the correct behaviour is NOT to escalate:
+    // the AI already has runtime instructions to tell the customer the product is not in our
+    // catalog and to suggest relevant alternatives.  Escalating here would replace that
+    // helpful, accurate reply with a generic "a specialist will contact you" holding message,
+    // which creates a false expectation and is inappropriate when the product simply does
+    // not exist.
+    //
+    // Escalation is only warranted when the catalog DOES contain matching products but the
+    // specific attribute / technical detail asked by the customer cannot be answered from
+    // the available product data (e.g. a missing ingredient list or a technical spec we
+    // don't store).  The isProductKnowledgeQuestionUnanswered classifier handles that case.
+    let shouldEscalate = false;
+
+    if (matchedProducts.length === 0) {
+      console.info('[ai.reply] Skipping product knowledge escalation — no matching products (product not in catalog)', {
+        conversationId,
+        tenantId,
+      });
+    } else {
       try {
         shouldEscalate = await isProductKnowledgeQuestionUnanswered(inboundText, knowledgeContext, {
           failClosed: true,
@@ -1790,6 +1874,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         socketService.emitConversationUpdated(tenantId, conversationId);
       }
     }
+    } // end else (hadImages guard)
   }
 
   const knowledgeGapEscalated = usageEscalated || productKnowledgeEscalated;
@@ -1820,24 +1905,69 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     // Data-confirmation gate: if the AI generated an order-confirmation reply (or the inbound
     // message provides delivery details after the order-closing question was already asked) but
-    // the customer has not yet been asked to verify their phone + address, override the reply
-    // with the structured data-confirmation message. The order will only be registered once
-    // the customer confirms their details in the next turn.
+    // the customer has not yet been asked to verify their details, override the reply with the
+    // structured data-confirmation message. We also require that a customer name is present
+    // somewhere in the conversation — if it's missing the AI should keep collecting data instead.
+    // The order will only be registered once the customer confirms in the next turn.
     if (!knowledgeGapEscalated && !isOosCannedReply) {
       const dataConfirmationAlreadySent = hasAssistantAskedDataConfirmation(recentMessages);
       const inboundProvidesDetails = messageLooksLikeOrderDetailsPayload(inboundText);
+      const customerNameKnown = extractCustomerNameFromMessages(recentMessages).firstName !== null;
+      // Track whether a phone number has been provided in ANY recent message (not just the
+      // current one). Used to identify the "customer submitted phone+address but forgot name"
+      // case so we can ask for the name rather than silently failing.
+      const phoneKnownFromMessages = extractPhoneNumberFromMessages(recentMessages) !== null;
+
+      // True when the conversation is in an order-confirmation-like state: the AI just produced
+      // an order-confirmation reply, or the customer submitted delivery details after the
+      // order-closing question was already asked.
+      const inOrderConfirmationLikeState =
+        isOrderConfirmationReply ||
+        (inboundProvidesDetails && orderClosingAlreadyAskedInConversation);
+
+      // Full data-confirmation: all required fields (name + phone + address) are present.
       const shouldForceDataConfirmation =
         !dataConfirmationAlreadySent &&
-        (isOrderConfirmationReply ||
-          (inboundProvidesDetails && orderClosingAlreadyAskedInConversation));
+        customerNameKnown &&
+        inOrderConfirmationLikeState;
+
+      // Missing-name guard: the customer has provided phone and delivery-address signals but
+      // has NOT given their name yet. Without this override the AI might generate an order-
+      // confirmation reply that bypasses the name requirement, leaving the conversation stuck
+      // (no order is created because passesDraftOrderValidation requires hasCustomerName).
+      // Only fire when the AI's own reply is NOT already a correctly-formatted data-confirmation
+      // (which would happen when the AI correctly parsed a single-line "name phone address"
+      // submission and produced the right verification message on its own).
+      const aiReplyIsAlreadyDataConfirmation = messageIsDataConfirmationRequest(finalReplyText);
+      const shouldRequestMissingName =
+        !dataConfirmationAlreadySent &&
+        !customerNameKnown &&
+        phoneKnownFromMessages &&
+        inOrderConfirmationLikeState &&
+        !aiReplyIsAlreadyDataConfirmation;
+
       if (shouldForceDataConfirmation) {
         console.info('[DATA_CONFIRMATION] Overriding AI reply with data-verification request', {
           tenantId,
           conversationId,
           wasOrderConfirmationReply: isOrderConfirmationReply,
           inboundProvidesDetails,
+          customerNameKnown,
         });
         finalReplyText = DATA_CONFIRMATION_MESSAGES[replyLocale];
+        isOrderConfirmationReply = false;
+      } else if (shouldRequestMissingName) {
+        // The customer provided phone/address but not their name. Override the AI reply —
+        // which may incorrectly confirm the order — with a specific name-request message.
+        console.info('[DATA_CONFIRMATION] Overriding AI reply — customer name missing, asking for it', {
+          tenantId,
+          conversationId,
+          wasOrderConfirmationReply: isOrderConfirmationReply,
+          inboundProvidesDetails,
+          phoneKnownFromMessages,
+          customerNameKnown,
+        });
+        finalReplyText = MISSING_CUSTOMER_NAME_MESSAGES[replyLocale];
         isOrderConfirmationReply = false;
       }
     }
@@ -2137,7 +2267,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
 
     const messagesForIntent = await findMessagesByConversation(conversationId, 40);
-    const intent = await detect(messagesForIntent, tenantId);
+    const catalogProductNames = await findActiveProductNamesForTenant(tenantId);
+    const intent = await detect(messagesForIntent, tenantId, catalogProductNames);
     const qtyDisplay = intent.quantity === null ? 'null' : String(intent.quantity);
     console.info(
       `[INTENT DETECTION] tenantId: ${tenantId} conversationId: ${conversationId} score: ${intent.intent_score} is_ready: ${intent.is_ready_to_order} product_name: ${logJsonStringOrNull(intent.product_name)} quantity: ${qtyDisplay} delivery_address: ${logJsonStringOrNull(intent.delivery_address)} reasoning: ${JSON.stringify(intent.reasoning)}`,
@@ -2169,12 +2300,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     const resolvedCustomerName = resolveCustomerNameForOrder({
       customerFirstNameFromIntent: intent.customer_first_name,
-      customerLastNameFromIntent: intent.customer_last_name,
       contactName: contact.name,
       contactMetadata: meta,
       conversationMessages: messagesForIntent,
     });
-    const hasCustomerName = resolvedCustomerName.fullName !== null;
+    const hasCustomerName = resolvedCustomerName.firstName !== null;
 
     const recentCustomerAffirmation = messagesForIntent
       .slice(-20)
@@ -2203,6 +2333,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           recentCustomerAffirmation ||
           (latestMessageProvidesOrderDetails && assistantAskedOrderClosingEarlier)));
 
+    // Structured log so every order-collection attempt is observable regardless of outcome.
+    // Use [ORDER_COLLECTION_STATE] as the search key in your log aggregator.
+    console.info(
+      `[ORDER_COLLECTION_STATE] tenantId: ${tenantId} conversationId: ${conversationId}` +
+      ` hasName: ${hasCustomerName} hasPhone: ${hasCustomerPhone} hasAddress: ${hasDeliveryAddress}` +
+      ` dataConfirmationSent: ${dataConfirmationSentBeforeCurrentTurn}` +
+      ` shouldAffirmOrder: ${shouldAffirmOrder} explicitNewOrder: ${explicitNewOrder}` +
+      ` is_ready_to_order: ${intent.is_ready_to_order} intent_score: ${intent.intent_score}` +
+      ` resolvedFirstName: ${logJsonStringOrNull(resolvedCustomerName.firstName)}` +
+      ` intentFirstName: ${logJsonStringOrNull(intent.customer_first_name)}`,
+    );
+
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
       intent.intent_score > intentOrderMinScore &&
@@ -2229,7 +2371,6 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         hasCustomerPhone,
         hasCustomerName,
         customerFirstName: resolvedCustomerName.firstName,
-        customerLastName: resolvedCustomerName.lastName,
       });
       return;
     }
@@ -2258,8 +2399,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       return;
     }
 
+    if (!matchedProduct) {
+      console.warn(
+        '[ai.reply] Skipping draft order: product from intent could not be matched in catalog',
+        {
+          conversationId,
+          tenantId,
+          intentProductName: nameFromIntent,
+        },
+      );
+      return;
+    }
+
     const quantity = Math.max(1, intent.quantity ?? 1);
-    const unitPrice = matchedProduct ? Number(matchedProduct.price) : 0;
+    const unitPrice = Number(matchedProduct.price);
     const totalPrice = unitPrice * quantity;
 
     const latestActiveOrder = await findLatestActiveOrderForConversation(tenantId, conversationId);
@@ -2293,7 +2446,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       tenant_id: tenantId,
       conversation_id: conversationId,
       contact_id: conversation.contact_id,
-      product_id: matchedProduct?.id ?? null,
+      product_id: matchedProduct.id,
       product_name: productName,
       quantity,
       unit_price: unitPrice,

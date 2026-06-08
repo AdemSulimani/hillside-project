@@ -13,6 +13,7 @@ import {
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import {
   countTenantPromptBlocks,
+  forceSyncLockedBlocksForTenant,
   listTenantPromptBlocksRuntime,
   seedTenantPromptBlocksFromCatalog,
 } from '../db/models/promptBlock';
@@ -157,6 +158,7 @@ async function loadAIConfig(tenantId: string) {
       const parsed = JSON.parse(cached) as AIConfig | typeof DEFAULT_AI_CONFIG;
       return {
         ...parsed,
+        restrictions: Array.isArray(parsed.restrictions) ? parsed.restrictions : [],
         platform_restrictions: Array.isArray(parsed.platform_restrictions)
           ? parsed.platform_restrictions
           : [],
@@ -170,6 +172,7 @@ async function loadAIConfig(tenantId: string) {
   const resolved = config ?? DEFAULT_AI_CONFIG;
   const normalized = {
     ...resolved,
+    restrictions: Array.isArray(resolved.restrictions) ? resolved.restrictions : [],
     platform_restrictions: Array.isArray(resolved.platform_restrictions)
       ? resolved.platform_restrictions
       : [],
@@ -183,6 +186,19 @@ async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
   if (n === 0) {
     await seedTenantPromptBlocksFromCatalog(tenantId);
     await redisConnection.del(`tenant_prompt_blocks:${tenantId}`);
+    return;
+  }
+  // Self-healing: push any catalog changes to locked blocks that this tenant
+  // may have missed (e.g. due to exact-string migration sync failures).
+  // Runs on every generateReply call but the UPDATE is a no-op when content
+  // is already current, so the cost is a single cheap equality-check query.
+  const updated = await forceSyncLockedBlocksForTenant(tenantId);
+  if (updated.length > 0) {
+    await redisConnection.del(`tenant_prompt_blocks:${tenantId}`);
+    console.info('[aiService] Self-healed locked prompt blocks for tenant', {
+      tenantId,
+      updatedKeys: updated,
+    });
   }
 }
 
@@ -453,6 +469,34 @@ export function isVagueProductReferenceFollowUp(message: string): boolean {
   return vagueCues.some((n) => t.includes(n)) && words.length <= 6;
 }
 
+/**
+ * Customer is referring back to a product that was identified from a photo sent in
+ * a previous turn (e.g. "I want the product from the photo I sent you").
+ * Without this guard, the message contains no product name, all searches return empty,
+ * and the AI loses context and claims the product is unavailable.
+ */
+export function isPhotoProductReferenceFollowUp(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s?!.]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!t || t.length > 300) return false;
+
+  const hasPhotoCue =
+    /\b(photo|image|picture|foto|foton|imazh|imazhin|fotografin|fotografia|pic|pics)\b/.test(t);
+  const hasPhotoSendCue =
+    /\b(sent|send|dergova|dergove|ndava|ndave|postova|postove|bashkengjitur|bashkengjita)\b/.test(t);
+  const hasProductCue =
+    /\b(product|produkt|produktin|produktit|produktet|item|artikull|artikullin)\b/.test(t);
+
+  return (hasPhotoCue || hasPhotoSendCue) && hasProductCue;
+}
+
 /** Follow-up that refers to the product from prior turns without naming it. */
 export function needsConversationProductContext(message: string): boolean {
   return (
@@ -460,7 +504,8 @@ export function needsConversationProductContext(message: string): boolean {
     isUsageOnlyFollowUp(message) ||
     isVagueProductReferenceFollowUp(message) ||
     isCategoryAttributeFollowUp(message) ||
-    isAttributeQuestionMessage(message)
+    isAttributeQuestionMessage(message) ||
+    isPhotoProductReferenceFollowUp(message)
   );
 }
 
@@ -787,10 +832,7 @@ const ORDER_DETAILS_COLLECTION_REPLY_FALLBACK_KEYWORDS = [
   'phone number',
   'emrin',
   'emri',
-  'mbiemrin',
-  'mbiemri',
   'first name',
-  'last name',
   'your name',
   'to proceed with your order',
   'complete your order',
@@ -999,7 +1041,7 @@ export async function classifyOrderDetailsCollectionReplyIntent(
         {
           role: 'system',
           content:
-            'You are a strict classifier. Determine whether the assistant reply is collecting required delivery details to proceed with purchase in any language. In this system, valid requested delivery details are: customer first name, customer last name, phone number, and full delivery/shipping address. Return only JSON: {"is_order_details_collection_reply": true} or {"is_order_details_collection_reply": false}. Return true only when the reply asks for one or more of those required details as the next ordering step. Return false if the reply asks for unrelated personal data (e.g., ID number, birthday, email) or unrelated chit-chat.',
+            'You are a strict classifier. Determine whether the assistant reply is collecting required delivery details to proceed with purchase in any language. In this system, valid requested delivery details are: customer first name, phone number, and full delivery/shipping address. Last name is NOT a required detail and should not be counted. Return only JSON: {"is_order_details_collection_reply": true} or {"is_order_details_collection_reply": false}. Return true only when the reply asks for one or more of those required details as the next ordering step. Return false if the reply asks for unrelated personal data (e.g., last name, ID number, birthday, email) or unrelated chit-chat.',
         },
         {
           role: 'user',
@@ -1062,7 +1104,7 @@ export async function classifyOrderClosingQuestionReplyIntent(message: string): 
   return includesAnyKeyword(normalized, ORDER_CLOSING_QUESTION_FALLBACK_KEYWORDS);
 }
 
-async function customerAskedAboutPrice(message: string): Promise<boolean> {
+export async function customerAskedAboutPrice(message: string): Promise<boolean> {
   const inbound = message.trim();
   if (!inbound) return false;
 
@@ -1648,6 +1690,9 @@ function sanitizeSingleLineField(value: string): string {
   return value.replace(/[\r\n]+/g, ' ').trim();
 }
 
+/** Maximum characters of business description injected into the system prompt. */
+const BUSINESS_DESCRIPTION_MAX_CHARS = 2000;
+
 /** CRM "My Business" profile; injected so the model can answer location / about-us style questions. */
 export function formatBusinessProfileForPrompt(
   tenantNiche?: string | null,
@@ -1655,7 +1700,11 @@ export function formatBusinessProfileForPrompt(
   tenantDeliveryMethods?: string[] | null,
 ): string | null {
   const niche = typeof tenantNiche === 'string' ? sanitizeSingleLineField(tenantNiche) : '';
-  const desc = typeof tenantDescription === 'string' ? tenantDescription.trim() : '';
+  const rawDesc = typeof tenantDescription === 'string' ? tenantDescription.trim() : '';
+  const desc =
+    rawDesc.length > BUSINESS_DESCRIPTION_MAX_CHARS
+      ? rawDesc.slice(0, BUSINESS_DESCRIPTION_MAX_CHARS).trimEnd() + '…'
+      : rawDesc;
   const deliveryMethods = Array.isArray(tenantDeliveryMethods)
     ? tenantDeliveryMethods.map((m) => sanitizeSingleLineField(String(m))).filter(Boolean)
     : [];
@@ -1720,23 +1769,37 @@ export function buildRetailAISystemPrompt(
     lines.push('', 'Guidelines:', gl);
   }
 
-  const restrictions = config.restrictions ?? [];
-  if (restrictions.length > 0) {
-    lines.push(
-      '',
-      `OPERATOR BUSINESS RULES — you MUST follow:\n${restrictions.map((r) => `- ${r}`).join('\n')}`,
-    );
-  }
-
-  const platformRestrictions = config.platform_restrictions ?? [];
-  if (platformRestrictions.length > 0) {
-    lines.push(
-      '',
-      `PLATFORM POLICY — follow strictly:\n${platformRestrictions.map((r) => `- ${r}`).join('\n')}`,
-    );
-  }
-
   return lines.join('\n');
+}
+
+/**
+ * Builds the operator restrictions footer that must be appended LAST to every
+ * system prompt. Placing these after all other content (product catalog, guidelines,
+ * and runtime appends) ensures the model treats them as the highest-priority
+ * instructions and does not let earlier prompt sections dilute them.
+ */
+export function buildRestrictionsFooter(
+  config: Pick<typeof DEFAULT_AI_CONFIG, 'restrictions' | 'platform_restrictions'>,
+): string {
+  const parts: string[] = [];
+
+  const restrictions = Array.isArray(config.restrictions) ? config.restrictions : [];
+  if (restrictions.length > 0) {
+    parts.push(
+      `\n\nOPERATOR BUSINESS RULES — you MUST follow:\n${restrictions.map((r) => `- ${r}`).join('\n')}`,
+    );
+  }
+
+  const platformRestrictions = Array.isArray(config.platform_restrictions)
+    ? config.platform_restrictions
+    : [];
+  if (platformRestrictions.length > 0) {
+    parts.push(
+      `\n\nPLATFORM POLICY — follow strictly:\n${platformRestrictions.map((r) => `- ${r}`).join('\n')}`,
+    );
+  }
+
+  return parts.join('');
 }
 
 export async function isUsageQuestionUnanswered(
@@ -2616,6 +2679,12 @@ export async function generateReply(
   language: ReplyLocale;
   matchedProducts: Product[];
   attributeIntent: ProductAttributeIntentResult;
+  /** True when the inbound message included one or more image attachments. */
+  hadImages: boolean;
+  /** True when the vision pipeline identified the photo product as not in the catalog. */
+  productNotInCatalog: boolean;
+  /** True when the customer's message was classified as asking about price or cost. */
+  customerAskedPrice: boolean;
 }> {
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
@@ -2672,6 +2741,9 @@ export async function generateReply(
       language,
       matchedProducts: [],
       attributeIntent,
+      hadImages: false,
+      productNotInCatalog: false,
+      customerAskedPrice,
     };
   }
 
@@ -2724,12 +2796,16 @@ export async function generateReply(
   }
 
   // If matching missed the discussed product on a context follow-up, try history.
+  // isPhotoProductReferenceFollowUp covers messages like "I want the product from the
+  // photo I sent you" where the current message has no product name but refers back to
+  // a product identified by the vision pipeline in a prior turn.
   if (
     products.length === 0 &&
     (customerAskedPrice ||
       isUsageOnlyFollowUp(searchText) ||
       isVagueProductReferenceFollowUp(searchText) ||
-      isCategoryAttributeFollowUp(searchText)) &&
+      isCategoryAttributeFollowUp(searchText) ||
+      isPhotoProductReferenceFollowUp(searchText)) &&
     conversationHistoryWindow.length > 0
   ) {
     const fromContext = await resolveProductsForContextualQuery(
@@ -2902,6 +2978,9 @@ export async function generateReply(
       language,
       matchedProducts: products,
       attributeIntent,
+      hadImages: hasImages,
+      productNotInCatalog,
+      customerAskedPrice,
     };
   }
 
@@ -3034,6 +3113,9 @@ Product attribute question (IMPORTANT):
         language,
         matchedProducts: products,
         attributeIntent,
+        hadImages: hasImages,
+        productNotInCatalog,
+        customerAskedPrice,
       };
     }
 
@@ -3042,6 +3124,14 @@ Product attribute question (IMPORTANT):
       closingSentence,
     );
     systemPrompt += `\n\n${closingAppend}`;
+  }
+
+  // Operator restrictions and platform policy are always appended last so they are
+  // the highest-priority instructions — after all product, guideline, and runtime
+  // appends that could otherwise dilute them.
+  const restrictionsFooter = buildRestrictionsFooter(config);
+  if (restrictionsFooter) {
+    systemPrompt += restrictionsFooter;
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
@@ -3084,5 +3174,8 @@ Product attribute question (IMPORTANT):
     language,
     matchedProducts: products,
     attributeIntent,
+    hadImages: hasImages,
+    productNotInCatalog,
+    customerAskedPrice,
   };
 }

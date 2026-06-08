@@ -92,5 +92,5 @@ export function assembleGuidelinesFromBlocks(
     if (expanded) parts.push(expanded);
   }
 
-  return parts.join('\n');
+  return parts.join('\n\n');
 }

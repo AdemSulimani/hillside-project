@@ -4,6 +4,7 @@ import { ensureAIConfigForTenant, updateAIConfig } from '../db/models/aiConfig';
 import {
   deleteCustomTenantPromptBlock,
   findTenantPromptBlockForAdmin,
+  forceSyncLockedBlocksForTenants,
   insertCatalogPromptBlock,
   insertCustomTenantPromptBlock,
   listAllCatalogPromptBlocks,
@@ -24,7 +25,7 @@ import { searchProducts } from '../db/models/product';
 import { findImageUrlsWithoutFingerprints } from '../db/models/productImageFingerprint';
 import { defaultQueue } from '../jobs/queues';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
-import { buildRetailAISystemPrompt, formatProductCatalog } from '../services/aiService';
+import { buildRestrictionsFooter, buildRetailAISystemPrompt, formatProductCatalog } from '../services/aiService';
 import { assembleGuidelinesFromBlocks } from '../services/promptAssemblyService';
 
 async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot> {
@@ -315,7 +316,7 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
       hasImages: Boolean(include_vision_block),
     });
 
-    const systemPrompt = buildRetailAISystemPrompt(
+    let systemPrompt = buildRetailAISystemPrompt(
       tenant.name,
       config,
       catalog,
@@ -324,6 +325,12 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
       tenant.description,
       tenant.delivery_methods,
     );
+
+    // Restrictions are always appended last so the test prompt mirrors production behaviour.
+    const restrictionsFooter = buildRestrictionsFooter(config);
+    if (restrictionsFooter) {
+      systemPrompt += restrictionsFooter;
+    }
 
     const model = config.custom_model_id?.trim() || OPENAI_CHAT_MODEL;
     const completion = await openai.chat.completions.create({
@@ -647,5 +654,54 @@ export async function postBackfillProductImageFingerprints(req: Request, res: Re
     );
   } catch (err) {
     sendError(res, 'Failed to backfill image fingerprints', 500, err);
+  }
+}
+
+/**
+ * Force-pushes the current catalog default content of every platform-locked
+ * prompt block to all tenants (or a specified subset), overwriting whatever
+ * content is currently stored in tenant_prompt_blocks.
+ *
+ * This is the recovery action for when a migration's exact-string sync
+ * failed to update some tenants and their AI is operating with stale instructions.
+ *
+ * Accepts an optional { tenantIds: string[] } body — omit or send an empty
+ * array to target every tenant in the system.
+ *
+ * POST /admin/ai/prompt-blocks/force-sync-locked
+ */
+export async function postForceSyncLockedBlocks(req: Request, res: Response): Promise<void> {
+  try {
+    const tenantIds: string[] | undefined = Array.isArray(req.body?.tenantIds)
+      ? (req.body.tenantIds as string[])
+      : undefined;
+
+    const results = await forceSyncLockedBlocksForTenants(tenantIds);
+
+    await Promise.all(
+      results.map(async ({ tenant_id, updated_block_keys }) => {
+        await invalidateTenantAiCaches(tenant_id);
+        await recordAiVersion(
+          tenant_id,
+          req.admin?.email,
+          `force-sync-locked:${updated_block_keys.length}-blocks-updated`,
+        );
+      }),
+    );
+
+    const totalUpdated = results.reduce((sum, r) => sum + r.updated_block_keys.length, 0);
+    sendSuccess(
+      res,
+      {
+        tenants_updated: results.length,
+        total_blocks_updated: totalUpdated,
+        details: results,
+      },
+      totalUpdated > 0
+        ? `Forced ${totalUpdated} locked block(s) up-to-date across ${results.length} business(es)`
+        : 'All businesses are already on the latest locked block content',
+    );
+  } catch (err) {
+    sendError(res, 'Failed to force-sync locked prompt blocks', 500, err);
   }
 }

@@ -118,6 +118,7 @@ Product description rules (IMPORTANT):
 - For recommendations, comparisons, or general product suggestions: mention at most 2 products — pick the best fits. For each, write at most 1–2 short lines with only the key benefits or selling points from the catalog — do not copy or paraphrase long catalog text.
 - When the customer asks a specific question about a product: answer ONLY what they asked using relevant facts from the catalog; do not dump the entire description.
 - If a broader overview is needed, write a very short summary (1–2 lines) of the most important points — never paste the full description verbatim.
+- Do NOT proactively mention product attributes (flavor, size, color, variant, weight) unless the customer explicitly asks about them. These fields are provided as internal reference only — include them in your reply only when the customer's question directly asks about that attribute.
 - NEVER use markdown formatting in your replies: no bold (**text**), no asterisks, no bullet point lists, no numbered lists, no headers. Write plain conversational text only.`;
 
 export const PRODUCT_DESCRIPTION_TARGETED_APPEND = `

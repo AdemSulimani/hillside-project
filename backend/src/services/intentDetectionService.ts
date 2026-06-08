@@ -1,5 +1,4 @@
 import type { Message } from '../db/models/message';
-import { findAIConfigByTenant } from '../db/models/aiConfig';
 import { openai, OPENAI_INTENT_MODEL } from './openaiClient';
 
 export interface IntentResult {
@@ -8,7 +7,6 @@ export interface IntentResult {
   quantity: number | null;
   delivery_address: string | null;
   customer_first_name: string | null;
-  customer_last_name: string | null;
   is_ready_to_order: boolean;
   reasoning: string;
 }
@@ -30,8 +28,24 @@ function formatTranscript(messages: Message[]): string {
   return lines.join('\n');
 }
 
+const EMPTY_INTENT_RESULT: IntentResult = {
+  intent_score: 0,
+  product_name: null,
+  quantity: null,
+  delivery_address: null,
+  customer_first_name: null,
+  is_ready_to_order: false,
+  reasoning: '',
+};
+
 function parseIntentJson(raw: string): IntentResult {
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    console.warn('[intentDetection] Failed to parse intent JSON response', { raw });
+    return { ...EMPTY_INTENT_RESULT };
+  }
 
   const intentScoreRaw = parsed.intent_score;
   let intent_score = 0;
@@ -59,11 +73,6 @@ function parseIntentJson(raw: string): IntentResult {
       ? parsed.customer_first_name.trim()
       : null;
 
-  const customer_last_name =
-    typeof parsed.customer_last_name === 'string' && parsed.customer_last_name.trim()
-      ? parsed.customer_last_name.trim()
-      : null;
-
   const is_ready_to_order = parsed.is_ready_to_order === true;
 
   const reasoning =
@@ -77,7 +86,6 @@ function parseIntentJson(raw: string): IntentResult {
     quantity,
     delivery_address,
     customer_first_name,
-    customer_last_name,
     is_ready_to_order,
     reasoning,
   };
@@ -85,27 +93,28 @@ function parseIntentJson(raw: string): IntentResult {
 
 /**
  * Detects purchase intent from recent chat messages using the tenant's configured OpenAI model.
+ *
+ * @param productNames - Optional list of active product names from the tenant catalog.
+ *   When provided, the LLM is instructed to normalise the extracted product_name to the
+ *   closest entry in this list, preventing free-form customer phrasings (e.g. "nga Muscletech"
+ *   suffixes) from being recorded verbatim and failing the DB lookup step.
  */
 export async function detect(
   conversationMessages: Message[],
   tenantId: string,
+  productNames?: string[],
 ): Promise<IntentResult> {
   const transcript = formatTranscript(conversationMessages);
   if (!transcript.trim()) {
-    return {
-      intent_score: 0,
-      product_name: null,
-      quantity: null,
-      delivery_address: null,
-      customer_first_name: null,
-      customer_last_name: null,
-      is_ready_to_order: false,
-      reasoning: '',
-    };
+    return { ...EMPTY_INTENT_RESULT };
   }
 
-  const config = await findAIConfigByTenant(tenantId);
   const model = process.env.OPENAI_INTENT_MODEL?.trim() || OPENAI_INTENT_MODEL;
+
+  const catalogSection =
+    productNames && productNames.length > 0
+      ? `\n\nAvailable products in catalog (you MUST use one of these exact names for product_name when the customer is ordering a product from this list; use null if the customer's product does not match any entry):\n${productNames.map((n) => `- ${n}`).join('\n')}`
+      : '';
 
   const systemPrompt = `You are a precise purchase intent classifier for a sales business. Your job is to determine if a customer is actively trying to place an order RIGHT NOW — not just showing interest or asking questions.
 A high intent score (above 0.75) requires ALL of the following signals to be present:
@@ -117,9 +126,9 @@ The customer has not asked any more clarifying questions in their latest message
 
 A medium score (0.4 to 0.74) means the customer is interested but has not committed — they are asking about price, availability, or details.
 A low score (below 0.4) means the customer is browsing, asking general questions, or the message is unrelated to purchasing.
-Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, delivery_address: string | null, customer_first_name: string | null, customer_last_name: string | null, is_ready_to_order: boolean, reasoning: string }
-Extract customer_first_name and customer_last_name when the customer explicitly provided them in the transcript (not from channel profile metadata), including multi-line order-detail messages where the first line is often the full name before phone and address. Use null when missing or uncertain.
-The is_ready_to_order field must only be true if intent_score is above 0.85 AND all four purchase signals above are present. Do not set is_ready_to_order to true based on intent_score alone.
+Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, delivery_address: string | null, customer_first_name: string | null, is_ready_to_order: boolean, reasoning: string }
+Extract customer_first_name when the customer explicitly provided it in the transcript (not from channel profile metadata), including multi-line order-detail messages where the first line is often the customer name before phone and address. Use null when missing or uncertain.
+The is_ready_to_order field must only be true if intent_score is above 0.85 AND all four purchase signals above are present. Do not set is_ready_to_order to true based on intent_score alone.${catalogSection}
 
 Respond with a single JSON object only (no markdown), matching that shape exactly.`;
 
