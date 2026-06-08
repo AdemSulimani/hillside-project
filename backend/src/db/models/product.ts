@@ -1,5 +1,6 @@
 import pool from '../pool';
 import { toSql } from 'pgvector';
+import { extractBaseName } from '../../services/productTitleNormalization';
 
 export interface Product {
   id: string;
@@ -372,6 +373,78 @@ export async function findProductByNameCaseInsensitive(
   return reverseRows[0] ?? null;
 }
 
+/**
+ * Returns every active product whose name contains the given substring (case-insensitive).
+ *
+ * Unlike {@link findProductByNameCaseInsensitive}, this does NOT collapse to a single row.
+ * It is used by order-product resolution to gather the full set of variant candidates
+ * (e.g. both "Creatine 50 Servings" and "Creatine 60 Servings") so the customer's
+ * selected variant can be disambiguated explicitly instead of silently tie-broken.
+ */
+export async function findActiveProductsByNameSubstring(
+  tenantId: string,
+  substring: string,
+  limit = 25,
+): Promise<Product[]> {
+  const trimmed = substring.trim();
+  if (!trimmed) return [];
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND name ILIKE $2
+     ORDER BY LENGTH(name) ASC, name ASC
+     LIMIT $3`,
+    [tenantId, `%${trimmed}%`, limit],
+  );
+  return rows;
+}
+
+/**
+ * Deterministic SKU lookup used by the image-vision pipeline. When a barcode or
+ * SKU is legibly read from a customer photo it is the single strongest matching
+ * signal we can get — far more reliable than fuzzy visual/caption similarity — so
+ * a hit here is treated as a confident match and short-circuits the scoring ladder.
+ *
+ * Matching is case/whitespace-insensitive and tolerates a leading-zero / non-digit
+ * formatting mismatch on otherwise-equal numeric codes (barcodes are frequently
+ * stored with different padding than they are printed).
+ */
+export async function findActiveProductBySku(
+  tenantId: string,
+  sku: string,
+): Promise<Product | null> {
+  const trimmed = sku.trim();
+  if (trimmed.length < 3) return null;
+
+  const exact = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND sku IS NOT NULL
+       AND LOWER(TRIM(sku)) = LOWER($2)
+     LIMIT 1`,
+    [tenantId, trimmed],
+  );
+  if (exact.rows[0]) return exact.rows[0];
+
+  // Fall back to a digits-only comparison for numeric codes (barcodes/EANs) so a
+  // formatting/padding difference does not defeat an otherwise exact match.
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length >= 6) {
+    const { rows } = await pool.query<Product>(
+      `SELECT * FROM products
+       WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+         AND sku IS NOT NULL
+         AND regexp_replace(sku, '\\D', '', 'g') = $2
+       ORDER BY LENGTH(sku) ASC
+       LIMIT 1`,
+      [tenantId, digits],
+    );
+    if (rows[0]) return rows[0];
+  }
+
+  return null;
+}
+
 export async function searchProducts(
   tenantId: string,
   query: string,
@@ -400,26 +473,70 @@ export async function searchProducts(
   return rows;
 }
 
-/** Strip size/flavor tokens to find variant siblings in the same product family. */
-export function extractProductFamilyBaseName(name: string): string {
-  let base = name
-    .replace(/\([^)]*\)/g, ' ')
-    .replace(
-      /\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|oz|lb|lbs|capsules?|caps|tablets?|servings?)\b/gi,
-      ' ',
-    )
-    .replace(
-      /\b(chocolate|vanilla|strawberry|berry|unflavored|unflavoured|banana|mango|lemon|orange|mint|caramel|coffee|neutral|red|blue|black|white|green)\b/gi,
-      ' ',
-    )
-    .replace(/\s+/g, ' ')
-    .trim();
+/**
+ * Token-aware product search: every supplied token must appear in at least one
+ * searchable field (logical AND across tokens, OR across fields per token).
+ *
+ * This is the retrieval primitive for the image-matching pipeline. Unlike
+ * {@link searchProducts} — which requires the ENTIRE query string to appear
+ * contiguously in a single field — this matches a base-name token set like
+ * `["creatine", "monohydrate"]` against "Creatine Monohydrate 50 Servings",
+ * "Creatine Monohydrate 100 Servings", etc. Extra variant attributes in the title
+ * (servings/flavor/size) no longer break retrieval, because they are simply absent
+ * from the required token set rather than being demanded as a contiguous substring.
+ *
+ * Callers pass BASE-NAME tokens (identity) here and use attribute-aware re-ranking
+ * afterwards to surface the specific variant the photo shows.
+ */
+export async function searchProductsByTokens(
+  tenantId: string,
+  tokens: string[],
+  limit = 10,
+): Promise<Product[]> {
+  const cleaned = [
+    ...new Set(tokens.map((t) => t.trim().toLowerCase()).filter((t) => t.length >= 2)),
+  ].slice(0, 8);
+  if (cleaned.length === 0) return [];
 
-  const words = base.split(/\s+/).filter((w) => w.length > 1);
-  if (words.length > 6) {
-    base = words.slice(0, 6).join(' ');
+  const conditions: string[] = [];
+  const values: unknown[] = [tenantId];
+  let idx = 2;
+  for (const token of cleaned) {
+    conditions.push(`(
+      name ILIKE $${idx}
+      OR (brand IS NOT NULL AND brand ILIKE $${idx})
+      OR (category IS NOT NULL AND category ILIKE $${idx})
+      OR (flavor IS NOT NULL AND flavor ILIKE $${idx})
+      OR (size IS NOT NULL AND size ILIKE $${idx})
+      OR (variant IS NOT NULL AND variant ILIKE $${idx})
+      OR (weight IS NOT NULL AND weight ILIKE $${idx})
+      OR tags::text ILIKE $${idx}
+    )`);
+    values.push(`%${token}%`);
+    idx++;
   }
-  return base.length >= 3 ? base : name.trim().slice(0, 40);
+
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND ${conditions.join(' AND ')}
+     ORDER BY LENGTH(name) ASC, name ASC
+     LIMIT $${idx}`,
+    [...values, limit],
+  );
+  return rows;
+}
+
+/**
+ * Strip size/flavor tokens to find variant siblings in the same product family.
+ *
+ * Delegates to the shared {@link extractBaseName} normaliser so the family base name,
+ * the order-resolution disambiguation, and the image-matching token search all parse
+ * titles identically (single source of truth). Capped at 6 words to keep the sibling
+ * ILIKE pattern broad enough to gather the whole variant family.
+ */
+export function extractProductFamilyBaseName(name: string): string {
+  return extractBaseName(name, 6);
 }
 
 /**

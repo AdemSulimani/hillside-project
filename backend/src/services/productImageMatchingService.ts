@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { openai, OPENAI_VISION_MODEL } from './openaiClient';
 import { generateEmbedding } from './embeddingService';
 import {
@@ -10,40 +11,45 @@ import {
   type ImageFingerprintMatch,
   type VisualFingerprintData,
 } from '../db/models/productImageFingerprint';
-import { searchProducts, type Product } from '../db/models/product';
+import {
+  searchProducts,
+  searchProductsByTokens,
+  findActiveProductBySku,
+  type Product,
+} from '../db/models/product';
+import {
+  parseProductTitle,
+  tokenizeForMatch,
+  extractSelectionAttributes,
+  rankProductsByAttributeOverlap,
+} from './productTitleNormalization';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { redisConnection } from '../jobs/redisConnection';
+import { logEvent } from './analyticsService';
+import {
+  decideVisionMatch,
+  deriveVisionCounts,
+  CONFIDENT_MATCH_FLOOR,
+  IMAGE_SIMILARITY_THRESHOLD,
+  IMAGE_MATCH_CONFIDENCE_THRESHOLD,
+  IMAGE_MATCH_AMBIGUITY_DELTA,
+  type CustomerVisionExtraction,
+  type ImageQuality,
+} from './productImageMatchPolicy';
 
-export const IMAGE_SIMILARITY_THRESHOLD = parseFloat(
-  process.env.IMAGE_SIMILARITY_THRESHOLD || '0.62',
-);
-export const IMAGE_MATCH_CONFIDENCE_THRESHOLD = parseFloat(
-  process.env.IMAGE_MATCH_CONFIDENCE_THRESHOLD || '0.55',
-);
-export const VISION_EXTRACTION_CONFIDENCE_MIN = parseFloat(
-  process.env.VISION_EXTRACTION_CONFIDENCE_MIN || '0.35',
-);
-export const IMAGE_MATCH_AMBIGUITY_DELTA = parseFloat(
-  process.env.IMAGE_MATCH_AMBIGUITY_DELTA || '0.04',
-);
+export {
+  IMAGE_SIMILARITY_THRESHOLD,
+  IMAGE_MATCH_CONFIDENCE_THRESHOLD,
+  IMAGE_MATCH_AMBIGUITY_DELTA,
+  type CustomerVisionExtraction,
+  type ImageQuality,
+};
 
 console.info('[productImageMatching] thresholds', {
   IMAGE_SIMILARITY_THRESHOLD,
   IMAGE_MATCH_CONFIDENCE_THRESHOLD,
-  VISION_EXTRACTION_CONFIDENCE_MIN,
   IMAGE_MATCH_AMBIGUITY_DELTA,
 });
-
-export type ImageQuality = 'good' | 'fair' | 'poor';
-
-export interface CustomerVisionExtraction extends VisualFingerprintData {
-  confidence: number;
-  image_quality: ImageQuality;
-  multiple_products_detected: boolean;
-  product_count_estimate: number;
-  is_social_media_screenshot: boolean;
-  extraction_notes: string | null;
-}
 
 export interface ScoredProductMatch {
   product: Product;
@@ -82,6 +88,16 @@ function resolveImageUrls(attachmentUrls: string[]): string[] {
     resolved.push(url);
   }
   return resolved;
+}
+
+function hashVisionCacheInput(resolvedImageUrls: string[], inboundMessage: string): string {
+  const hash = crypto.createHash('sha256');
+  for (const url of resolvedImageUrls) {
+    hash.update(url, 'utf8');
+    hash.update('\u0000', 'utf8');
+  }
+  hash.update(inboundMessage.trim(), 'utf8');
+  return hash.digest('hex');
 }
 
 function urlLooksLikeVisionImage(url: string): boolean {
@@ -161,36 +177,52 @@ function normalizeCustomerExtraction(raw: Partial<CustomerVisionExtraction>): Cu
   const imageQuality: ImageQuality =
     qualityRaw === 'good' || qualityRaw === 'poor' ? qualityRaw : 'fair';
 
+  const counts = deriveVisionCounts(raw);
+
   return {
     ...base,
     confidence: parseConfidence(raw.confidence),
     image_quality: imageQuality,
-    multiple_products_detected: raw.multiple_products_detected === true,
-    product_count_estimate:
-      typeof raw.product_count_estimate === 'number' && raw.product_count_estimate > 0
-        ? Math.min(10, Math.round(raw.product_count_estimate))
-        : raw.multiple_products_detected
-          ? 2
-          : 1,
+    multiple_products_detected: counts.multipleDetected,
+    product_count_estimate: counts.productCountEstimate,
     is_social_media_screenshot: raw.is_social_media_screenshot === true,
     extraction_notes:
       typeof raw.extraction_notes === 'string' && raw.extraction_notes.trim()
         ? raw.extraction_notes.trim()
         : null,
+    contains_product: counts.containsProduct,
+    primary_subject_clear: counts.primarySubjectClear,
+    distinct_product_count: counts.distinctProductCount,
+    all_visible_products_identical: counts.allIdentical,
+    has_distracting_objects: raw.has_distracting_objects === true,
   };
 }
 
 const CUSTOMER_VISION_SYSTEM = `You are a strict product-image analyst for a retail chatbot.
-Extract ONLY what is clearly visible. Return ONLY valid JSON with keys:
-- brand_name, product_name, product_type, flavor, size (string|null each)
-- visible_text (string[] — label text you can read, max 20)
-- packaging_colors, distinguishing_features, sku_visible, barcode_visible, packaging_version_note
-- confidence (number 0-1 — how confident you are in brand+product identification)
-- image_quality ("good"|"fair"|"poor" — based on blur, crop, angle, lighting)
-- multiple_products_detected (boolean)
-- product_count_estimate (integer)
+Extract ONLY what is clearly visible. Identify the SINGLE primary product the customer is asking about.
+
+Focus rules:
+- The primary product is the one that is in the foreground, centered, held up, or largest. Describe THAT product in brand_name/product_name/etc.
+- IGNORE hands holding the item, reflections, glare, shadows, price tags, shelves, and unrelated background products. Do not let them change the identified product.
+- If several copies of the SAME item appear (e.g. three identical bottles), that is ONE distinct product, not many — set all_visible_products_identical=true and distinct_product_count=1.
+- Only count products as distinct when they are genuinely different items (different brand/name/variant).
+
+Return ONLY valid JSON with keys:
+- brand_name, product_name, product_type, flavor, size (string|null each — for the PRIMARY product)
+- visible_text (string[] — label text you can read on the primary product, max 20)
+- packaging_colors, distinguishing_features, packaging_version_note (string|null)
+- sku_visible (string|null — any SKU or barcode digits legible on the label), barcode_visible (boolean)
+- confidence (number 0-1 — confidence in brand+product identification of the PRIMARY product)
+- image_quality ("good"|"fair"|"poor" — based on blur, crop, angle, lighting, occlusion)
+- contains_product (boolean — false for selfies, receipts, memes, screenshots with no product, empty scenes)
+- multiple_products_detected (boolean — more than one product INSTANCE visible, including duplicates)
+- product_count_estimate (integer — total product instances visible)
+- distinct_product_count (integer — number of visually DIFFERENT products; identical copies count as 1)
+- all_visible_products_identical (boolean — every visible product is the same item)
+- primary_subject_clear (boolean — true if one product is clearly the main subject)
+- has_distracting_objects (boolean — hands, reflections, glare, or unrelated objects partially obscure the product)
 - is_social_media_screenshot (boolean — Instagram/Facebook post screenshot with UI chrome)
-- extraction_notes (string|null — e.g. "product partially visible", "similar packaging different brand")
+- extraction_notes (string|null — e.g. "product partially occluded by hand", "old packaging design")
 Do NOT invent brand names. Use null when unreadable.`;
 
 async function extractCustomerProductFromImages(
@@ -203,7 +235,12 @@ async function extractCustomerProductFromImages(
   const resolvedImageUrls = resolveImageUrls(visionUrls);
   if (resolvedImageUrls.length === 0) return null;
 
-  const cacheKey = `cust_vision:${resolvedImageUrls.map((u) => u.slice(-48)).join('|')}:${inboundMessage.slice(0, 80)}`;
+  // Hash the FULL resolved image content (+ message) for the cache key. A previous
+  // version keyed on only the last 48 chars of each URL, which for base64 data URLs
+  // are near-identical across different images — causing the extraction of one photo
+  // to be served for a completely different photo. Hashing the whole payload removes
+  // that collision while keeping the key bounded in size.
+  const cacheKey = `cust_vision:${hashVisionCacheInput(resolvedImageUrls, inboundMessage)}`;
   const cached = await redisConnection.get(cacheKey);
   if (cached) {
     try {
@@ -396,51 +433,6 @@ function computeMatchConfidence(
   );
 }
 
-function buildClarificationReason(
-  extraction: CustomerVisionExtraction | null,
-  matchConfidence: number,
-  brandLikelyAbsent: boolean,
-): string | null {
-  if (extraction?.multiple_products_detected && extraction.product_count_estimate > 1) {
-    return 'multiple_products_in_image';
-  }
-
-  // Brand identified and absent from catalog — no point asking for a better photo.
-  if (brandLikelyAbsent && extraction?.brand_name) {
-    return null;
-  }
-
-  if (extraction?.image_quality === 'poor' && matchConfidence < 0.65) {
-    return 'poor_image_quality';
-  }
-  if (extraction && extraction.confidence < VISION_EXTRACTION_CONFIDENCE_MIN) {
-    return 'low_extraction_confidence';
-  }
-  return null;
-}
-
-function computeProductNotInCatalog(input: {
-  extraction: CustomerVisionExtraction | null;
-  shouldAskClarification: boolean;
-  matchConfidence: number;
-  products: Product[];
-  brandLikelyAbsent: boolean;
-}): boolean {
-  if (!input.extraction || input.shouldAskClarification) return false;
-  if (input.products.length > 0) return false;
-  if (input.matchConfidence >= IMAGE_MATCH_CONFIDENCE_THRESHOLD) return false;
-
-  // Brand read from the image and not in catalog — definitive miss.
-  if (input.brandLikelyAbsent && input.extraction.brand_name) return true;
-
-  // Image was readable enough to search; nothing matched — not a photo-quality issue.
-  const readableEnough =
-    input.extraction.image_quality !== 'poor' &&
-    input.extraction.confidence >= VISION_EXTRACTION_CONFIDENCE_MIN;
-
-  return readableEnough;
-}
-
 function buildVisionContextRules(
   productNotInCatalog: boolean,
   clarificationReason: string | null,
@@ -464,16 +456,78 @@ function buildVisionContextRules(
   ];
 
   if (clarificationReason === 'multiple_products_in_image') {
-    rules.push('- If multiple products visible, ask which one they mean.');
+    rules.push(
+      '- Several DIFFERENT products are visible and none is clearly the main one. Ask which product they mean; do NOT guess.',
+    );
   }
   if (
     clarificationReason === 'poor_image_quality' ||
     clarificationReason === 'low_extraction_confidence'
   ) {
-    rules.push('- For poor image quality, ask for a clearer photo showing the label.');
+    rules.push('- For poor image quality, ask once for a clearer, well-lit photo showing the label.');
+  }
+  if (clarificationReason === 'no_product_detected') {
+    rules.push(
+      '- The image does not show a product. Politely ask the customer to send a clear photo of the product itself.',
+    );
   }
 
   return rules;
+}
+
+/**
+ * Resolve catalog text matches from a vision extraction in an attribute-robust way.
+ *
+ * The customer photo (and thus the extraction) often shows only the BASE product name
+ * ("creatine monohydrate") while catalog titles bundle variant attributes
+ * ("Creatine Monohydrate 50 Servings"). A single contiguous `ILIKE` over the full
+ * extracted phrase then misses the match. Instead we:
+ *   1. retrieve by BASE-NAME tokens (identity) so every variant in the family is found,
+ *      regardless of the extra servings/flavor/size words in either the title or the
+ *      photo, and
+ *   2. re-rank the survivors by how well their attributes overlap what the photo shows,
+ *      so the exact variant (e.g. the 50-serving, strawberry one) surfaces first.
+ *
+ * Retrieval is tiered from most precise (brand + name) to broadest (product type),
+ * and finally falls back to the legacy contiguous search so behaviour never regresses.
+ */
+async function resolveTextMatchesFromExtraction(
+  tenantId: string,
+  extraction: CustomerVisionExtraction,
+  legacyQuery: string,
+  limit: number,
+): Promise<Product[]> {
+  const parsedName = parseProductTitle(extraction.product_name ?? '');
+  const nameTokens = parsedName.baseTokens;
+  const brandTokens = extraction.brand_name ? tokenizeForMatch(extraction.brand_name) : [];
+  const typeTokens = extraction.product_type ? tokenizeForMatch(extraction.product_type) : [];
+
+  let matches: Product[] = [];
+
+  // Tier 1: brand + base name — the most precise identity signal.
+  if (brandTokens.length > 0 && nameTokens.length > 0) {
+    matches = await searchProductsByTokens(tenantId, [...brandTokens, ...nameTokens], limit);
+  }
+  // Tier 2: base name only (brand may be unreadable or stored only in a column).
+  if (matches.length === 0 && nameTokens.length > 0) {
+    matches = await searchProductsByTokens(tenantId, nameTokens, limit);
+  }
+  // Tier 3: product type (e.g. "creatine", "mass gainer") when no name is legible.
+  if (matches.length === 0 && typeTokens.length > 0) {
+    matches = await searchProductsByTokens(tenantId, typeTokens, limit);
+  }
+  // Tier 4: legacy contiguous search — preserves the previous behaviour as a safety net.
+  if (matches.length === 0 && legacyQuery) {
+    matches = await searchProducts(tenantId, legacyQuery, limit);
+  }
+
+  // Re-rank by attribute overlap so the specific variant shown in the photo wins.
+  const queryAttributes = extractSelectionAttributes(
+    [extraction.product_name, extraction.flavor, extraction.size, ...extraction.visible_text]
+      .filter(Boolean)
+      .join(' '),
+  );
+  return rankProductsByAttributeOverlap(matches, queryAttributes);
 }
 
 export async function matchProductsFromCustomerImages(input: {
@@ -537,15 +591,34 @@ export async function matchProductsFromCustomerImages(input: {
     }
   }
 
+  // Legacy contiguous query, retained only as the final fallback inside the resolver.
   const structuredQuery = extraction
     ? [extraction.brand_name, extraction.product_name, extraction.product_type, extraction.flavor, extraction.size]
         .filter(Boolean)
         .join(' ')
     : '';
 
+  // Attribute-robust text retrieval: match by base-name tokens (so extra servings/
+  // flavor/size words in the title or photo do not break the match) and re-rank by
+  // attribute overlap so the exact variant the photo shows surfaces first.
   let textSearchMatches: Product[] = [];
-  if (structuredQuery) {
-    textSearchMatches = await searchProducts(input.tenantId, structuredQuery, limit);
+  if (extraction) {
+    textSearchMatches = await resolveTextMatchesFromExtraction(
+      input.tenantId,
+      extraction,
+      structuredQuery,
+      limit,
+    );
+  }
+
+  // Deterministic fast path: a legible SKU/barcode is the strongest matching signal.
+  let skuProduct: Product | null = null;
+  if (extraction?.sku_visible) {
+    try {
+      skuProduct = await findActiveProductBySku(input.tenantId, extraction.sku_visible);
+    } catch (err) {
+      console.warn('[imageMatch] SKU lookup failed', { tenantId: input.tenantId, err });
+    }
   }
 
   const textPool = [...(input.textMatchedProducts ?? []), ...textSearchMatches];
@@ -567,37 +640,51 @@ export async function matchProductsFromCustomerImages(input: {
   );
 
   const topMatch = scoredMatches[0] ?? null;
-  const matchConfidence = computeMatchConfidence(extraction, topMatch);
-  const clarificationReason = buildClarificationReason(
-    extraction,
-    matchConfidence,
-    brandLikelyAbsent,
-  );
-  const shouldAskClarification = clarificationReason !== null;
+  const exactSkuMatch = skuProduct !== null;
+  // A SKU hit floors the confidence at the confident band so it is honoured downstream.
+  const matchConfidence = exactSkuMatch
+    ? Math.max(CONFIDENT_MATCH_FLOOR, computeMatchConfidence(extraction, topMatch))
+    : computeMatchConfidence(extraction, topMatch);
+
+  const { decision, shouldAskClarification, productNotInCatalog, clarificationReason } =
+    decideVisionMatch({
+      extraction,
+      matchConfidence,
+      topSimilarity: topMatch?.imageSimilarity ?? 0,
+      hasCatalogCandidates: scoredMatches.length > 0 || exactSkuMatch,
+      brandLikelyAbsent,
+      exactSkuMatch,
+    });
 
   let products: Product[];
-  if (matchConfidence >= IMAGE_MATCH_CONFIDENCE_THRESHOLD && !shouldAskClarification) {
+  if (exactSkuMatch && skuProduct) {
+    // Surface the SKU-resolved product first, then any other scored candidates.
+    const rest = scoredMatches.map((s) => s.product).filter((p) => p.id !== skuProduct!.id);
+    products = [skuProduct, ...rest];
+  } else if (productNotInCatalog || shouldAskClarification) {
+    // When we are not carrying it or are about to ask the customer, surface alternatives
+    // only for the "different brand, similar item" case; otherwise stay empty/honest.
+    products =
+      brandLikelyAbsent && !productNotInCatalog && textSearchMatches.length > 0
+        ? textSearchMatches.slice(0, limit)
+        : decision === 'tentative_match'
+          ? scoredMatches.slice(0, 3).map((s) => s.product)
+          : [];
+  } else if (decision === 'confident_match') {
     products = scoredMatches.map((s) => s.product);
-  } else if (topMatch && (topMatch.imageSimilarity ?? 0) >= IMAGE_SIMILARITY_THRESHOLD) {
-    products = scoredMatches.slice(0, 3).map((s) => s.product);
-  } else if (exactBrandMatches.length > 0) {
-    products = exactBrandMatches;
-  } else if (brandLikelyAbsent && textSearchMatches.length > 0) {
-    // Response B: similar alternative from a different brand may still be offered.
-    products = textSearchMatches.slice(0, limit);
-  } else if (!extraction) {
-    products = input.textMatchedProducts ?? [];
+  } else if (decision === 'tentative_match') {
+    if (topMatch && (topMatch.imageSimilarity ?? 0) >= IMAGE_SIMILARITY_THRESHOLD) {
+      products = scoredMatches.slice(0, 3).map((s) => s.product);
+    } else if (exactBrandMatches.length > 0) {
+      products = exactBrandMatches;
+    } else if (!extraction) {
+      products = input.textMatchedProducts ?? [];
+    } else {
+      products = scoredMatches.slice(0, 3).map((s) => s.product);
+    }
   } else {
     products = [];
   }
-
-  const productNotInCatalog = computeProductNotInCatalog({
-    extraction,
-    shouldAskClarification,
-    matchConfidence,
-    products,
-    brandLikelyAbsent,
-  });
 
   const visionContext = extraction
     ? [
@@ -639,6 +726,7 @@ export async function matchProductsFromCustomerImages(input: {
 
   console.info('[imageMatch]', {
     tenantId: input.tenantId,
+    decision,
     visualMatches: visualMatches.length,
     topSimilarity: visualMatches[0]?.similarity ?? null,
     matchConfidence,
@@ -646,7 +734,30 @@ export async function matchProductsFromCustomerImages(input: {
     clarificationReason,
     brandLikelyAbsent,
     productNotInCatalog,
+    exactSkuMatch,
+    distinctProductCount: extraction?.distinct_product_count ?? null,
+    allIdentical: extraction?.all_visible_products_identical ?? null,
   });
+
+  // Fire-and-forget telemetry so production accuracy, clarification rate, and
+  // not-in-catalog rate can be measured and the thresholds tuned off real data.
+  logEvent(input.tenantId, 'vision_product_match', {
+    decision,
+    match_confidence: Number(matchConfidence.toFixed(3)),
+    top_similarity: topMatch?.imageSimilarity ?? null,
+    should_ask_clarification: shouldAskClarification,
+    clarification_reason: clarificationReason,
+    product_not_in_catalog: productNotInCatalog,
+    exact_sku_match: exactSkuMatch,
+    brand_likely_absent: brandLikelyAbsent,
+    image_quality: extraction?.image_quality ?? null,
+    contains_product: extraction?.contains_product ?? null,
+    distinct_product_count: extraction?.distinct_product_count ?? null,
+    all_visible_products_identical: extraction?.all_visible_products_identical ?? null,
+    has_distracting_objects: extraction?.has_distracting_objects ?? null,
+    matched_product_count: products.length,
+    visual_candidate_count: visualMatches.length,
+  }).catch(() => {});
 
   return {
     products,
