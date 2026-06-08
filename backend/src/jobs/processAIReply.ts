@@ -24,7 +24,8 @@ import {
   markOrderCancellationRequested,
   markOrderRefundRequested,
 } from '../db/models/order';
-import { findProductByNameCaseInsensitive, findActiveProductNamesForTenant } from '../db/models/product';
+import { findActiveProductNamesForTenant } from '../db/models/product';
+import { resolveOrderProduct } from '../services/orderProductResolutionService';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   classifyNegativeAvailabilityReply,
@@ -454,6 +455,31 @@ const MISSING_CUSTOMER_NAME_MESSAGES: Record<ReplyLocale, string> = {
   sq: 'Faleminderit për të dhënat tuaja! Për të plotësuar porosinë, ju lutem na tregoni edhe emrin tuaj.',
   en: 'Thank you for your details! To complete your order, could you please also share your first name?',
 };
+
+/**
+ * Distinctive, locale-specific lead-in for the variant-clarification question. Used both to
+ * build the message and to detect (verbatim) whether we already asked it earlier in the
+ * conversation, so we never loop on the same question.
+ */
+const VARIANT_CLARIFICATION_LEAD_IN: Record<ReplyLocale, string> = {
+  sq: 'Për të shmangur ndonjë gabim, cilin nga këto produkte dëshironi të porosisni',
+  en: 'To make sure I get your order right, which of these products would you like to order',
+};
+
+const MAX_VARIANT_OPTIONS_IN_CLARIFICATION = 6;
+
+/**
+ * Builds a question asking the customer to pick between similar product variants when their
+ * selection could not be resolved to a single product. Listing the concrete candidate names
+ * lets the next customer reply carry the distinguishing attribute (e.g. "50 servings").
+ */
+function buildVariantClarificationMessage(
+  candidateNames: string[],
+  locale: ReplyLocale,
+): string {
+  const options = candidateNames.slice(0, MAX_VARIANT_OPTIONS_IN_CLARIFICATION).join(', ');
+  return `${VARIANT_CLARIFICATION_LEAD_IN[locale]}: ${options}?`;
+}
 
 function normalizeForIncludesCheck(value: string): string {
   return value
@@ -2376,9 +2402,89 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
 
     const nameFromIntent = intent.product_name?.trim();
-    const matchedProduct = nameFromIntent
-      ? await findProductByNameCaseInsensitive(tenantId, nameFromIntent)
-      : null;
+
+    // Anchor product resolution on the customer's OWN recent wording (e.g. "the 50 servings
+    // one") rather than trusting only the intent classifier's free-text product_name. This
+    // prevents attaching the wrong variant to an order when several similar products were
+    // recommended (e.g. Creatine 50 vs 60 Servings).
+    const customerSelectionText = messagesForIntent
+      .filter((m) => m.sent_by === 'customer' && typeof m.content === 'string')
+      .slice(-4)
+      .map((m) => m.content as string)
+      .join('\n');
+
+    const resolution = await resolveOrderProduct({
+      tenantId,
+      intentProductName: nameFromIntent ?? null,
+      customerSelectionText,
+    });
+    const matchedProduct = resolution.product;
+
+    console.info(
+      `[ORDER_PRODUCT_RESOLUTION] tenantId: ${tenantId} conversationId: ${conversationId}` +
+      ` intentProductName: ${logJsonStringOrNull(nameFromIntent ?? null)}` +
+      ` reason: ${resolution.reason} ambiguous: ${resolution.ambiguous}` +
+      ` selected: ${logJsonStringOrNull(matchedProduct?.name ?? null)}` +
+      ` selectedId: ${logJsonStringOrNull(matchedProduct?.id ?? null)}` +
+      ` candidates: ${JSON.stringify(resolution.candidates.map((c) => c.name))}`,
+    );
+
+    // When several variants remain plausible and the customer's wording does not pin one,
+    // refuse to guess: creating an order for the wrong variant is worse than not creating one.
+    // Instead, ask the customer to choose between the specific candidates so the next turn
+    // carries a distinguishing attribute. We only ask once to avoid looping on the question.
+    if (resolution.ambiguous) {
+      console.warn(
+        '[ORDER_PRODUCT_AMBIGUOUS] Skipping draft order: customer selection matched multiple variants',
+        {
+          conversationId,
+          tenantId,
+          intentProductName: nameFromIntent,
+          candidateNames: resolution.candidates.map((c) => c.name),
+        },
+      );
+
+      const clarificationLeadIn = VARIANT_CLARIFICATION_LEAD_IN[replyLocale];
+      const alreadyAskedClarification = messagesForIntent
+        .slice(-8)
+        .some(
+          (m) =>
+            m.sent_by === 'ai' &&
+            typeof m.content === 'string' &&
+            m.content.includes(clarificationLeadIn),
+        );
+
+      if (!alreadyAskedClarification) {
+        const clarificationText = buildVariantClarificationMessage(
+          resolution.candidates.map((c) => c.name),
+          replyLocale,
+        );
+        const clarifySendResult = await sendMessage(
+          channel,
+          contact.external_id,
+          clarificationText,
+        );
+        const clarifyMessage = await createMessage({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          external_message_id: clarifySendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+          direction: 'outbound',
+          type: 'text',
+          content: clarificationText,
+          sent_by: 'ai',
+        });
+        await touchConversationLastMessageAt(conversationId);
+        socketService.emitNewMessage(tenantId, clarifyMessage);
+        socketService.emitConversationUpdated(tenantId, conversationId);
+        console.info('[ORDER_PRODUCT_CLARIFICATION_SENT]', {
+          conversationId,
+          tenantId,
+          candidateNames: resolution.candidates.map((c) => c.name),
+          sendSuccess: clarifySendResult?.success === true,
+        });
+      }
+      return;
+    }
 
     if (matchedProduct && matchedProduct.in_stock === false) {
       console.info('[ai.reply] Skipping draft order: product is out of stock', {
