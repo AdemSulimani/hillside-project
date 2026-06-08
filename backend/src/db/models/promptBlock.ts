@@ -278,6 +278,11 @@ export async function syncNewCatalogBlocksForTenant(
   return rows.map((r) => r.block_key);
 }
 
+export interface ForceSyncResult {
+  tenant_id: string;
+  updated_block_keys: string[];
+}
+
 export interface CatalogSyncTenantResult {
   tenant_id: string;
   added_block_keys: string[];
@@ -334,4 +339,62 @@ export async function syncNewCatalogBlocksForTenants(
     tenant_id,
     added_block_keys,
   }));
+}
+
+/**
+ * Forces all tenant copies of platform-locked blocks to match the current catalog
+ * default, regardless of their existing content.  Unlike syncNewCatalogBlocksForTenants
+ * (which only inserts missing rows), this overwrites every locked block so that
+ * migrations, prompt-block updates, and manual catalog edits are reliably propagated
+ * to every tenant.
+ *
+ * Tenant-customised blocks for non-locked keys are never touched.
+ *
+ * When tenantIds is omitted or empty, all tenants are targeted.
+ */
+export async function forceSyncLockedBlocksForTenants(
+  tenantIds?: string[],
+): Promise<ForceSyncResult[]> {
+  let tenantFilter = '';
+  const params: unknown[] = [];
+
+  if (tenantIds && tenantIds.length > 0) {
+    const placeholders = tenantIds.map((_, i) => `$${i + 1}::uuid`).join(', ');
+    tenantFilter = `AND tpb.tenant_id IN (${placeholders})`;
+    params.push(...tenantIds);
+  }
+
+  const { rows } = await pool.query<{ tenant_id: string; block_key: string }>(
+    `UPDATE tenant_prompt_blocks tpb
+     SET content    = pb.default_content,
+         updated_at = now()
+     FROM prompt_blocks pb
+     WHERE tpb.prompt_block_id = pb.id
+       AND pb.is_platform_locked = true
+       AND tpb.content IS DISTINCT FROM pb.default_content
+       ${tenantFilter}
+     RETURNING tpb.tenant_id, tpb.block_key`,
+    params,
+  );
+
+  const map = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = map.get(row.tenant_id) ?? [];
+    list.push(row.block_key);
+    map.set(row.tenant_id, list);
+  }
+
+  return [...map.entries()].map(([tenant_id, updated_block_keys]) => ({
+    tenant_id,
+    updated_block_keys,
+  }));
+}
+
+/**
+ * Resets a single tenant's locked blocks to the current catalog default.
+ * Convenience wrapper around forceSyncLockedBlocksForTenants for single-tenant use.
+ */
+export async function forceSyncLockedBlocksForTenant(tenantId: string): Promise<string[]> {
+  const results = await forceSyncLockedBlocksForTenants([tenantId]);
+  return results[0]?.updated_block_keys ?? [];
 }

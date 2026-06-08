@@ -458,10 +458,16 @@ export function buildProductKnowledgeContext(products: Product[]): string {
         .map(([k, v]) => `${k}: ${v}`)
         .join(', ');
 
+      const priceLabel =
+        p.discounted_price != null
+          ? `Price: ${p.price} (discounted: ${p.discounted_price})`
+          : `Price: ${p.price}`;
+
       return [
         `Product: ${p.name}`,
         p.brand ? `Brand: ${p.brand}` : null,
         p.category ? `Category: ${p.category}` : null,
+        priceLabel,
         attrLines ? `Attributes: ${attrLines}` : null,
         p.description ? `Description: ${p.description}` : null,
         p.extracted_text ? `Extracted catalog text: ${p.extracted_text.slice(0, 800)}` : null,

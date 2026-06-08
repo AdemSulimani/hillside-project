@@ -240,6 +240,11 @@ ownerRoutes.post(
   validateBody(adminSyncAllCatalogBlocksBodySchema),
   adminAiController.postSyncAllCatalogBlocks,
 );
+ownerRoutes.post(
+  '/ai/prompt-blocks/force-sync-locked',
+  validateBody(adminSyncAllCatalogBlocksBodySchema),
+  adminAiController.postForceSyncLockedBlocks,
+);
 
 // Platform catalog block management
 ownerRoutes.get('/ai/catalog-blocks', adminAiController.listCatalogBlocks);

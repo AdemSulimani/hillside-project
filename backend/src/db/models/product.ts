@@ -355,7 +355,21 @@ export async function findProductByNameCaseInsensitive(
      LIMIT 1`,
     [tenantId, `%${trimmed}%`],
   );
-  return rows[0] ?? null;
+  if (rows[0]) return rows[0];
+
+  // Reverse match: the intent string is a superset of the DB product name
+  // (e.g. intent = "Nitro Tech Ripped nga Muscletech", DB = "Nitro Tech Ripped").
+  // Pick the longest DB name that is fully contained within the intent string so
+  // we prefer the most specific product when multiple names would match.
+  const { rows: reverseRows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND $2 ILIKE CONCAT('%', TRIM(name), '%')
+     ORDER BY LENGTH(name) DESC, name ASC
+     LIMIT 1`,
+    [tenantId, trimmed],
+  );
+  return reverseRows[0] ?? null;
 }
 
 export async function searchProducts(
@@ -618,6 +632,24 @@ export async function findProductsWithoutEmbeddings(
     [tenantId, limit],
   );
   return rows;
+}
+
+/**
+ * Returns the names of all active products for a tenant.
+ * Used to provide the intent detection LLM with an exact catalog list so it can
+ * normalise the customer's phrasing to a real product name.
+ * Capped at 200 rows — tenants with larger catalogs should rely on the fuzzy
+ * matching fallback in findProductByNameCaseInsensitive.
+ */
+export async function findActiveProductNamesForTenant(tenantId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ name: string }>(
+    `SELECT name FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+     ORDER BY name ASC
+     LIMIT 200`,
+    [tenantId],
+  );
+  return rows.map((r) => r.name);
 }
 
 export async function appendImageUrls(

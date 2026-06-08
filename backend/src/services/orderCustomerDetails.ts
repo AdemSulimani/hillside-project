@@ -18,26 +18,76 @@ function extractPhoneDigits(line: string): string | null {
   return digits.length >= 7 && digits.length <= 15 ? digits : null;
 }
 
-function looksLikeAddressLine(line: string): boolean {
+/**
+ * Albanian and English single words that look alphabetic but are greetings,
+ * affirmations, or common conversational words — never valid customer names.
+ * All entries must be lowercase and diacritic-free (matching normalizeLine output).
+ */
+const COMMON_NON_NAME_WORDS = new Set([
+  // Albanian greetings / closings / affirmations
+  'pershendetje', 'mirdita', 'miremengjes', 'mirembrema', 'naten', 'natenmire',
+  'faleminderit', 'falemnderit', 'faleminderit', 'flm', 'fln', 'cfn',
+  'miresi', 'mirsevini', 'kenaqesi',
+  'po', 'jo', 'ok', 'okej', 'dakord', 'sigurisht', 'natyrisht', 'absolutisht',
+  'sakte', 'shumemire', 'shume', 'mire',
+  'vazhdo', 'vazhd', 'beje', 'bej',
+  // English greetings / affirmations
+  'hello', 'hi', 'hey', 'thanks', 'thank', 'please', 'certainly', 'absolutely',
+  'great', 'wonderful', 'perfect', 'alright', 'correct', 'exactly', 'indeed',
+  'confirmed', 'understood', 'noted', 'proceed', 'continue',
+]);
+
+export function looksLikeAddressLine(line: string): boolean {
   const normalized = normalizeLine(line);
   if (!normalized) return false;
-  return (
-    /\b(adres|address|rrug|street|banes|bllok|prishtin|prizren|peje|gjakove|ferizaj|mitrovic)\b/.test(
+
+  // Explicit address-keyword prefix match (no end \b): Albanian inflected forms like
+  // "rruga", "adresa", "banesat", "blloku", "prishtina" all start with the listed stems,
+  // so we deliberately omit the trailing word-boundary to catch them all.
+  if (
+    /\b(adres|address|rrug|street|banes|bllok|prishtin|prizren|peje|gjakove|ferizaj|mitrovic)/.test(
       normalized,
-    ) ||
-    (line.includes(',') && line.length >= 12) ||
-    (/\b\d{1,4}\b/.test(line) && line.length >= 20)
-  );
+    )
+  ) {
+    return true;
+  }
+
+  // A short number embedded in a long line strongly suggests a house/apartment number.
+  if (/\b\d{1,4}\b/.test(line) && line.length >= 20) return true;
+
+  // Comma rule: keep the original length-based heuristic BUT also require that the line
+  // does NOT look like a plain "FirstName LastName, SomePlace" pattern — i.e. every
+  // comma-separated segment must not be all-alphabetic words only.
+  // This prevents "John Smith, London" (no digits, no address keyword) from triggering
+  // while still catching "Lagja Arberia, Tirane" (city keyword "tiran" is not in the
+  // stem list above, so the comma rule is needed as a final catch-all for city names
+  // not in the keyword list, combined with address-structure signals).
+  if (line.includes(',') && line.length >= 12) {
+    // Has a digit (house/apt number) → definitely an address.
+    if (/\d/.test(line)) return true;
+    // Has a secondary address-structure keyword.
+    if (/\b(nr|no|ap|apt|kati|kat|lagja|lagjja|zona|qyteti|qytetet|tirane|tirana)\b/.test(normalized)) return true;
+    // More than two comma-separated segments — typical of full addresses (street, area, city).
+    const segments = line.split(',');
+    if (segments.length >= 3) return true;
+  }
+
+  return false;
 }
 
-/** Whether a line looks like a customer full name (not phone/address). */
+/** Whether a line looks like a customer name (first name only, or first + last). */
 export function looksLikeCustomerNameLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed || trimmed.length < 3 || trimmed.length > 80) return false;
   if (extractPhoneDigits(trimmed)) return false;
   if (looksLikeAddressLine(trimmed)) return false;
   const parts = trimmed.split(/\s+/).filter(Boolean);
-  if (parts.length < 2) return false;
+  if (parts.length < 1) return false;
+  // Single-word names require at least 4 characters to avoid matching common
+  // short affirmations like "yes", "mir", "ok" that slip past the length guard.
+  if (parts.length === 1 && trimmed.length < 4) return false;
+  // Block single-word common non-name words (greetings, affirmations, filler words).
+  if (parts.length === 1 && COMMON_NON_NAME_WORDS.has(normalizeLine(trimmed))) return false;
   return parts.every((part) => /^[\p{L}'-]+$/u.test(part));
 }
 
