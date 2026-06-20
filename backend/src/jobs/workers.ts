@@ -13,11 +13,15 @@ import {
 } from './generateProductImageFingerprint';
 import {
   processReconcileProductEmbeddings,
+  processFastReconcileMissingEmbeddings,
   initEmbeddingReconcileScheduler,
+  initFastEmbeddingReconcileScheduler,
 } from './reconcileProductEmbeddings';
 import {
   processReconcileProductImageFingerprints,
+  processFastReconcileProductImageFingerprints,
   initImageFingerprintReconcileScheduler,
+  initFastImageFingerprintReconcileScheduler,
 } from './reconcileProductImageFingerprints';
 import { initPrepareFinetuningScheduler, processPrepareFinetuning } from './prepareFinetuning';
 import { initRefreshMetaTokensScheduler, processRefreshMetaTokens } from './refreshMetaTokens';
@@ -145,8 +149,16 @@ export const defaultWorker = new Worker<
       await processReconcileProductEmbeddings();
       return;
     }
+    if (job.name === 'embeddingReconcileFast') {
+      await processFastReconcileMissingEmbeddings();
+      return;
+    }
     if (job.name === 'imageFingerprintReconcile') {
       await processReconcileProductImageFingerprints();
+      return;
+    }
+    if (job.name === 'imageFingerprintReconcileFast') {
+      await processFastReconcileProductImageFingerprints();
       return;
     }
     if (job.name === 'product.imageFingerprint') {
@@ -184,8 +196,16 @@ void initEmbeddingReconcileScheduler().catch((err) => {
   console.error('[jobs] Failed to register embedding reconciliation scheduler', err);
 });
 
+void initFastEmbeddingReconcileScheduler().catch((err) => {
+  console.error('[jobs] Failed to register fast embedding reconciliation scheduler', err);
+});
+
 void initImageFingerprintReconcileScheduler().catch((err) => {
   console.error('[jobs] Failed to register image fingerprint reconciliation scheduler', err);
+});
+
+void initFastImageFingerprintReconcileScheduler().catch((err) => {
+  console.error('[jobs] Failed to register fast image fingerprint reconciliation scheduler', err);
 });
 
 void initRefreshMetaTokensScheduler().catch((err) => {

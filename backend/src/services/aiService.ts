@@ -1,9 +1,14 @@
 import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { findTenantById } from '../db/models/tenant';
-import { findMessagesByConversation, type Message } from '../db/models/message';
+import {
+  collectRecentlyDiscussedProductIds,
+  findMessagesByConversation,
+  type Message,
+} from '../db/models/message';
 import {
   countActiveProducts,
   countProductsWithoutEmbeddings,
+  findActiveProductsByIds,
   searchProducts,
   searchProductsByCatalogPhrases,
   searchProductsByDisjunctiveTerms,
@@ -21,7 +26,9 @@ import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import { generateEmbedding } from './embeddingService';
 import { matchProductsFromCustomerImages } from './productImageMatchingService';
+import { getProductImageDerivedContext } from './productImageAttributeService';
 import { redisConnection } from '../jobs/redisConnection';
+import { enqueueMissingEmbeddingsForTenant } from '../jobs/reconcileProductEmbeddings';
 import {
   buildCategoryAggregationInstructions,
   buildProductAttributeAggregation,
@@ -43,8 +50,17 @@ import {
   isProductDescriptionQuestion,
   PRODUCT_DESCRIPTION_CONCISE_APPEND,
   PRODUCT_DESCRIPTION_TARGETED_APPEND,
+  SHORTEST_ANSWER_APPEND,
   type CatalogTextMode,
 } from './productDescriptionPromptService';
+import {
+  USAGE_QUESTION_KEYWORDS,
+  includesAnyKeyword,
+  matchesUsageQuestionKeyword,
+  containsSpeculativeHealthAdvice,
+} from './usageSuitabilityHelpers';
+
+export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeyword, containsSpeculativeHealthAdvice };
 
 // 0.65 gives a better recall/precision balance for large catalogs where many
 // products share semantic space (e.g. supplements, cosmetics). The old 0.75
@@ -522,17 +538,31 @@ export function isPriceOnlyFollowUp(message: string): boolean {
 
   if (!t || t.length > 80) return false;
 
+  // `t` is already lowercased and diacritic-stripped above, so ascii forms cover the
+  // diacritic spellings. Allow an optional trailing deictic pronoun ("... kto/keto/them").
   if (
-    /^(sa\s+)?(kushton|kushtojne|kushtojnë|cmimi|cmim|çmimi|çmim|qmimi|price|cost)(\s*[.!?]*)?$/i.test(
+    /^(sa\s+)?(kushton|kushtojn|kushtojne|kushtoj|kushtoi|kushtuan|cmimi|cmim|qmimi|qmim|price|cost|how much)(\s+(kto|keto|kete|keta|ato|ate|atyre|tyre|this|these|them|it))?(\s*[.!?]*)?$/i.test(
       t,
     )
   ) {
     return true;
   }
 
-  const hasPriceCue = ['kushton', 'kushtojne', 'cmim', 'çmim', 'qmim', 'price', 'how much', 'sa kushton'].some(
-    (n) => t.includes(n),
-  );
+  const hasPriceCue = [
+    'kushton',
+    'kushtojn',
+    'kushtojne',
+    'kushtoj',
+    'kushtoi',
+    'kushtuan',
+    'cmim',
+    'qmim',
+    'price',
+    'cost',
+    'how much',
+    'sa kushton',
+    'sa ben',
+  ].some((n) => t.includes(n));
   const words = t.split(/\s+/).filter((w) => w.length > 1);
   return hasPriceCue && words.length <= 6;
 }
@@ -713,42 +743,99 @@ export async function resolveProductsFromConversationHistory(
   return out;
 }
 
-const USAGE_QUESTION_KEYWORDS = [
-  'how to use',
-  'how do i use',
-  'how should i use',
-  'how to take',
-  'how do i take',
-  'dosage',
-  'dose',
-  'application',
-  'apply',
-  'instructions',
-  'warning',
-  'warnings',
-  'side effects',
-  'usage',
-  'use it',
-  'take it',
-  'si ta përdor',
-  'si e përdor',
-  'si duhet ta përdor',
-  'si ta marr',
-  'si e marr',
-  'dozimi',
-  'dozë',
-  'aplikim',
-  'apliko',
-  'udhëzime',
-  'paralajmërim',
-  'paralajmërime',
-  'efekte anësore',
-  'përdorim',
-  'përdore',
-  'merre',
-  'perdor',
-  'qysh me perdor',
-];
+/**
+ * Deterministically reload the products the AI most recently identified in the
+ * conversation by reading the persisted `product_ids` off the latest AI message that
+ * surfaced any products, then fetching those active catalog rows by ID.
+ *
+ * This is the primary, reliable source of "the products we just discussed" for
+ * follow-up questions (price, brand, flavor, ingredients, stock, variants, …). Unlike
+ * the text-based resolvers it cannot be defeated by anchor-extraction picking the
+ * follow-up itself, by AI phrasing not matching catalog names, by embedding gaps, or
+ * by semantic-search timeouts — so the AI never loses a product it already recommended.
+ */
+export async function resolveProductsFromPersistedContext(
+  tenantId: string,
+  messages: Message[],
+  limit: number,
+): Promise<Product[]> {
+  const ids = collectRecentlyDiscussedProductIds(messages);
+  if (ids.length === 0) return [];
+  const products = await findActiveProductsByIds(tenantId, ids);
+  return products.slice(0, limit);
+}
+
+/**
+ * Unified resolver for context-dependent follow-ups. Tries, in order of reliability:
+ *   1. Persisted product IDs from the most recent AI recommendation (deterministic).
+ *   2. Anchor-based re-resolution against the prior substantive product query.
+ *   3. Re-search of recent assistant reply text.
+ *
+ * The deterministic persisted path is attempted first so a follow-up about previously
+ * identified products is answered from those exact products whenever they were recorded.
+ */
+async function resolveContextualProductSet(
+  tenantId: string,
+  searchText: string,
+  conversationHistory: Message[],
+  limit: number,
+): Promise<Product[]> {
+  const persisted = await resolveProductsFromPersistedContext(tenantId, conversationHistory, limit);
+  if (persisted.length > 0) return persisted;
+
+  const fromContext = await resolveProductsForContextualQuery(
+    tenantId,
+    searchText,
+    conversationHistory,
+    matchProductsForCustomerMessage,
+    limit,
+    true,
+  );
+  if (fromContext.length > 0) return fromContext;
+
+  return resolveProductsFromConversationHistory(tenantId, conversationHistory, limit);
+}
+
+/**
+ * Whether the customer's message is a follow-up that refers to products already
+ * discussed (rather than introducing a new product/category to search for). Used as
+ * the gate for the deterministic "reuse previously identified products" safety net so
+ * the AI never claims a product it already recommended is missing.
+ */
+function isProductFollowUpReference(
+  message: string,
+  attributeIntent: ProductAttributeIntentResult,
+  customerAskedPrice: boolean,
+  customerAskedDiscount: boolean,
+): boolean {
+  if (
+    customerAskedPrice ||
+    customerAskedDiscount ||
+    attributeIntent.is_attribute_question ||
+    attributeIntent.is_product_knowledge_question ||
+    needsConversationProductContext(message) ||
+    isProductDescriptionQuestion(message)
+  ) {
+    return true;
+  }
+
+  // Deictic reference to the product(s) just discussed, with no new product noun
+  // (e.g. "are these in stock?", "a keni keto", "i want them"). Kept short so it does
+  // not hijack genuinely new product queries.
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s?!.]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length > 80) return false;
+  const words = t.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length > 8) return false;
+  return /\b(this|that|these|those|it|them|they|kjo|ky|kto|keto|kete|keta|ato|ate|atyre|tyre)\b/.test(t);
+}
+
 
 const NEW_ORDER_SIGNAL_KEYWORDS = [
   'new order',
@@ -851,12 +938,6 @@ const ORDER_CLOSING_QUESTION_FALLBACK_KEYWORDS = [
   'want to order it',
 ];
 
-function includesAnyKeyword(message: string, keywords: string[]): boolean {
-  const t = message.trim().toLowerCase();
-  if (!t) return false;
-  return keywords.some((needle) => t.includes(needle));
-}
-
 function normalizeForIntentMatch(value: string): string {
   return value
     .normalize('NFD')
@@ -878,7 +959,14 @@ export async function classifyUsageQuestionIntent(message: string): Promise<bool
         {
           role: 'system',
           content:
-            'You are a strict intent classifier. Determine whether the customer message asks about product usage, dosage, instructions, application, side effects, or warnings in any language/slang/typo. Return only JSON: {"is_usage_question": true} or {"is_usage_question": false}.',
+            'You are a strict intent classifier. Determine whether the customer message asks about ANY of the following (in any language, slang, or with typos):\n' +
+            '- Product usage, dosage, instructions, application method\n' +
+            '- Side effects or warnings\n' +
+            '- Whether the product is safe or suitable for a specific person, health condition, or lifestyle (e.g. "I don\'t work out, can I use this?", "Is this suitable for me?", "Can I use this without exercising?")\n' +
+            '- Whether there are any problems, risks, or issues using the product in specific personal circumstances\n' +
+            '- Compatibility with a specific diet, health situation, or personal condition\n' +
+            '- Any question of the form "can I use this?", "is this ok for me?", "any problem if I...?", "is this suitable for...?"\n' +
+            'Return only JSON: {"is_usage_question": true} or {"is_usage_question": false}.',
         },
         {
           role: 'user',
@@ -1239,6 +1327,77 @@ export async function customerAskedAboutDiscount(message: string): Promise<boole
   }
 
   return includesAnyKeyword(inbound, DISCOUNT_REQUEST_KEYWORDS);
+}
+
+/**
+ * LLM classifier (semantic, not keyword-based) that decides whether a message is a
+ * follow-up about the product(s) already discussed earlier in the conversation —
+ * asking for ANY detail or attribute (price, brand, flavor, size, color, variant,
+ * weight, category, ingredients, description, servings, stock/availability, images, …)
+ * — rather than requesting a different/new product or changing topic.
+ *
+ * It is robust to misspellings, slang, and dialect that the regex/keyword heuristics
+ * miss (e.g. "sa kshtjn", "qfar shejsh", "a ka stok"). The already-discussed product
+ * names are passed as context so the model can reject genuinely new product requests.
+ *
+ * Used only as a last-resort gate before the AI would otherwise claim a product the
+ * customer already saw is unavailable, so the extra latency is paid on the rare empty-
+ * retrieval path, never on the happy path. Fails closed (returns false) when the LLM is
+ * unavailable; the caller has already applied the cheap heuristic gate by then.
+ */
+export async function classifyContextualProductFollowUp(
+  message: string,
+  discussedProducts: Product[],
+): Promise<boolean> {
+  const inbound = message.trim();
+  if (!inbound) return false;
+
+  const names = discussedProducts
+    .map((p) => p.name?.trim())
+    .filter((n): n is string => Boolean(n))
+    .slice(0, 10);
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You decide whether a customer message is a FOLLOW-UP question about the product(s) already discussed earlier in this conversation, as opposed to a request for a DIFFERENT/new product or an unrelated topic. ' +
+            'A follow-up asks for any detail or attribute of the already-discussed product(s): price, brand, flavor, size, color, variant, weight, category/type, ingredients, description/details, servings/quantity, stock/availability, images, etc. — usually without naming a new product, often using references like "this/these/it/them/the first one" (English) or "kjo/këto/ato/kët/tij/i pari" (Albanian). ' +
+            'Handle ANY language, dialect, slang, shorthand, and misspellings (e.g. "sa kshtjn", "qfar shejsh", "a ka stok", "cila marke"). Classify by MEANING, not exact spelling. ' +
+            'Return false when the customer names or asks for a DIFFERENT product or category than those already discussed, or changes topic (greeting, order placement, business info, delivery, etc.). ' +
+            'Return only JSON: {"is_followup": true} or {"is_followup": false}.',
+        },
+        {
+          role: 'user',
+          content:
+            `Products already discussed: ${names.length > 0 ? names.join('; ') : '(unspecified)'}\n` +
+            `Customer message: ${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 16,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as { is_followup?: boolean };
+      if (typeof parsed.is_followup === 'boolean') {
+        console.info('[followup_classifier] result=' + parsed.is_followup + ' message_preview:', inbound.slice(0, 80));
+        return parsed.is_followup;
+      }
+    }
+  } catch (err) {
+    console.warn('[followup_classifier] classifier failed — falling back to heuristics', {
+      error: err instanceof Error ? err.message : String(err),
+      message_preview: inbound.slice(0, 80),
+    });
+  }
+
+  return false;
 }
 
 /**
@@ -1811,17 +1970,32 @@ export async function isUsageQuestionUnanswered(
     messages: [
       {
         role: 'system',
-        content: `You are a semantic classifier. Determine whether the product usage description contains enough information to answer the customer's usage question.
+        content: `You are a strict semantic classifier. Determine whether the product usage description SPECIFICALLY AND DIRECTLY answers the customer's question.
 
-The text may be in Albanian (Shqip) or English, and may include informal spellings, missing diacritics, or minor typos — treat semantically equivalent text as matching.
+The text may be in Albanian (Shqip) or English, including informal spellings or missing diacritics.
 
-Return {"is_unanswered": false} when the usage description contains information that is directly relevant to or answers the customer's question — even if the wording differs, diacritics are missing, or only part of the description addresses it.
-Return {"is_unanswered": true} ONLY when the usage description contains NO information that relates to what the customer is asking about.
+STRICT RULES — apply in order:
+
+1. SUITABILITY / PERSONAL CIRCUMSTANCE QUESTIONS (highest priority):
+   If the customer asks whether the product is suitable, safe, or problematic for their specific personal situation, health condition, or lifestyle (e.g. "I don't work out, can I use this?", "Is this suitable for me?", "Any problem if I don't exercise?", "I'm pregnant, is this ok?"), the usage description MUST EXPLICITLY mention that specific circumstance to return {"is_unanswered": false}.
+   General usage instructions (dosage, frequency, how to take) do NOT answer suitability questions about personal circumstances.
+   If the specific circumstance is not explicitly addressed → return {"is_unanswered": true}.
+
+2. SPECIFIC DETAIL QUESTIONS:
+   If the customer asks about a specific detail (e.g. "how many times per day", "can I mix with water"), the usage description must contain that specific information to return {"is_unanswered": false}.
+
+3. GENERAL USAGE QUESTIONS:
+   Return {"is_unanswered": false} only when the usage description clearly and directly addresses what the customer asked — not merely when it is on the same general topic.
+
+4. WHEN IN DOUBT → return {"is_unanswered": true} (fail closed — escalate rather than guess).
 
 Examples:
 - Customer: "sa here ne dite" / Description includes "Perdoret 1 here ne dite" → {"is_unanswered": false}
 - Customer: "how many times per day" / Description includes "Use once per day" → {"is_unanswered": false}
-- Customer: "can pregnant women use it" / Description only mentions frequency and age limit → {"is_unanswered": true}
+- Customer: "can pregnant women use it" / Description only mentions frequency → {"is_unanswered": true}
+- Customer: "I don't work out, is there any problem?" / Description says "Take 2 scoops before workout" → {"is_unanswered": true}
+- Customer: "Is this suitable for me if I don't exercise?" / Description says "Best used with regular training" → {"is_unanswered": true}
+- Customer: "Can I use this without exercising?" / Description says "Take daily as directed" → {"is_unanswered": true}
 
 Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
       },
@@ -2229,6 +2403,156 @@ Return JSON exactly:
     };
   } catch {
     return { is_order_affirmation: false, confidence: 0, reason: null };
+  }
+}
+
+export interface OrderInfoUpdateFields {
+  delivery_address: string | null;
+  customer_phone: string | null;
+  customer_name: string | null;
+  notes: string | null;
+}
+
+/**
+ * Detects whether the customer's latest message is providing updated information
+ * for an order they have already placed (corrected address, phone, name, or notes).
+ * Also extracts the new field values from the message and conversation context.
+ *
+ * Intended to run AFTER the cancel/refund, wrong-product, and post-purchase-support
+ * detectors so those higher-priority escalations always win.
+ */
+export async function detectOrderInfoUpdateIntent(
+  inboundMessage: string,
+  conversationHistory: Message[],
+): Promise<{
+  is_order_info_update: boolean;
+  fields: OrderInfoUpdateFields;
+  confidence: number;
+  reason: string | null;
+}> {
+  const defaultResult = {
+    is_order_info_update: false,
+    fields: { delivery_address: null, customer_phone: null, customer_name: null, notes: null },
+    confidence: 0,
+    reason: null,
+  };
+
+  const inbound = inboundMessage.trim();
+  if (!inbound) return defaultResult;
+
+  const historySlice = conversationHistory.slice(-10);
+  const historyText = historySlice
+    .map((msg) => {
+      const who = msg.sent_by === 'customer' ? 'Customer' : 'Agent';
+      return `${who}: ${(msg.content ?? '').trim()}`;
+    })
+    .join('\n');
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a precise intent classifier and information extractor for an order management system.
+
+Determine whether the customer's LATEST message is providing new/updated information for an order they have ALREADY placed (correcting a delivery address, phone number, name, or delivery notes).
+
+This IS an order info update when ANY of the following apply:
+- The agent previously asked the customer for a new address/phone/name/notes, and the customer is now providing that value.
+- The customer explicitly says they want to change/update/correct their address, phone, name, or delivery notes AND provides the new value in the same message.
+- The customer says "I made a mistake, my [field] is actually [value]".
+- The customer says "my new address is ...", "change my phone to ...", "my name is actually ...", etc.
+
+This is NOT an order info update when:
+- The customer is providing info for the FIRST time as part of placing a new order (not a correction).
+- The customer is only asking to change something WITHOUT providing the new value (e.g. "can I change my address?" — no new value given).
+- The customer is asking for a cancellation or refund.
+- The customer is asking a general question or making small talk.
+- The message is ambiguous and could equally be a new-order data payload.
+
+Extract the new field values ONLY from the latest customer message (use context to disambiguate, but extract values from the latest message):
+- delivery_address: The COMPLETE new delivery address (street, number, city, any detail the customer provides).
+- customer_phone: The new phone number (preserve digits, spaces, dashes as provided).
+- customer_name: The new first name or full name.
+- notes: New delivery instructions, special requests, or notes.
+
+Return null for any field the customer is NOT updating in this message.
+
+Return ONLY JSON:
+{
+  "is_order_info_update": boolean,
+  "fields": {
+    "delivery_address": string | null,
+    "customer_phone": string | null,
+    "customer_name": string | null,
+    "notes": string | null
+  },
+  "confidence": number,
+  "reason": string | null
+}`,
+        },
+        {
+          role: 'user',
+          content: `Conversation context (most recent messages):\n${historyText || '(none)'}\n\nLatest customer message:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 350,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw?.trim()) return defaultResult;
+
+    const parsed = JSON.parse(raw) as {
+      is_order_info_update?: boolean;
+      fields?: {
+        delivery_address?: string | null;
+        customer_phone?: string | null;
+        customer_name?: string | null;
+        notes?: string | null;
+      };
+      confidence?: number;
+      reason?: string | null;
+    };
+
+    const is_order_info_update = parsed.is_order_info_update === true;
+    let confidence = parseModelClassifierConfidence(parsed.confidence);
+    if (is_order_info_update && confidence === 0) confidence = 0.85;
+
+    const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
+    const fields: OrderInfoUpdateFields = {
+      delivery_address:
+        typeof parsed.fields?.delivery_address === 'string'
+          ? parsed.fields.delivery_address.trim() || null
+          : null,
+      customer_phone:
+        typeof parsed.fields?.customer_phone === 'string'
+          ? parsed.fields.customer_phone.trim() || null
+          : null,
+      customer_name:
+        typeof parsed.fields?.customer_name === 'string'
+          ? parsed.fields.customer_name.trim() || null
+          : null,
+      notes:
+        typeof parsed.fields?.notes === 'string'
+          ? parsed.fields.notes.trim() || null
+          : null,
+    };
+
+    return {
+      is_order_info_update,
+      fields,
+      confidence,
+      reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
+    };
+  } catch (err) {
+    console.warn('[order_info_update_classifier] failed, returning default', {
+      error: err instanceof Error ? err.message : String(err),
+      message_preview: inbound.slice(0, 80),
+    });
+    return defaultResult;
   }
 }
 
@@ -2761,26 +3085,15 @@ export async function generateReply(
 
   // Context-only follow-ups (price, usage, attributes, "tell me more") must use the
   // product group the assistant just discussed — not re-search the short follow-up alone.
+  // resolveContextualProductSet prefers the deterministic persisted product IDs from the
+  // most recent recommendation, then falls back to anchor-based and assistant-text lookups.
   if (needsConversationProductContext(searchText)) {
-    const fromContext = await resolveProductsForContextualQuery(
+    products = await resolveContextualProductSet(
       tenantId,
       searchText,
       conversationHistoryWindow,
-      matchProductsForCustomerMessage,
       contextualMatchLimit,
     );
-    if (fromContext.length > 0) {
-      products = fromContext;
-    } else {
-      const fromHistory = await resolveProductsFromConversationHistory(
-        tenantId,
-        conversationHistoryWindow,
-        contextualMatchLimit,
-      );
-      if (fromHistory.length > 0) {
-        products = fromHistory;
-      }
-    }
   }
 
   if (products.length === 0 && searchText) {
@@ -2799,32 +3112,63 @@ export async function generateReply(
   // isPhotoProductReferenceFollowUp covers messages like "I want the product from the
   // photo I sent you" where the current message has no product name but refers back to
   // a product identified by the vision pipeline in a prior turn.
+  // attributeIntent.is_attribute_question covers longer natural-language attribute questions
+  // like "What is the brand of this product?" that don't match the short-form regex patterns
+  // but are clearly about the previously discussed product.
   if (
     products.length === 0 &&
     (customerAskedPrice ||
+      customerAskedDiscount ||
+      attributeIntent.is_attribute_question ||
+      attributeIntent.is_product_knowledge_question ||
       isUsageOnlyFollowUp(searchText) ||
       isVagueProductReferenceFollowUp(searchText) ||
       isCategoryAttributeFollowUp(searchText) ||
       isPhotoProductReferenceFollowUp(searchText)) &&
     conversationHistoryWindow.length > 0
   ) {
-    const fromContext = await resolveProductsForContextualQuery(
+    products = await resolveContextualProductSet(
       tenantId,
       searchText,
       conversationHistoryWindow,
-      matchProductsForCustomerMessage,
       contextualMatchLimit,
     );
-    if (fromContext.length > 0) {
-      products = fromContext;
-    } else {
-      const fromHistory = await resolveProductsFromConversationHistory(
-        tenantId,
-        conversationHistoryWindow,
-        contextualMatchLimit,
+  }
+
+  // Deterministic safety net: never claim a previously identified product is missing.
+  // If every retrieval path above came back empty but the customer is following up about
+  // products the AI already discussed, reuse the persisted product IDs from the most
+  // recent recommendation instead of producing a "not in catalog" reply.
+  //
+  // The follow-up decision is made by the cheap heuristics first and, only if they don't
+  // already match, by an LLM classifier — so misspelled/dialect/slang follow-ups about
+  // ANY attribute ("sa kshtjn", "qfar shejsh", "a ka stok", "cila marke") are caught by
+  // meaning, not exact keywords. The LLM call is paid only on this rare empty-retrieval
+  // path where we have persisted products to fall back on, never on the happy path.
+  if (products.length === 0 && conversationHistoryWindow.length > 0) {
+    const persisted = await resolveProductsFromPersistedContext(
+      tenantId,
+      conversationHistoryWindow,
+      contextualMatchLimit,
+    );
+    if (persisted.length > 0) {
+      const heuristicFollowUp = isProductFollowUpReference(
+        searchText,
+        attributeIntent,
+        customerAskedPrice,
+        customerAskedDiscount,
       );
-      if (fromHistory.length > 0) {
-        products = fromHistory;
+      const isFollowUp =
+        heuristicFollowUp || (await classifyContextualProductFollowUp(searchText, persisted));
+      if (isFollowUp) {
+        products = persisted;
+        console.info('[aiService] Reused persisted product context for follow-up', {
+          conversationId,
+          tenantId,
+          productIds: persisted.map((p) => p.id),
+          query: searchText.slice(0, 120),
+          detectedBy: heuristicFollowUp ? 'heuristic' : 'classifier',
+        });
       }
     }
   }
@@ -2835,17 +3179,22 @@ export async function generateReply(
   // errored). This log helps operators diagnose the problem quickly.
   if (products.length === 0 && searchText.length > 0 && totalCatalogCount > 0) {
     countProductsWithoutEmbeddings(tenantId)
-      .then((missing) => {
+      .then(async (missing) => {
         if (missing > 0) {
+          // Self-heal: immediately queue high-priority embedding jobs for this
+          // tenant's un-embedded products so the *next* message in the conversation
+          // is answered correctly — no manual "Backfill embeddings" action and no
+          // waiting for the periodic reconcile. Idempotent via jobId dedup.
+          const requeued = await enqueueMissingEmbeddingsForTenant(tenantId).catch(() => 0);
           console.warn(
-            '[aiService] No products matched for non-empty query — embedding coverage gap detected',
+            '[aiService] No products matched for non-empty query — embedding coverage gap detected; auto-healing',
             {
               tenantId,
               conversationId,
               totalActiveProducts: totalCatalogCount,
               productsWithoutEmbedding: missing,
               coveragePct: Math.round(((totalCatalogCount - missing) / totalCatalogCount) * 100),
-              hint: 'Run POST /admin/businesses/:tenantId/products/backfill-embeddings to repair',
+              embeddingJobsRequeued: requeued,
             },
           );
         }
@@ -2934,6 +3283,25 @@ export async function generateReply(
     );
     if (aggregation) {
       resolvedProductCatalogContext += `\n\n${aggregation}`;
+    }
+  }
+
+  // Verified packaging-derived attributes: when a matched product's structured catalog
+  // fields are empty, surface high-confidence facts read by the vision system from the
+  // product's own images (brand, flavor, servings, and any other readable label fact).
+  // This lets the AI answer from images instead of escalating when the answer is on the
+  // packaging. Applies to BOTH text-only and photo-upload conversations. Skipped when
+  // the product is not in the catalog (nothing to enrich).
+  let imageDerivedAttributeContext: string | null = null;
+  if (products.length > 0 && !productNotInCatalog) {
+    try {
+      const imageDerived = await getProductImageDerivedContext(tenantId, products);
+      imageDerivedAttributeContext = imageDerived.block;
+      if (imageDerivedAttributeContext) {
+        resolvedProductCatalogContext += `\n\n${imageDerivedAttributeContext}`;
+      }
+    } catch (err) {
+      console.warn('[aiService] image-derived attribute context failed', { tenantId, err });
     }
   }
 
@@ -3030,6 +3398,7 @@ Product-image match uncertainty (IMPORTANT):
     systemPrompt += aggregationInstructions;
   }
 
+  systemPrompt += SHORTEST_ANSWER_APPEND;
   systemPrompt += PRODUCT_DESCRIPTION_CONCISE_APPEND;
   if (descriptionQuestionTurn) {
     systemPrompt += PRODUCT_DESCRIPTION_TARGETED_APPEND;
@@ -3038,9 +3407,19 @@ Product-image match uncertainty (IMPORTANT):
     systemPrompt += `
 
 Product attribute question (IMPORTANT):
-- Answer using ONLY catalog facts and the aggregated attribute summary when present.
+- Answer using catalog facts, the aggregated attribute summary, and any "Verified packaging details read from product images" block when present.
 - List every distinct attribute value across ALL matching products in scope.
-- If the requested attribute is missing from the catalog, say you do not have that detail — do not guess.`;
+- If the requested attribute is missing from BOTH the catalog and the verified packaging details, say you do not have that detail — do not guess.`;
+  }
+
+  if (imageDerivedAttributeContext) {
+    systemPrompt += `
+
+Using packaging-derived details (IMPORTANT — source precedence):
+- Prefer the structured catalog data above. When a detail is missing there but appears in the "Verified packaging details read from product images" block, you MAY answer using that value.
+- These packaging values were read directly from the product's own photos by the vision system, so they are reliable enough to state — briefly note that the detail comes from the product image/label (e.g. "based on the product packaging, ...").
+- Only use values listed in that block. Never infer, estimate, or guess a value that is not shown there or in the catalog. If a detail is absent from both sources, say you do not have it.
+- Do not contradict the structured catalog: if the catalog already states a value, use the catalog value.`;
   }
 
   const systemPromptTokenEstimate = estimateTokens(systemPrompt);
@@ -3172,7 +3551,11 @@ Product attribute question (IMPORTANT):
     reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
     productCatalogContext: resolvedProductCatalogContext,
     language,
-    matchedProducts: products,
+    // When the alphabetical catalog sample was injected as generic context (e.g. a
+    // greeting), those rows are not products matched to the customer's query — exclude
+    // them so they are not persisted as "previously discussed products" and wrongly
+    // reused on a later follow-up.
+    matchedProducts: usedFullCatalogFallback ? [] : products,
     attributeIntent,
     hadImages: hasImages,
     productNotInCatalog,

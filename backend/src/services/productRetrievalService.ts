@@ -1,7 +1,6 @@
 import type { Message } from '../db/models/message';
 import {
   findVariantSiblingProducts,
-  searchProducts,
   type Product,
 } from '../db/models/product';
 
@@ -55,8 +54,14 @@ const ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
   /^(flavou?rs?|sizes?|colors?|variants?|brands?|shije(?:t|sh)?|madh[eë]si(?:t|ve)?|ngjyra(?:t|ve)?)(\s*[.!?]*)?$/i,
 ];
 
+// NOTE: these patterns are tested against normalizeMessageText() output, which is
+// lowercased and diacritic-stripped — so ascii forms (e.g. "cmimi", "kushtojne")
+// already cover their diacritic spellings ("çmimi", "kushtojnë").
 const CONTEXT_ONLY_FOLLOW_UP_PATTERNS: RegExp[] = [
-  /^(sa\s+)?(kushton|kushtojne|kushtojnë|cmimi|cmim|çmimi|çmim|qmimi|price|cost)(\s*[.!?]*)?$/i,
+  // Price questions with an optional trailing deictic pronoun referring to the
+  // previously discussed product(s) — covers informal/plural Albanian spellings
+  // ("sa kushton", "sa kushtojn", "sa kushtojne") and "... kto/keto/keta/ato/them".
+  /^(sa\s+)?(kushton|kushtojn|kushtojne|kushtoj|kushtoi|kushtuan|cmimi|cmim|qmimi|qmim|price|cost|how much)(\s+(kto|keto|kete|keta|ato|ate|atyre|tyre|this|these|them|it))?(\s*[.!?]*)?$/i,
   /^(tell me more|more about (it|this)|about (it|this)|this one|that one)(\s*[.!?]*)?$/,
   /^(me shum|më shumë|per te|për të|rreth tij|rreth kesaj)(\s*[.!?]*)?$/,
 ];
@@ -79,10 +84,39 @@ export function isCategoryAttributeFollowUp(message: string, maxLength = 250): b
   return ATTRIBUTE_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
 }
 
-function isContextOnlyFollowUp(message: string): boolean {
+export function isContextOnlyFollowUp(message: string): boolean {
   const t = normalizeMessageText(message);
   if (!t || t.length > 100) return false;
   return CONTEXT_ONLY_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
+}
+
+/**
+ * Patterns for natural-language attribute questions that reference the previously
+ * discussed product without naming it (e.g. "What is the brand of this product?",
+ * "Tell me the price", "What is the price?").
+ *
+ * These messages should be skipped when searching for the conversation product anchor
+ * so that the earlier substantive product query is used instead.
+ */
+const NATURAL_LANGUAGE_ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
+  // "What is the [attribute]..." / "Which is the [attribute]..." forms
+  /\b(what|which)\s+is\s+(?:the\s+)?(?:brand|flavou?r|size|colou?r|variant|weight|category|price|cost)\b/i,
+  // "Tell me (the) [attribute]" / "Show me (the) [attribute]"
+  /\b(?:tell|show)\s+me\s+(?:the\s+)?(?:brand|flavou?r|size|colou?r|variant|weight|category|price|cost)\b/i,
+  // "[attribute] of this/it/that" — deictic reference to the current product
+  /\b(?:brand|flavou?r|size|colou?r|variant|weight|category|price|cost)\s+(?:of\s+)?(?:this|it|that)\b/i,
+];
+
+/**
+ * Whether the message is a natural-language attribute follow-up that references the
+ * previously discussed product without naming a new one (e.g. "What is the brand of
+ * this product?", "Tell me the price"). Used in anchor extraction to skip these
+ * messages and find the earlier substantive product query instead.
+ */
+function isNaturalLanguageAttributeFollowUp(message: string): boolean {
+  const t = normalizeMessageText(message);
+  if (!t || t.length > 200) return false;
+  return NATURAL_LANGUAGE_ATTRIBUTE_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
 }
 
 function extractKeywords(text: string): string[] {
@@ -118,7 +152,11 @@ export function extractConversationProductAnchor(messages: Message[]): string | 
     if (msg.sent_by !== 'customer') continue;
     const text = (msg.content ?? '').trim();
     if (!text || text.length < 3) continue;
-    if (isCategoryAttributeFollowUp(text) || isContextOnlyFollowUp(text)) continue;
+    if (
+      isCategoryAttributeFollowUp(text) ||
+      isContextOnlyFollowUp(text) ||
+      isNaturalLanguageAttributeFollowUp(text)
+    ) continue;
     const keywords = extractKeywords(text);
     if (keywords.length > 0) return text;
   }
@@ -150,12 +188,16 @@ function dedupeProducts(products: Product[]): Product[] {
 /**
  * When several products already match, expand using anchor keywords from the
  * prior conversation turn (e.g. "creatine" from "Do you have creatine?").
+ *
+ * Uses the injected matchFn (the same RRF-fused search as the main product lookup)
+ * so that expansion benefits from semantic similarity, not just keyword matching.
  */
 async function expandProductGroupMatches(
   tenantId: string,
   products: Product[],
   anchorText: string | null,
   limit: number,
+  matchFn: ProductMatchFn,
 ): Promise<Product[]> {
   if (products.length === 0) return products;
 
@@ -165,7 +207,7 @@ async function expandProductGroupMatches(
     const keywords = extractKeywords(anchorText).slice(0, 4);
     for (const kw of keywords) {
       if (kw.length < 4) continue;
-      expanded.push(...(await searchProducts(tenantId, kw, limit)));
+      expanded.push(...(await matchFn(tenantId, kw, limit)));
     }
   }
 
@@ -175,6 +217,12 @@ async function expandProductGroupMatches(
 /**
  * Resolve products for context-dependent follow-ups by anchoring on the prior
  * product/category discussion instead of the short follow-up text alone.
+ *
+ * @param forceAnchorLookup - When true, always attempt anchor-based resolution
+ *   regardless of message patterns. Use this for any message that has already been
+ *   classified as a contextual follow-up (e.g. attribute questions, price questions)
+ *   where the message itself may not match the short-form regex patterns but should
+ *   still resolve against the previously discussed product.
  */
 export async function resolveProductsForContextualQuery(
   tenantId: string,
@@ -182,15 +230,18 @@ export async function resolveProductsForContextualQuery(
   conversationHistory: Message[],
   matchProducts: ProductMatchFn,
   limit: number,
+  forceAnchorLookup = false,
 ): Promise<Product[]> {
   const anchor = extractConversationProductAnchor(conversationHistory);
   const needsAnchor =
-    isCategoryAttributeFollowUp(inboundMessage) || isContextOnlyFollowUp(inboundMessage);
+    forceAnchorLookup ||
+    isCategoryAttributeFollowUp(inboundMessage) ||
+    isContextOnlyFollowUp(inboundMessage);
 
   if (needsAnchor && anchor) {
     const fromAnchor = await matchProducts(tenantId, anchor, limit);
     if (fromAnchor.length > 0) {
-      return expandProductGroupMatches(tenantId, fromAnchor, anchor, limit);
+      return expandProductGroupMatches(tenantId, fromAnchor, anchor, limit, matchProducts);
     }
   }
 
@@ -205,7 +256,7 @@ export async function resolveProductsForContextualQuery(
       const combined = assistantTexts.join('\n');
       const fromHistory = await matchProducts(tenantId, combined, limit);
       if (fromHistory.length > 0) {
-        return expandProductGroupMatches(tenantId, fromHistory, anchor, limit);
+        return expandProductGroupMatches(tenantId, fromHistory, anchor, limit, matchProducts);
       }
     }
   }
@@ -460,8 +511,8 @@ export function buildProductKnowledgeContext(products: Product[]): string {
 
       const priceLabel =
         p.discounted_price != null
-          ? `Price: ${p.price} (discounted: ${p.discounted_price})`
-          : `Price: ${p.price}`;
+          ? `Price: €${p.price} (discounted: €${p.discounted_price})`
+          : `Price: €${p.price}`;
 
       return [
         `Product: ${p.name}`,

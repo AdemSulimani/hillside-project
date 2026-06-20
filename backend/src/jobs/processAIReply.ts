@@ -1,4 +1,4 @@
-import crypto from 'crypto';
+﻿import crypto from 'crypto';
 import pool from '../db/pool';
 import { redisConnection } from './redisConnection';
 import { findChannelById } from '../db/models/channel';
@@ -23,6 +23,8 @@ import {
   findLatestOpenOrderForContactForEscalation,
   markOrderCancellationRequested,
   markOrderRefundRequested,
+  updateOrderCustomerInfoForAI,
+  type UpdateOrderCustomerInfoInput,
 } from '../db/models/order';
 import { findActiveProductNamesForTenant } from '../db/models/product';
 import { resolveOrderProduct } from '../services/orderProductResolutionService';
@@ -34,14 +36,15 @@ import {
   classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
   classifyUsageQuestionIntent,
+  containsSpeculativeHealthAdvice,
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
+  detectOrderInfoUpdateIntent,
   detectPostPurchaseSupportIntent,
   detectWrongProductIntent,
   detectReplyLanguage,
   generateReply,
   isOutOfStockProductReply,
-  isProductKnowledgeQuestionUnanswered,
   isUsageQuestionUnanswered,
   type ReplyLocale,
 } from '../services/aiService';
@@ -50,7 +53,21 @@ import {
   buildOrderConfirmationDeliveryLine,
   ensureOrderConfirmationDeliveryAndFollowUp,
 } from '../services/orderConfirmationFormatting';
-import { buildProductKnowledgeContext } from '../services/productRetrievalService';
+import {
+  buildProductKnowledgeContext,
+  detectRequestedAttributes,
+  getProductStructuredAttributes,
+} from '../services/productRetrievalService';
+import { getProductImageDerivedContext } from '../services/productImageAttributeService';
+import { assessProductInformationRequest } from '../services/productInformationGapService';
+import {
+  buildMissingInfoHoldingMessage,
+  composePartialAnswer,
+  computeMissingStructuredAttributes,
+  dedupeInfoLabels,
+  deriveAnswerabilityStatus,
+  localizedAttributeLabels,
+} from '../services/productInformationGapHelpers';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -62,6 +79,7 @@ import { detect } from '../services/intentDetectionService';
 import { sendMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
 import { logEvent } from '../services/analyticsService';
+import { getHumanHoldMinutes } from '../services/conversationService';
 import { aiQueue } from './queues';
 
 export interface AIReplyJobData {
@@ -369,6 +387,133 @@ async function shouldStillSendAutomatedReply(args: {
   return { ok: true };
 }
 
+/** Extra delay added past the human-hold expiry so the rescheduled job never races the hold. */
+const HUMAN_HOLD_RESCHEDULE_BUFFER_MS = 5_000;
+
+/**
+ * The human hold now auto-releases after a short window (see getHumanHoldMinutes). When an
+ * ai.reply job lands while the hold is still active, we re-enqueue the same job to run just
+ * after the hold expires so customer messages sent during the hold still get an AI reply —
+ * but only when:
+ *  - the hold is within the expected auto-release window (anomalously long holds keep the
+ *    old skip behaviour),
+ *  - this job is still the one scheduled for the latest inbound message (a newer inbound
+ *    has its own job), and
+ *  - the human has not already answered that latest inbound message.
+ */
+async function rescheduleReplyAfterHumanHold(
+  data: AIReplyJobData,
+  holdUntil: Date,
+): Promise<void> {
+  const { tenantId, conversationId } = data;
+  const remainingMs = holdUntil.getTime() - Date.now();
+  if (remainingMs <= 0) return;
+
+  const maxRescheduleMs = getHumanHoldMinutes() * 60_000 + 60_000;
+  if (remainingMs > maxRescheduleMs) {
+    console.info('[ai.reply] Human hold exceeds auto-release window, not rescheduling', {
+      conversationId,
+      holdUntil,
+    });
+    return;
+  }
+
+  const latestMessages = await findMessagesByConversation(conversationId, 8);
+  const latestInbound = [...latestMessages].reverse().find((msg) => msg.direction === 'inbound');
+  if (!latestInbound || latestInbound.external_message_id !== data.messageExternalId) {
+    // A newer inbound message exists; its own ai.reply job will handle the conversation.
+    return;
+  }
+
+  const { rows } = await pool.query<{ has_human_outbound: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM messages
+       WHERE conversation_id = $1 AND tenant_id = $2
+         AND direction = 'outbound'
+         AND sent_by = 'human'
+         AND created_at > $3
+     ) AS has_human_outbound`,
+    [conversationId, tenantId, latestInbound.created_at],
+  );
+  if (rows[0]?.has_human_outbound) {
+    // The human already answered the latest customer message — nothing for AI to do.
+    return;
+  }
+
+  const delay = remainingMs + HUMAN_HOLD_RESCHEDULE_BUFFER_MS;
+  await aiQueue.add('ai.reply', data, { delay });
+  console.info('[ai.reply] Human hold active — rescheduled reply for after auto-release', {
+    conversationId,
+    holdUntil,
+    delayMs: delay,
+  });
+}
+
+/**
+ * Hours of message inactivity that mark the start of a new conversation session.
+ * Used only for the commission decision on AI-created orders.
+ */
+const COMMISSION_SESSION_GAP_HOURS = (() => {
+  const parsed = Number(process.env.COMMISSION_SESSION_GAP_HOURS ?? '3');
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
+})();
+
+/**
+ * Decides whether a human agent participated in the conversation window that led to the
+ * order being created right now.
+ *
+ * The window starts at the later of:
+ *  - the start of the current message session (first message after a gap of
+ *    COMMISSION_SESSION_GAP_HOURS or more), and
+ *  - the creation of the previous order in this conversation (a new order implies a new
+ *    engagement, even within the same session).
+ *
+ * This intentionally replaces the sticky `conversations.human_replied` flag for the
+ * commission decision: a human reply in a past conversation/order must not permanently
+ * disqualify future fully-AI-handled orders in the same chat thread.
+ */
+async function hasHumanParticipationInCurrentOrderWindow(
+  conversationId: string,
+  tenantId: string,
+): Promise<boolean> {
+  const { rows } = await pool.query<{ human_in_window: boolean }>(
+    `WITH recent_messages AS (
+       SELECT created_at, direction, sent_by
+       FROM messages
+       WHERE conversation_id = $1
+         AND tenant_id = $2
+         AND created_at > NOW() - INTERVAL '30 days'
+     ),
+     gaps AS (
+       SELECT created_at,
+              LAG(created_at) OVER (ORDER BY created_at) AS prev_created_at
+       FROM recent_messages
+     ),
+     session_start AS (
+       SELECT COALESCE(MAX(created_at), NOW() - INTERVAL '30 days') AS started_at
+       FROM gaps
+       WHERE prev_created_at IS NULL
+          OR created_at - prev_created_at > ($3::numeric * INTERVAL '1 hour')
+     ),
+     previous_order AS (
+       SELECT MAX(created_at) AS last_order_at
+       FROM orders
+       WHERE conversation_id = $1 AND tenant_id = $2
+     )
+     SELECT EXISTS (
+       SELECT 1
+       FROM recent_messages m
+       CROSS JOIN session_start s
+       CROSS JOIN previous_order p
+       WHERE m.direction = 'outbound'
+         AND m.sent_by = 'human'
+         AND m.created_at >= GREATEST(s.started_at, COALESCE(p.last_order_at, s.started_at))
+     ) AS human_in_window`,
+    [conversationId, tenantId, COMMISSION_SESSION_GAP_HOURS],
+  );
+  return rows[0]?.human_in_window === true;
+}
+
 function isUsageEscalationHoldingMessage(value: string): boolean {
   const normalized = normalizeEscalationMessage(value);
   const exactCandidates = [
@@ -397,7 +542,12 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
 
 const HOLDING_MESSAGES: Record<
   ReplyLocale,
-  { postPurchaseSupport: string; usageEscalation: string; productKnowledgeEscalation: string }
+  {
+    postPurchaseSupport: string;
+    usageEscalation: string;
+    productKnowledgeEscalation: string;
+    orderInfoUpdated: string;
+  }
 > = {
   sq: {
     postPurchaseSupport:
@@ -406,6 +556,8 @@ const HOLDING_MESSAGES: Record<
       'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
     productKnowledgeEscalation:
       'Përshëndetje, së shpejti do t’ju kontaktojë një specialist me informacion të saktë për produktin.',
+    orderInfoUpdated:
+      'Informacioni i porosinës suaj është përditësuar me sukses. Faleminderit për porosinën tuaj!',
   },
   en: {
     postPurchaseSupport:
@@ -414,6 +566,8 @@ const HOLDING_MESSAGES: Record<
       'Hello, a specialist from our team will contact you shortly regarding this matter.',
     productKnowledgeEscalation:
       'Hello, a product specialist from our team will contact you shortly with accurate product details.',
+    orderInfoUpdated:
+      'Your order information has been updated successfully. Thank you for your order!',
   },
 };
 
@@ -1053,6 +1207,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       conversationId,
       until: conversation.human_override_until,
     });
+    // The hold auto-releases shortly; make sure the customer's latest message still gets a
+    // reply afterwards instead of leaving the conversation silent.
+    await rescheduleReplyAfterHumanHold(data, new Date(conversation.human_override_until));
     return;
   }
 
@@ -1527,6 +1684,132 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         }
         return;
       }
+      // ---- Order information update (customer correcting address / phone / name / notes) ----
+      const orderInfoUpdateIntent = await detectOrderInfoUpdateIntent(inboundText, recentMessages);
+      console.info(
+        `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
+      );
+      if (orderInfoUpdateIntent.is_order_info_update && orderInfoUpdateIntent.confidence > 0.75) {
+        const extractedFields = orderInfoUpdateIntent.fields;
+        const fieldsToUpdate: UpdateOrderCustomerInfoInput = {};
+        if (extractedFields.delivery_address !== null) {
+          fieldsToUpdate.delivery_address = extractedFields.delivery_address;
+        }
+        if (extractedFields.customer_name !== null) {
+          fieldsToUpdate.customer_name = extractedFields.customer_name;
+        }
+        if (extractedFields.customer_phone !== null) {
+          fieldsToUpdate.customer_phone = extractedFields.customer_phone;
+        }
+        if (extractedFields.notes !== null) {
+          fieldsToUpdate.notes = extractedFields.notes;
+        }
+
+        if (Object.keys(fieldsToUpdate).length > 0) {
+          const candidateOrder = await findLatestOpenOrderForContactForEscalation(
+            tenantId,
+            conversation.contact_id,
+          );
+          if (candidateOrder) {
+            // Capture previous values for the audit trail before the update
+            const previousValues: Record<string, unknown> = {};
+            const newValues: Record<string, unknown> = {};
+            for (const key of Object.keys(fieldsToUpdate) as (keyof UpdateOrderCustomerInfoInput)[]) {
+              previousValues[key] = (candidateOrder as unknown as Record<string, unknown>)[key] ?? null;
+              newValues[key] = fieldsToUpdate[key];
+            }
+
+            const updatedOrder = await updateOrderCustomerInfoForAI(
+              candidateOrder.id,
+              tenantId,
+              fieldsToUpdate,
+            );
+
+            const orderInfoUpdatePrecheck = await shouldStillSendAutomatedReply({
+              tenantId,
+              channelId,
+              conversationId,
+              scheduledInboundExternalId: data.messageExternalId,
+            });
+            if (!orderInfoUpdatePrecheck.ok) {
+              console.info('[ai.reply] Skipping order info update confirmation send', {
+                conversationId,
+                scheduledFor: data.messageExternalId,
+                reason: orderInfoUpdatePrecheck.reason,
+                ...orderInfoUpdatePrecheck.logPayload,
+              });
+              return;
+            }
+
+            const locale = inferHoldingMessageLocale(inboundText, replyLanguage);
+            const confirmationText = HOLDING_MESSAGES[locale].orderInfoUpdated;
+            const contactForSend = await findContactById(conversation.contact_id);
+            let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
+            if (contactForSend) {
+              sendResult = await sendMessage(channel, contactForSend.external_id, confirmationText);
+            }
+
+            const outboundConfirm = await createMessage({
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+              direction: 'outbound',
+              type: 'text',
+              content: confirmationText,
+              sent_by: 'ai',
+            });
+
+            const alert = await createAIAlert({
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'order_info_updated',
+              details: {
+                order_id: candidateOrder.id,
+                changed_fields: Object.keys(fieldsToUpdate),
+                previous_values: previousValues,
+                new_values: newValues,
+              },
+            });
+
+            socketService.emitAIAlert(tenantId, {
+              ...alert,
+              message_content: inboundText || null,
+              contact_name: contactForSend?.name?.trim() || 'Customer',
+              channel_type: channel.type,
+              channel_name: channel.name,
+            });
+            socketService.emitNewMessage(tenantId, outboundConfirm);
+            socketService.emitConversationUpdated(tenantId, conversationId);
+            if (updatedOrder) {
+              socketService.emitOrderUpdated(tenantId, updatedOrder);
+            }
+
+            if (sendResult && !sendResult.success) {
+              const errReason = sendResult.error ?? 'Failed to send order info update confirmation';
+              await updateMessageSendFailure(outboundConfirm.id, tenantId, 'failed', errReason);
+              socketService.emitMessageSendFailed(tenantId, {
+                messageId: outboundConfirm.id,
+                conversationId,
+                error: errReason,
+              });
+            }
+
+            console.info(`[ORDER_INFO_UPDATE] Updated order ${candidateOrder.id}`, {
+              changedFields: Object.keys(fieldsToUpdate),
+              tenantId,
+              conversationId,
+            });
+            return;
+          }
+
+          console.info('[ORDER_INFO_UPDATE] No active order found for contact, skipping update', {
+            tenantId,
+            conversationId,
+            contactId: conversation.contact_id,
+          });
+        }
+      }
     } catch (err) {
       console.warn('[ai.reply] escalation detection path failed, continuing normal flow', {
         conversationId,
@@ -1544,7 +1827,6 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     attributeIntent,
     hadImages,
     productNotInCatalog: visionProductNotInCatalog,
-    customerAskedPrice,
   } = await generateReply(
       conversationId,
       tenantId,
@@ -1798,67 +2080,211 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   let productKnowledgeEscalated = false;
-  // Price questions must never trigger product-knowledge escalation: the catalog always
-  // carries price and the AI is fully equipped to answer them. A price query that also
-  // mentions an attribute qualifier (e.g. "price of the orange-flavored one") can
-  // otherwise be mis-classified as a product-knowledge question and then fail the
-  // isProductKnowledgeQuestionUnanswered check because buildProductKnowledgeContext
-  // previously omitted price — even though the catalog does have the answer.
-  const productKnowledgeIntent =
-    !usageEscalated && inboundText && attributeIntent.is_product_knowledge_question && !customerAskedPrice;
 
-  const productKnowledgeHoldingMessage =
-    HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText, replyLocale)].productKnowledgeEscalation;
+  // ---------------------------------------------------------------------------
+  // PARTIAL PRODUCT ANSWER + attribute-level escalation
+  //
+  // When a customer asks about product information we now support THREE outcomes
+  // instead of the previous all-or-nothing escalation:
+  //   - complete : every requested detail is available  → send the AI reply as-is.
+  //   - partial  : some details available, some missing → answer what we know AND
+  //                append a "we'll notify you shortly" notice for the rest, then
+  //                escalate ONLY the missing parts.
+  //   - none     : nothing requested could be answered   → send a holding notice
+  //                naming the missing info and escalate.
+  //
+  // Crucially, when a product HAS been identified we NEVER tell the customer it is
+  // unavailable / not in the catalog — a missing attribute is a knowledge gap, not
+  // a missing product. The "no matching products" branch below preserves the
+  // existing guardrail (the AI asks the customer to clarify rather than escalating).
+  // ---------------------------------------------------------------------------
 
-  if (productKnowledgeIntent && !isOosCannedReply) {
-    // When the customer sent a photo, the vision pipeline inside generateReply already
-    // handled the response (either matched a catalog product, stated the product is not
-    // carried, or asked for clarification). Escalating here would discard that correct
-    // reply and replace it with a generic holding message — exactly the wrong behaviour.
+  // Structured attributes the customer explicitly asked about (brand, flavor, size,
+  // color, variant, weight, category). This also catches mixed "price + attribute"
+  // questions that the price intent would otherwise suppress.
+  const requestedStructuredAttributes = inboundText
+    ? detectRequestedAttributes(inboundText, attributeIntent.attributes)
+    : [];
+
+  // A product-information question needs catalog facts: an explicit product-knowledge
+  // / attribute intent, OR a detected structured attribute request. Pure price
+  // questions ("how much is X") resolve to neither, so the AI's price answer is sent
+  // untouched.
+  const isProductInformationQuestion =
+    Boolean(inboundText) &&
+    (attributeIntent.is_product_knowledge_question || requestedStructuredAttributes.length > 0);
+
+  if (!usageEscalated && isProductInformationQuestion && !isOosCannedReply) {
     if (hadImages) {
-      console.info('[ai.reply] Skipping product knowledge escalation — vision pipeline handled image query', {
+      // The vision pipeline inside generateReply already handled the photo query
+      // (matched a product, asked for clarification, or stated we don't carry it).
+      console.info('[ai.reply] Skipping product information gap handling — vision pipeline handled image query', {
         conversationId,
         tenantId,
         productNotInCatalog: visionProductNotInCatalog,
         matchedProductsCount: matchedProducts.length,
       });
-    } else {
-    const knowledgeContext = buildProductKnowledgeContext(matchedProducts);
-
-    // When zero products match the customer's query the correct behaviour is NOT to escalate:
-    // the AI already has runtime instructions to tell the customer the product is not in our
-    // catalog and to suggest relevant alternatives.  Escalating here would replace that
-    // helpful, accurate reply with a generic "a specialist will contact you" holding message,
-    // which creates a false expectation and is inappropriate when the product simply does
-    // not exist.
-    //
-    // Escalation is only warranted when the catalog DOES contain matching products but the
-    // specific attribute / technical detail asked by the customer cannot be answered from
-    // the available product data (e.g. a missing ingredient list or a technical spec we
-    // don't store).  The isProductKnowledgeQuestionUnanswered classifier handles that case.
-    let shouldEscalate = false;
-
-    if (matchedProducts.length === 0) {
-      console.info('[ai.reply] Skipping product knowledge escalation — no matching products (product not in catalog)', {
+    } else if (matchedProducts.length === 0) {
+      // No product identified → do NOT escalate and do NOT claim the product is
+      // missing. generateReply already instructed the model to ask the customer to
+      // clarify. Product-not-found phrasing is reserved for genuinely missing products.
+      console.info('[ai.reply] Skipping product information gap handling — no matching products', {
         conversationId,
         tenantId,
       });
     } else {
+      // Build the knowledge a human/LLM can answer from: structured catalog facts plus
+      // high-confidence packaging details read from the product's own images.
+      let knowledgeContext = buildProductKnowledgeContext(matchedProducts);
+      let imageUsableKeys = new Set<string>();
       try {
-        shouldEscalate = await isProductKnowledgeQuestionUnanswered(inboundText, knowledgeContext, {
-          failClosed: true,
-        });
+        const imageDerived = await getProductImageDerivedContext(tenantId, matchedProducts);
+        if (imageDerived.block) {
+          knowledgeContext += `\n\nVerified packaging details read from product images (treat as available, reliable catalog knowledge when answering):\n${imageDerived.block}`;
+        }
+        imageUsableKeys = new Set(imageDerived.usableKeys);
       } catch (err) {
-        console.warn('[ai.reply] product knowledge unanswered classifier failed — escalating', {
+        console.warn('[ai.reply] image-derived knowledge context failed', { conversationId, tenantId, err });
+      }
+
+      // Deterministic safety net: structured attributes that NO matched product can
+      // provide (neither a catalog field nor a confident packaging read) are definitely
+      // missing — independent of the LLM.
+      const deterministicMissingKeys = computeMissingStructuredAttributes(
+        requestedStructuredAttributes,
+        matchedProducts.map((p) => getProductStructuredAttributes(p)),
+        imageUsableKeys,
+      );
+
+      // LLM composer: grounded answer for what we know + labels for what we don't.
+      const assessment = await assessProductInformationRequest(inboundText, knowledgeContext, {
+        failClosed: true,
+      });
+
+      // Merge missing info: the LLM labels (customer language; covers free-form info
+      // such as ingredients) unioned with the deterministic structured labels (a
+      // guarantee we never silently drop a known-missing attribute), de-duplicated.
+      const mergedMissing = dedupeInfoLabels([
+        ...assessment.missing,
+        ...localizedAttributeLabels(deterministicMissingKeys, replyLocale),
+      ]);
+
+      const status = deriveAnswerabilityStatus(assessment.answer, mergedMissing);
+
+      // Escalate whenever the request is not fully answerable OR the assessment could
+      // not be performed (fail-closed). A fully-answerable request keeps the original,
+      // well-tuned AI reply untouched.
+      const shouldEscalate = !assessment.ok || status !== 'complete';
+
+      if (!shouldEscalate) {
+        console.info('[ai.reply] Product information fully answerable — sending AI reply as-is', {
           conversationId,
           tenantId,
-          err,
         });
-        shouldEscalate = true;
+      } else {
+        // partial → keep known info + notice; none/failure → holding notice naming the
+        // gap (or a generic notice when the gap could not be determined).
+        const escalationReply =
+          status === 'partial'
+            ? composePartialAnswer(assessment.answer, mergedMissing, replyLocale)
+            : buildMissingInfoHoldingMessage(mergedMissing, replyLocale);
+
+        const client = await pool.connect();
+        let alert: AIAlert | undefined;
+        try {
+          await client.query('BEGIN');
+          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+          alert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: lastInbound?.id ?? null,
+              reason: 'product_question_unanswered',
+              details: {
+                kind: 'product_information_gap',
+                partial: status === 'partial',
+                missing_info: mergedMissing,
+                requested_attributes: requestedStructuredAttributes,
+                customer_question: inboundText,
+                answered_info: status === 'partial' ? assessment.answer : null,
+              },
+            },
+            client,
+          );
+          await client.query('COMMIT');
+          productKnowledgeEscalated = true;
+          finalReplyText = escalationReply;
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('[ai.reply] Product information gap escalation transaction failed', {
+            conversationId,
+            tenantId,
+            err,
+          });
+        } finally {
+          client.release();
+        }
+
+        if (alert) {
+          console.info('[ai.reply] Product information gap escalation created', {
+            conversationId,
+            tenantId,
+            status,
+            missingInfo: mergedMissing,
+          });
+          const contactForAlert = await findContactById(conversation.contact_id);
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForAlert?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+          socketService.emitConversationUpdated(tenantId, conversationId);
+        }
       }
     }
+  }
 
-    if (shouldEscalate) {
+  // Speculative health advice safety net.
+  //
+  // This guard fires AFTER all previous escalation paths have been evaluated.  If the AI
+  // generated a reply that contains health-consultation language (e.g. "consult a health
+  // professional", "consult a doctor", "it is important to consult...") AND:
+  //   (a) the conversation was not already escalated, AND
+  //   (b) the customer asked a usage / suitability question, AND
+  //   (c) that advice pattern does NOT appear in the product's own usage description
+  //       (i.e. it is not catalog-backed — the AI fabricated it from training knowledge)
+  //
+  // ...then we must NOT send the speculative advice to the customer.  We escalate
+  // immediately with a holding message and create an alert for human review.
+  //
+  // This is the last line of defence for cases where the upstream classifiers
+  // (classifyUsageQuestionIntent / isUsageQuestionUnanswered) were too permissive.
+  let speculativeAdviceEscalated = false;
+  if (
+    !usageEscalated &&
+    !productKnowledgeEscalated &&
+    !isOosCannedReply &&
+    usageQuestionIntent &&
+    containsSpeculativeHealthAdvice(finalReplyText)
+  ) {
+    // Only escalate when the usage description itself does NOT already contain the same
+    // health-consultation language — if the catalog says "consult a doctor if pregnant"
+    // and the AI echoes that, it is valid catalog-backed advice, not speculation.
+    const adviceIsFromCatalog = Boolean(
+      usageDescription && containsSpeculativeHealthAdvice(usageDescription),
+    );
+
+    if (!adviceIsFromCatalog) {
+      console.info(
+        '[ai.reply] Speculative health advice detected in AI reply — escalating instead of sending',
+        { conversationId, tenantId, replyPreview: finalReplyText.slice(0, 120) },
+      );
+
+      const speculativeHoldingMessage =
+        HOLDING_MESSAGES[inferHoldingMessageLocale(inboundText, replyLocale)].usageEscalation;
       const client = await pool.connect();
       let alert: AIAlert | undefined;
       try {
@@ -1870,16 +2296,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             tenant_id: tenantId,
             conversation_id: conversationId,
             message_id: lastInbound?.id ?? null,
-            reason: 'product_question_unanswered',
+            reason: 'usage_question_unanswered',
           },
           client,
         );
         await client.query('COMMIT');
-        productKnowledgeEscalated = true;
-        finalReplyText = productKnowledgeHoldingMessage;
+        speculativeAdviceEscalated = true;
+        finalReplyText = speculativeHoldingMessage;
       } catch (err) {
         await client.query('ROLLBACK');
-        console.error('[ai.reply] Product knowledge escalation transaction failed', {
+        console.error('[ai.reply] Speculative advice escalation transaction failed', {
           conversationId,
           tenantId,
           err,
@@ -1900,10 +2326,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         socketService.emitConversationUpdated(tenantId, conversationId);
       }
     }
-    } // end else (hadImages guard)
   }
 
-  const knowledgeGapEscalated = usageEscalated || productKnowledgeEscalated;
+  const knowledgeGapEscalated = usageEscalated || productKnowledgeEscalated || speculativeAdviceEscalated;
 
   let isOrderConfirmationReply = false;
   if (!knowledgeGapEscalated && inboundText && !isOosCannedReply) {
@@ -2158,6 +2583,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     quality_score: qualityScore,
     flagged: qualityFailing,
     flag_reason: flagReason,
+    // Persist the products this reply identified so follow-up turns ("what are the
+    // prices?", "what flavors?", "are these in stock?") can deterministically reuse
+    // them instead of re-running a fragile text lookup that may fail and wrongly claim
+    // the products are not in the catalog.
+    product_ids: matchedProducts.map((p) => p.id),
   });
 
   if (qualityFailing && flagReason) {
@@ -2538,15 +2968,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
     }
 
-    const { rows: humanRows } = await pool.query<{ human_replied: boolean }>(
-      'SELECT human_replied FROM conversations WHERE id = $1 LIMIT 1',
-      [conversationId],
+    const humanInOrderWindow = await hasHumanParticipationInCurrentOrderWindow(
+      conversationId,
+      tenantId,
     );
-    const humanReplied = humanRows[0]?.human_replied === true;
-    const isCommissionable = !humanReplied;
+    const isCommissionable = !humanInOrderWindow;
     const commissionAmount = isCommissionable
       ? Math.round(totalPrice * 0.05 * 100) / 100
       : null;
+    console.info('[ai.reply] Commission decision for AI-created order', {
+      conversationId,
+      tenantId,
+      isCommissionable,
+      humanInOrderWindow,
+    });
 
     const order = await createOrder({
       tenant_id: tenantId,

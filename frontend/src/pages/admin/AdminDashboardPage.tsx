@@ -25,15 +25,17 @@ function monthLabel(monthKey: string): string {
 }
 
 export default function AdminDashboardPage() {
-  const { data: summary, isLoading: summaryLoading } = useQuery({
+  const { data: summary, isLoading: summaryLoading, isError: summaryError } = useQuery({
     queryKey: ['admin', 'dashboard', 'summary'],
     queryFn: fetchAdminDashboardSummary,
   });
 
-  const { data: series = [], isLoading: chartLoading } = useQuery({
+  const { data: series = [], isLoading: chartLoading, isError: chartError } = useQuery({
     queryKey: ['admin', 'dashboard', 'commission-by-month'],
     queryFn: fetchAdminCommissionByMonth,
   });
+
+  const hasError = summaryError || chartError;
 
   const chartData = series.map((p) => ({
     ...p,
@@ -46,6 +48,12 @@ export default function AdminDashboardPage() {
         <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
         <p className="text-sm text-muted-foreground">Platform-wide commission overview.</p>
       </div>
+
+      {hasError ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          Failed to load dashboard data. Your session may have expired — please sign in again.
+        </div>
+      ) : null}
 
       {/* AI order commission summary */}
       <div>

@@ -53,7 +53,29 @@ export interface Message {
   /** Snapshot of `content` before the very first edit was applied. */
   original_content: string | null;
   edit_history: MessageEditHistoryEntry[];
+  /**
+   * IDs of the catalog products the AI identified/recommended when generating this
+   * message. Persisted on outbound AI messages so follow-up turns ("what are the
+   * prices?", "what flavors?") can deterministically reuse the previously resolved
+   * products instead of re-running a fragile text lookup. Empty for inbound messages
+   * and for AI replies that did not surface any product.
+   */
+  product_ids: string[];
   created_at: Date;
+}
+
+function coerceProductIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }
 
 function coerceEditHistory(raw: unknown): MessageEditHistoryEntry[] {
@@ -99,6 +121,7 @@ export function mapMessageRow(row: Message): Message {
     edit_count?: unknown;
     original_content?: unknown;
     edit_history?: unknown;
+    product_ids?: unknown;
   };
   let quality_score: number | null = null;
   const rawQs = r.quality_score;
@@ -141,7 +164,30 @@ export function mapMessageRow(row: Message): Message {
     edit_count,
     original_content: typeof r.original_content === 'string' ? r.original_content : null,
     edit_history: coerceEditHistory(r.edit_history),
+    product_ids: coerceProductIds(r.product_ids),
   };
+}
+
+/**
+ * Returns the product IDs the AI most recently identified in the conversation.
+ *
+ * Scans the supplied message window from newest to oldest and returns the
+ * `product_ids` of the most recent AI message that surfaced any products. This is
+ * the deterministic source of "the products we just discussed" used to answer
+ * follow-up questions (price, brand, flavor, stock, etc.) without re-running
+ * retrieval. AI messages that surfaced no products (escalations, clarifying
+ * questions) are skipped so the last real recommendation is not forgotten.
+ *
+ * `messages` is expected oldest-first (as returned by `findMessagesByConversation`).
+ */
+export function collectRecentlyDiscussedProductIds(messages: Message[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.sent_by !== 'ai') continue;
+    const ids = Array.isArray(msg.product_ids) ? msg.product_ids : [];
+    if (ids.length > 0) return [...ids];
+  }
+  return [];
 }
 
 /** Snapshot text + first media URL from a stored message for reply_to_* columns. */
@@ -177,6 +223,8 @@ export interface CreateMessageInput {
   quality_score?: number | null;
   flagged?: boolean;
   flag_reason?: string | null;
+  /** Catalog product IDs the AI identified/recommended for this message. */
+  product_ids?: string[];
 }
 
 export async function findMessageByIdForTenant(
@@ -276,8 +324,8 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
   const { rows } = await pool.query<Message>(
     `INSERT INTO messages (
       tenant_id, conversation_id, external_message_id, direction, type, content, attachment_urls, sent_by,
-      quality_score, flagged, flag_reason
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, COALESCE($10, false), $11)
+      quality_score, flagged, flag_reason, product_ids
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, COALESCE($10, false), $11, $12::jsonb)
     RETURNING *`,
     [
       input.tenant_id,
@@ -291,6 +339,7 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
       input.quality_score ?? null,
       input.flagged ?? false,
       input.flag_reason ?? null,
+      JSON.stringify(coerceProductIds(input.product_ids)),
     ],
   );
 
@@ -501,6 +550,34 @@ export async function existsOutboundAfter(
     [conversationId, tenantId, afterCreatedAt],
   );
   return rows[0]?.exists === true;
+}
+
+/**
+ * Finds a recently-persisted outbound message in the conversation whose content matches
+ * `content` (NULL-safe). Used to de-duplicate Meta echoes of messages we already stored
+ * (the AI reply / inbox-UI reply) when the echo's `mid` differs from the id we recorded at
+ * send time, so an echo never produces a duplicate row in the thread.
+ */
+export async function findRecentOutboundMessageByContent(
+  conversationId: string,
+  tenantId: string,
+  content: string | null,
+  withinMs: number,
+): Promise<Message | null> {
+  const since = new Date(Date.now() - Math.max(0, withinMs));
+  const { rows } = await pool.query<Message>(
+    `SELECT * FROM messages
+     WHERE conversation_id = $1
+       AND tenant_id = $2
+       AND direction = 'outbound'
+       AND created_at >= $3
+       AND content IS NOT DISTINCT FROM $4
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [conversationId, tenantId, since, content ?? null],
+  );
+  const row = rows[0];
+  return row ? mapMessageRow(row) : null;
 }
 
 /** Most recent `limit` messages, oldest-first within the window (for transcripts). */

@@ -275,6 +275,38 @@ export async function findProductById(
   return rows[0] ?? null;
 }
 
+/**
+ * Fetches active (non-deleted) products by ID for a tenant, preserving the order of
+ * the supplied `ids`. Used to deterministically reload the products the AI previously
+ * identified/recommended so follow-up questions reuse them instead of re-running a
+ * fragile text lookup. Products that were deleted or deactivated since they were
+ * recommended are silently dropped (they should no longer be offered to the customer).
+ */
+export async function findActiveProductsByIds(
+  tenantId: string,
+  ids: string[],
+): Promise<Product[]> {
+  const unique = [...new Set(ids.filter((id) => typeof id === 'string' && id.trim().length > 0))];
+  if (unique.length === 0) return [];
+
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1
+       AND deleted_at IS NULL
+       AND is_active = true
+       AND id = ANY($2::uuid[])`,
+    [tenantId, unique],
+  );
+
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const ordered: Product[] = [];
+  for (const id of unique) {
+    const row = byId.get(id);
+    if (row) ordered.push(row);
+  }
+  return ordered;
+}
+
 export async function updateProduct(
   id: string,
   tenantId: string,

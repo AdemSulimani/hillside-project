@@ -13,6 +13,14 @@ export interface InboundMessageDTO {
   replyToExternalId?: string;
   /** True when Meta delivers a message echo (e.g. native Instagram app reply). */
   isEcho?: boolean;
+  /**
+   * For Meta echoes (`isEcho === true`): the `message.app_id` reported by the platform, when
+   * present. Meta only includes `app_id` when the echoed message was sent through the Send API
+   * (our AI / our inbox UI). Echoes of messages typed by a human agent in Meta's native tools
+   * (Page Inbox, Business Suite, Messenger/Instagram app) carry NO `app_id`. This is the signal
+   * used to tell an automated/API send apart from a genuine human-agent handoff.
+   */
+  echoAppId?: string | null;
   /** Inbound stored but AI reply job is skipped (reactions; stickers; emoji-only is filtered in the AI job). */
   skipAiReply?: boolean;
   channelExternalId: string;
@@ -57,6 +65,32 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
   }
   return null;
+}
+
+/**
+ * Reads `message.app_id` from a Meta echo payload, normalising the numeric/string forms Meta
+ * uses into a trimmed string. Returns `null` when absent (the human-agent native-send case).
+ */
+function readEchoAppId(message: Record<string, unknown> | null): string | null {
+  if (!message) return null;
+  const appId = message.app_id;
+  if (typeof appId === 'string' && appId.trim()) return appId.trim();
+  if (typeof appId === 'number' && Number.isFinite(appId)) return String(appId);
+  return null;
+}
+
+/**
+ * Decides whether a Meta message echo represents a reply typed by a **human agent** in Meta's
+ * native surfaces (Page Inbox, Business Suite, Messenger/Instagram app) — the only echo that
+ * should pause the AI and put a conversation on human hold.
+ *
+ * Meta attaches `message.app_id` ONLY to echoes of messages sent through the Send API
+ * (our AI replies and our own inbox UI, which both call the Send API). Human agents replying
+ * outside our platform produce echoes with no `app_id`. Therefore: no `app_id` ⇒ human agent;
+ * an `app_id` present ⇒ an API/automated send that must NOT be treated as a human handoff.
+ */
+export function isHumanAgentEcho(echoAppId: string | null | undefined): boolean {
+  return echoAppId == null || echoAppId.trim() === '';
 }
 
 /** Graph / Instagram IDs in JSON may be string or number; Meta dashboard tests use 0. */
@@ -924,6 +958,7 @@ function extractFacebookMessengerMessage(payload: Record<string, unknown>): Inbo
   return {
     channelType: 'facebook',
     isEcho,
+    ...(isEcho ? { echoAppId: readEchoAppId(message) } : {}),
     skipAiReply: skipAiReply || undefined,
     channelExternalId,
     externalMessageId,
@@ -1176,6 +1211,7 @@ export class WebhookNormalizerService {
     return {
       channelType: 'instagram',
       isEcho,
+      ...(isEcho ? { echoAppId: readEchoAppId(message) } : {}),
       skipAiReply: rich.skipAiReply === true ? true : undefined,
       channelExternalId,
       externalMessageId,

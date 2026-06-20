@@ -16,7 +16,7 @@ import {
   listConversationsForTenant,
   findConversationDetailForTenant,
   listMessagesPageOldestFirst,
-  setHumanOverride24h,
+  setHumanOverrideHold,
   countUnreadConversations,
 } from '../services/conversationService';
 import { sendSuccess, sendError } from '../utils/response';
@@ -186,7 +186,7 @@ export async function reply(req: Request, res: Response): Promise<void> {
       message_id: outboundMessage.id,
     });
 
-    await setHumanOverride24h(id, tenantId);
+    await setHumanOverrideHold(id, tenantId);
     await touchConversationLastMessageAt(id);
 
     socketService.emitNewMessage(tenantId, outboundMessage);

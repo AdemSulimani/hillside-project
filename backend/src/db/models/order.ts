@@ -141,6 +141,19 @@ export interface UpdateDraftOrderInput {
   notes?: string | null;
 }
 
+/**
+ * Fields the AI is allowed to update on an existing order when a customer requests
+ * a correction after the order has been placed. Unlike UpdateDraftOrderInput, this
+ * works for any non-terminal order status (i.e. not cancelled or refunded) and
+ * covers customer identity fields in addition to delivery details.
+ */
+export interface UpdateOrderCustomerInfoInput {
+  delivery_address?: string | null;
+  customer_name?: string;
+  customer_phone?: string | null;
+  notes?: string | null;
+}
+
 type OrderRow = Omit<Order, 'unit_price' | 'total_price' | 'commission_amount'> & {
   unit_price: string | number;
   total_price: string | number;
@@ -702,6 +715,44 @@ export async function markOrdersCommissionUnpaidInPeriod(
     [tenantId, rangeStartInclusive, rangeEndExclusive],
   );
   return result.rowCount ?? 0;
+}
+
+/**
+ * Updates customer-supplied order information for any non-terminal order.
+ * Called by the AI reply pipeline when a customer asks to correct their
+ * delivery address, phone number, name, or delivery notes after placing an order.
+ * Unlike updateDraftOrderForTenant, this works across all statuses except
+ * 'cancelled' and 'refunded', and does not recalculate total_price.
+ */
+export async function updateOrderCustomerInfoForAI(
+  id: string,
+  tenantId: string,
+  fields: UpdateOrderCustomerInfoInput,
+): Promise<Order | null> {
+  const keys = Object.keys(fields) as (keyof UpdateOrderCustomerInfoInput)[];
+  if (keys.length === 0) return findOrderByIdForTenant(id, tenantId);
+
+  const setClauses: string[] = [];
+  const values: unknown[] = [id, tenantId];
+  let paramIdx = 3;
+
+  for (const key of keys) {
+    setClauses.push(`${key} = $${paramIdx}`);
+    values.push(fields[key]);
+    paramIdx++;
+  }
+  setClauses.push('updated_at = now()');
+
+  const { rows } = await pool.query<OrderRow>(
+    `UPDATE orders
+     SET ${setClauses.join(', ')}
+     WHERE id = $1
+       AND tenant_id = $2
+       AND status NOT IN ('cancelled', 'refunded')
+     RETURNING *`,
+    values,
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
 export async function updateDraftOrderForTenant(

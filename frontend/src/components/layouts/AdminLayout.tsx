@@ -2,6 +2,7 @@ import { Suspense } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { LogOut, Menu } from 'lucide-react';
 import { useAdminAuthStore } from '@/store/adminAuthStore';
+import { queryClient } from '@/lib/query-client';
 import { Button } from '@/components/ui/button';
 import { CRMRouteFallback } from '@/components/layouts/RouteFallback';
 import AdminSidebar from '@/components/layouts/AdminSidebar';
@@ -15,6 +16,7 @@ export default function AdminLayout() {
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen);
 
   function handleLogout() {
+    queryClient.removeQueries({ queryKey: ['admin'] });
     clearAuth();
     navigate('/admin/login', { replace: true });
   }

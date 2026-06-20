@@ -22,5 +22,5 @@ export function generateAdminAccessToken(platformOwnerId: string, email: string)
 }
 
 export function verifyAdminAccessToken(token: string): AdminAccessTokenPayload {
-  return jwt.verify(token, getAdminJwtSecret()) as AdminAccessTokenPayload;
+  return jwt.verify(token, getAdminJwtSecret(), { algorithms: ['HS256'] }) as AdminAccessTokenPayload;
 }

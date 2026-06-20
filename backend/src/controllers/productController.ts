@@ -19,7 +19,11 @@ import type { CreateProductInput, UpdateProductInput } from '../validators/produ
 import type { ProductQuery } from '../validators/product';
 import { redisConnection } from '../jobs/redisConnection';
 import { deleteImage, getPublicIdFromUrl } from '../services/cloudinaryService';
-import { deleteFingerprintsForImageUrls } from '../db/models/productImageFingerprint';
+import {
+  deleteFingerprintsForImageUrls,
+  deleteFingerprintsForProduct,
+  deleteAllFingerprintsForTenant,
+} from '../db/models/productImageFingerprint';
 import { queueProductImageFingerprintJobs } from '../services/productImageFingerprintService';
 import { isPgCheckViolation, isPgUniqueViolation, pgConstraintName } from '../utils/pgErrors';
 import { repairOptionalUtf8Text } from '../utils/textEncoding';
@@ -338,6 +342,11 @@ export async function destroyAll(req: Request, res: Response): Promise<void> {
         console.warn('[products.destroyAll] Failed to delete Cloudinary image', { url, err });
       }
     }
+    try {
+      await deleteAllFingerprintsForTenant(tenantId);
+    } catch (err) {
+      console.warn('[products.destroyAll] Failed to delete image fingerprints', { tenantId, err });
+    }
     await redisConnection.del(`products:${tenantId}`);
 
     sendSuccess(
@@ -370,6 +379,11 @@ export async function destroy(req: Request, res: Response): Promise<void> {
           console.warn('[products.destroy] Failed to delete Cloudinary image', { url, err });
         }
       }
+    }
+    try {
+      await deleteFingerprintsForProduct(id, tenantId);
+    } catch (err) {
+      console.warn('[products.destroy] Failed to delete image fingerprints', { productId: id, err });
     }
     await redisConnection.del(`products:${tenantId}`);
 

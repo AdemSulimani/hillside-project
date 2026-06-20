@@ -2,6 +2,16 @@ import { create } from 'zustand';
 
 const STORAGE_KEY = 'hillside_admin_auth';
 
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1])) as { exp?: number };
+    if (!payload.exp) return false;
+    return Date.now() >= payload.exp * 1000;
+  } catch {
+    return true;
+  }
+}
+
 function readStored(): { accessToken: string | null; owner: { id: string; email: string } | null } {
   if (typeof window === 'undefined') {
     return { accessToken: null, owner: null };
@@ -11,6 +21,10 @@ function readStored(): { accessToken: string | null; owner: { id: string; email:
     if (!raw) return { accessToken: null, owner: null };
     const parsed = JSON.parse(raw) as { accessToken?: string; owner?: { id: string; email: string } };
     if (!parsed.accessToken) return { accessToken: null, owner: null };
+    if (isTokenExpired(parsed.accessToken)) {
+      localStorage.removeItem(STORAGE_KEY);
+      return { accessToken: null, owner: null };
+    }
     return {
       accessToken: parsed.accessToken,
       owner: parsed.owner ?? null,

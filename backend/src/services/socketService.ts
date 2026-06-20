@@ -61,6 +61,16 @@ export const socketService = {
     io.to(tenantRoom(tenantId)).emit('order_created', { order });
   },
 
+  /**
+   * Emitted when the AI updates an existing order's customer information
+   * (address, phone, name, or notes) in response to a customer correction request.
+   * Clients should patch the matching order row in any open order list or detail view.
+   */
+  emitOrderUpdated(tenantId: string, order: Order): void {
+    if (!io) return;
+    io.to(tenantRoom(tenantId)).emit('order_updated', { order });
+  },
+
   emitOrderActionRequired(
     tenantId: string,
     payload: { order: Order; reason: string | null },
