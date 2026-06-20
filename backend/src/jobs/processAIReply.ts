@@ -1685,11 +1685,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         return;
       }
       // ---- Order information update (customer correcting address / phone / name / notes) ----
+      // Guards: skip if the message signals a new order or an order affirmation — those flows
+      // must continue to generateReply so the data-confirmation message is sent and the order
+      // creation logic at the tail of this function can fire.
+      if (!isLikelyNewOrderSignal && !isLikelyOrderAffirmation) {
       const orderInfoUpdateIntent = await detectOrderInfoUpdateIntent(inboundText, recentMessages);
       console.info(
         `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
       );
-      if (orderInfoUpdateIntent.is_order_info_update && orderInfoUpdateIntent.confidence > 0.75) {
+      if (orderInfoUpdateIntent.is_order_info_update && orderInfoUpdateIntent.confidence > 0.82) {
         const extractedFields = orderInfoUpdateIntent.fields;
         const fieldsToUpdate: UpdateOrderCustomerInfoInput = {};
         if (extractedFields.delivery_address !== null) {
@@ -1706,9 +1710,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         }
 
         if (Object.keys(fieldsToUpdate).length > 0) {
-          const candidateOrder = await findLatestOpenOrderForContactForEscalation(
+          // Use conversation-scoped lookup: only update an order that was created in
+          // THIS conversation. Contact-level lookup would return orders from prior
+          // conversations and incorrectly intercept first-time order data collection.
+          const candidateOrder = await findLatestActiveOrderForConversation(
             tenantId,
-            conversation.contact_id,
+            conversationId,
           );
           if (candidateOrder) {
             // Capture previous values for the audit trail before the update
@@ -1803,13 +1810,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             return;
           }
 
-          console.info('[ORDER_INFO_UPDATE] No active order found for contact, skipping update', {
+          console.info('[ORDER_INFO_UPDATE] No active order found in conversation, skipping update', {
             tenantId,
             conversationId,
-            contactId: conversation.contact_id,
           });
         }
       }
+      } // end !isLikelyNewOrderSignal && !isLikelyOrderAffirmation guard
     } catch (err) {
       console.warn('[ai.reply] escalation detection path failed, continuing normal flow', {
         conversationId,
