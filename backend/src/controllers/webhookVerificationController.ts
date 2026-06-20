@@ -1,5 +1,14 @@
+import crypto from 'crypto';
 import type { Request, Response } from 'express';
 import { sendError } from '../utils/response';
+
+/** Constant-time string comparison to avoid leaking the verify token via timing. */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, 'utf8');
+  const bBuf = Buffer.from(b, 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
 
 export function verifyMetaWebhook(req: Request, res: Response): void {
   const mode = req.query['hub.mode'];
@@ -12,7 +21,12 @@ export function verifyMetaWebhook(req: Request, res: Response): void {
     return;
   }
 
-  if (mode === 'subscribe' && token === expectedToken && typeof challenge === 'string') {
+  if (
+    mode === 'subscribe' &&
+    typeof token === 'string' &&
+    timingSafeEqualStr(token, expectedToken) &&
+    typeof challenge === 'string'
+  ) {
     res.status(200).send(challenge);
     return;
   }

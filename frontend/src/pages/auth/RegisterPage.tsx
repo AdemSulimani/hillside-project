@@ -167,7 +167,7 @@ export default function RegisterPage() {
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="size-4 rounded border-input accent-primary"
               />
-              Remember me for 30 days
+              Remember me
             </label>
 
             <Button type="submit" size="lg" className="w-full" disabled={loading}>

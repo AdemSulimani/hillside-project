@@ -111,6 +111,27 @@ export function isProductDescriptionQuestion(message: string): boolean {
   return hasDescriptionCue && !isRecommendationOnly && (t.includes('?') || t.split(/\s+/).length <= 12);
 }
 
+/**
+ * Platform-enforced brevity rule. Always appended to every reply prompt so the
+ * shortest-correct-answer behavior cannot be diluted by a tenant editing the
+ * `guidelines.messaging_style` block. Kept short and example-driven because the
+ * model follows concrete examples far more reliably than abstract instructions.
+ */
+export const SHORTEST_ANSWER_APPEND = `
+
+Answer length (HIGHEST PRIORITY — this overrides any tone or sales-strategy nudge toward longer replies):
+- Give the SHORTEST reply that fully and correctly answers the customer's current message. Brevity is the default; every extra word must earn its place.
+- A one-word or single-line answer is correct and preferred when it fully answers — it does not need to be a complete sentence. Examples:
+  - "Do you have this product?" -> "Yes."
+  - "Do you have this brand?" -> "Yes."
+  - "Is it in stock?" (when stock was asked) -> "Yes."
+  - "What is the price?" -> "€25"
+- Do NOT restate the product or brand name the customer just referenced, and do NOT add filler such as "we have it available in our catalog".
+- Never repeat or rephrase the customer's question, and never restate information the customer already gave you.
+- No opening pleasantries or filler ("Of course!", "Sure", "Thanks for reaching out", "I'd be happy to help") — lead directly with the answer.
+- Stay natural and polite — concise, not cold or robotic. Keep the words needed for the answer to be clear and grammatical; just cut everything that adds no information.
+- Give a longer answer ONLY when the question genuinely needs it or another rule requires fixed/verbatim wording: verbatim usage/dosage instructions, order confirmations (delivery line + the required follow-up sentence), unavailable-product handling (acknowledge + 1–2 alternatives), attribute questions that need every value listed, recommendations (1–2 products), or a genuinely multi-part question. Even then, include only what is necessary — no padding.`;
+
 export const PRODUCT_DESCRIPTION_CONCISE_APPEND = `
 
 Product description rules (IMPORTANT):

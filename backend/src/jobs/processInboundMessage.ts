@@ -15,11 +15,13 @@ import {
   findMessageByExternalMessageIdForTenant,
   findMessageByIdForTenant,
   findMessageIdByExternalMessageId,
+  findRecentOutboundMessageByContent,
   buildReplySnapshotFromMessage,
   updateMessageReplyExternalOnly,
   updateMessageReplyResolved,
 } from '../db/models/message';
 import {
+  isHumanAgentEcho,
   webhookNormalizerService,
   type InboundEditDTO,
   type InboundEvent,
@@ -27,7 +29,7 @@ import {
 } from '../services/webhookNormalizer';
 import {
   messageToReplyToPayload,
-  setHumanOverride24h,
+  setHumanOverrideHold,
   type MessageReplyToPayload,
 } from '../services/conversationService';
 import { cryptoService } from '../services/cryptoService';
@@ -47,6 +49,12 @@ const PROFILE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_ATTEMPT_THROTTLE_MS = 10 * 60 * 1000;
 const PROFILE_LAST_LOOKUP_METADATA_KEY = 'profile_last_lookup_at';
 const PROFILE_LAST_ATTEMPT_METADATA_KEY = 'profile_last_attempt_at';
+/**
+ * How far back to look for an already-stored outbound message when de-duplicating an
+ * API-originated echo whose `mid` didn't match the id we recorded at send time. Echoes
+ * normally arrive within seconds; a few minutes is a safe upper bound.
+ */
+const ECHO_DEDUP_WINDOW_MS = 5 * 60 * 1000;
 
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -695,6 +703,62 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     normalized.isEcho === true;
 
   if (isNativeEcho) {
+    // Meta echoes EVERY message the Page sends — including the AI's own Send-API replies and
+    // replies we sent from our inbox UI (both call the Send API and carry an `app_id`). Only
+    // echoes WITHOUT an `app_id` originate from a human agent typing in Meta's native surfaces
+    // (Page Inbox, Business Suite, Messenger/Instagram app); that is the sole case that should
+    // count as a human handoff and pause the AI. Treating API echoes as human replies is what
+    // previously forced conversations into Human On Hold immediately after a normal AI reply.
+    const humanAgentReply = isHumanAgentEcho(normalized.echoAppId);
+
+    if (!humanAgentReply) {
+      // API-originated echo (our AI / our inbox UI). The original outbound was already persisted
+      // when we sent it; the top-level `external_message_id` dedup catches the echo when its
+      // `mid` matches the id we recorded. When the `mid` differs we land here, so guard against a
+      // duplicate row by matching the content of a message we just sent. Critically, we must NOT
+      // mark a human reply, set a human-override hold, or otherwise change conversation ownership.
+      const alreadyStored = await findRecentOutboundMessageByContent(
+        conversation.id,
+        channel.tenant_id,
+        normalized.content,
+        ECHO_DEDUP_WINDOW_MS,
+      );
+
+      if (alreadyStored) {
+        console.info('[inbound] Skipping API-origin echo of an already-stored outbound message', {
+          conversation_id: conversation.id,
+          external_message_id: normalized.externalMessageId,
+          echo_app_id: normalized.echoAppId,
+        });
+        return;
+      }
+
+      const aiEcho = await createMessage({
+        tenant_id: channel.tenant_id,
+        conversation_id: conversation.id,
+        external_message_id: normalized.externalMessageId,
+        direction: 'outbound',
+        type: resolvedInboundMessageType,
+        content: normalized.content,
+        attachment_urls: permanentAttachmentUrls,
+        sent_by: 'ai',
+      });
+
+      await touchConversationLastMessageAt(conversation.id);
+
+      void logEvent(channel.tenant_id, 'ai_reply_echo', {
+        conversation_id: conversation.id,
+        channel_id: channel.id,
+        channel_type: channel.type,
+        message_id: aiEcho.id,
+        echo_app_id: normalized.echoAppId,
+      });
+
+      socketService.emitNewMessage(channel.tenant_id, aiEcho);
+      socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
+      return;
+    }
+
     await markConversationHumanReplied(conversation.id, channel.tenant_id);
 
     const outboundMessage = await createMessage({
@@ -708,7 +772,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
       sent_by: 'human',
     });
 
-    await setHumanOverride24h(conversation.id, channel.tenant_id);
+    await setHumanOverrideHold(conversation.id, channel.tenant_id);
     await touchConversationLastMessageAt(conversation.id);
 
     void logEvent(channel.tenant_id, 'human_reply_sent', {

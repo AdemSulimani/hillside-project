@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import pool from '../db/pool';
 import { defaultQueue } from './queues';
 import { findMissingImageFingerprintCandidates } from '../db/models/productImageFingerprint';
@@ -11,6 +12,21 @@ const RECONCILE_BATCH_LIMIT = (() => {
 
 export const IMAGE_FINGERPRINT_RECONCILE_CRON =
   process.env.IMAGE_FINGERPRINT_RECONCILE_CRON ?? '30 */6 * * *';
+
+/**
+ * Fast lane (default every 2 minutes): catches catalog images whose fingerprint
+ * job was dropped, errored, or is lagging, so image-based AI matching reflects
+ * new/updated product images within minutes instead of up to 6 hours. Idempotent
+ * via `jobId` dedup keyed on the image URL hash.
+ */
+export const FAST_IMAGE_FINGERPRINT_RECONCILE_CRON =
+  process.env.FAST_IMAGE_FINGERPRINT_RECONCILE_CRON ?? '*/2 * * * *';
+
+const FAST_RECONCILE_BATCH_LIMIT = (() => {
+  const raw = process.env.FAST_IMAGE_FINGERPRINT_RECONCILE_BATCH_LIMIT;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 100;
+})();
 
 export async function processReconcileProductImageFingerprints(): Promise<void> {
   const candidates = await findMissingImageFingerprintCandidates(RECONCILE_BATCH_LIMIT);
@@ -30,6 +46,51 @@ export async function processReconcileProductImageFingerprints(): Promise<void> 
   }
 
   console.info('[imageFingerprintReconcile] Queued missing fingerprints', { queued });
+}
+
+export async function processFastReconcileProductImageFingerprints(): Promise<void> {
+  const candidates = await findMissingImageFingerprintCandidates(FAST_RECONCILE_BATCH_LIMIT);
+  if (candidates.length === 0) return;
+
+  await Promise.all(
+    candidates.map((row) => {
+      const urlHash = crypto.createHash('sha256').update(row.image_url, 'utf8').digest('hex');
+      return defaultQueue.add(
+        'product.imageFingerprint',
+        {
+          productId: row.product_id,
+          tenantId: row.tenant_id,
+          imageUrl: row.image_url,
+        } satisfies GenerateProductImageFingerprintJobData,
+        {
+          // Higher priority than the slow 6h reconcile (5), below live uploads (1)
+          // and bulk imports (2).
+          priority: 4,
+          jobId: `fp-fast-${urlHash}`,
+        },
+      );
+    }),
+  );
+
+  console.info('[imageFingerprintReconcile:fast] Re-queued missing fingerprints', {
+    queued: candidates.length,
+  });
+}
+
+export async function initFastImageFingerprintReconcileScheduler(): Promise<void> {
+  await defaultQueue.upsertJobScheduler(
+    'imageFingerprintReconcileFast',
+    { pattern: FAST_IMAGE_FINGERPRINT_RECONCILE_CRON },
+    {
+      name: 'imageFingerprintReconcileFast',
+      data: {} as GenerateProductImageFingerprintJobData,
+      opts: { priority: 4, removeOnComplete: 5, removeOnFail: 20 },
+    },
+  );
+  console.info('[jobs] Registered fast image fingerprint reconciliation scheduler', {
+    cron: FAST_IMAGE_FINGERPRINT_RECONCILE_CRON,
+    batchLimit: FAST_RECONCILE_BATCH_LIMIT,
+  });
 }
 
 export async function initImageFingerprintReconcileScheduler(): Promise<void> {

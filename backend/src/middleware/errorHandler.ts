@@ -12,5 +12,14 @@ export function errorHandler(
   const statusCode =
     'statusCode' in err ? (err as Error & { statusCode: number }).statusCode : 500;
 
-  sendError(res, err.message || 'Internal Server Error', statusCode, err);
+  // Never surface raw internal error messages (DB errors, stack details, library
+  // internals) to clients for server-side faults. Client errors (4xx) keep their
+  // human-readable message because those are intentional, safe validation/usage hints.
+  const isServerError = statusCode >= 500;
+  const safeMessage =
+    isServerError && process.env.NODE_ENV === 'production'
+      ? 'Internal Server Error'
+      : err.message || 'Internal Server Error';
+
+  sendError(res, safeMessage, statusCode, err);
 }

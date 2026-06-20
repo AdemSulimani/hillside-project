@@ -11,6 +11,7 @@ export interface AIAlert {
   message_id: string | null;
   reason: string;
   status: AIAlertStatus;
+  details: Record<string, unknown> | null;
   created_at: Date;
 }
 
@@ -19,6 +20,8 @@ export interface CreateAIAlertInput {
   conversation_id: string | null;
   message_id: string | null;
   reason: string;
+  /** Optional structured metadata (e.g. changed fields, previous/new values for order updates). */
+  details?: Record<string, unknown> | null;
 }
 
 export async function createAIAlert(
@@ -26,10 +29,10 @@ export async function createAIAlert(
   client: PoolClient | typeof pool = pool,
 ): Promise<AIAlert> {
   const { rows } = await client.query<AIAlert>(
-    `INSERT INTO ai_alerts (tenant_id, conversation_id, message_id, reason)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO ai_alerts (tenant_id, conversation_id, message_id, reason, details)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
-    [input.tenant_id, input.conversation_id, input.message_id, input.reason],
+    [input.tenant_id, input.conversation_id, input.message_id, input.reason, input.details ?? null],
   );
   return rows[0];
 }
@@ -48,6 +51,7 @@ interface AIAlertListQueryRow extends AIAlert {
   channel_name: string;
   message_content: string | null;
   quality_score: unknown;
+  details: Record<string, unknown> | null;
 }
 
 /** `open` = unread + read (not yet resolved). */
@@ -151,6 +155,7 @@ function mapAlertListRow(row: AIAlertListQueryRow): AIAlertWithContext {
     message_id: row.message_id,
     reason: row.reason,
     status: row.status,
+    details: row.details ?? null,
     created_at: row.created_at,
     contact_name: row.contact_name,
     channel_type: row.channel_type,

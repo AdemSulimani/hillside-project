@@ -26,6 +26,7 @@ import { findImageUrlsWithoutFingerprints } from '../db/models/productImageFinge
 import { defaultQueue } from '../jobs/queues';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
 import { buildRestrictionsFooter, buildRetailAISystemPrompt, formatProductCatalog } from '../services/aiService';
+import { SHORTEST_ANSWER_APPEND } from '../services/productDescriptionPromptService';
 import { assembleGuidelinesFromBlocks } from '../services/promptAssemblyService';
 
 async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot> {
@@ -325,6 +326,10 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
       tenant.description,
       tenant.delivery_methods,
     );
+
+    // Mirror the production reply path: the platform-enforced brevity rule is appended
+    // before the restrictions footer.
+    systemPrompt += SHORTEST_ANSWER_APPEND;
 
     // Restrictions are always appended last so the test prompt mirrors production behaviour.
     const restrictionsFooter = buildRestrictionsFooter(config);

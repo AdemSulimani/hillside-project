@@ -83,12 +83,27 @@ const generalLimiter = rateLimit({
   message: { success: false, message: 'Too many requests, please try again later.' },
   skip: (req) => {
     const url = req.originalUrl || req.url;
+    // `/api/auth/refresh` is handled by its own (generous) limiter below instead of being
+    // fully exempt — leaving it unlimited allowed unbounded token-rotation hammering.
     return (
       url.startsWith('/api/health') ||
       url.startsWith('/api/auth/refresh') ||
       url.startsWith('/api/webhooks')
     );
   },
+});
+
+/**
+ * Refresh is called frequently by legitimate SPAs (token rotation), so it gets a higher
+ * ceiling than login/register, but it is NOT left unlimited: an attacker with a stolen or
+ * guessed cookie should not be able to hammer rotation indefinitely.
+ */
+const refreshLimiter = rateLimit({
+  windowMs: envInt('REFRESH_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envInt('REFRESH_RATE_LIMIT_MAX', isProduction ? 300 : 2000),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many refresh attempts, please try again later.' },
 });
 
 const authLimiter = rateLimit({
@@ -101,6 +116,7 @@ const authLimiter = rateLimit({
 
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/refresh', refreshLimiter);
 app.use(generalLimiter);
 
 app.use(

@@ -49,6 +49,10 @@ import type { ChannelType, ConversationThread, InboxMessage } from '@/types/conv
 
 const LIST_PAGE_SIZE = 25;
 
+// Mirrors the backend human-hold window (HUMAN_HOLD_MINUTES, default 10 minutes): after a
+// human reply, AI is held briefly and then reactivates automatically.
+const HUMAN_HOLD_MS = 10 * 60 * 1000;
+
 function extractMessage(err: unknown, fallback: string): string {
   if (err instanceof AxiosError && err.response?.data?.message) {
     return String(err.response.data.message);
@@ -188,7 +192,7 @@ export default function InboxPage() {
       const prev = queryClient.getQueryData<ConversationThread>(['conversations', id, 'detail']);
       if (!prev) return { prev: undefined as ConversationThread | undefined, previewUrls: [] as string[] };
 
-      const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const until = new Date(Date.now() + HUMAN_HOLD_MS).toISOString();
       const previewUrls = files.map((f) => URL.createObjectURL(f));
       const trimmed = text.trim();
       const optimistic: InboxMessage = {
@@ -232,7 +236,7 @@ export default function InboxPage() {
       ctx?.previewUrls?.forEach((u) => URL.revokeObjectURL(u));
       queryClient.setQueryData<ConversationThread>(['conversations', id, 'detail'], (old) => {
         if (!old) return old;
-        const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        const until = new Date(Date.now() + HUMAN_HOLD_MS).toISOString();
         const withoutOptimistic = old.messages.filter(
           (m) => !String(m.id).startsWith('optimistic-'),
         );

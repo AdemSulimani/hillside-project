@@ -5,8 +5,9 @@ const JWT_SECRET = process.env.JWT_SECRET!;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET!;
 
 const ACCESS_TOKEN_EXPIRY = '15m';
-/** Long-lived refresh when "Remember me" is checked */
-const REFRESH_TOKEN_LONG_SECONDS = 30 * 24 * 60 * 60; // 30 days
+/** Long-lived refresh when "Remember me" is checked — effectively indefinite; tokens are
+ *  rotated on every /auth/refresh call so active users never hit this ceiling. */
+const REFRESH_TOKEN_LONG_SECONDS = 10 * 365 * 24 * 60 * 60; // 10 years
 /** Shorter refresh when not remembering (browser session cookie; server cap) */
 const REFRESH_TOKEN_SESSION_SECONDS = 24 * 60 * 60; // 1 day
 
@@ -33,11 +34,13 @@ export function generateRefreshToken(userId: string, persistent: boolean): strin
 }
 
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  return jwt.verify(token, JWT_SECRET) as AccessTokenPayload;
+  // Pin the algorithm to prevent algorithm-confusion attacks (e.g. forged `alg: none`
+  // or RS256→HS256 downgrades). Tokens are always signed with HS256 above.
+  return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as AccessTokenPayload;
 }
 
 export function verifyRefreshToken(token: string): RefreshTokenPayload {
-  return jwt.verify(token, JWT_REFRESH_SECRET) as RefreshTokenPayload;
+  return jwt.verify(token, JWT_REFRESH_SECRET, { algorithms: ['HS256'] }) as RefreshTokenPayload;
 }
 
 export function hashToken(token: string): string {

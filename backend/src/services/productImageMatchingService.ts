@@ -8,6 +8,8 @@ import {
 import {
   searchProductsByImageFingerprintSimilarity,
   countMissingImageFingerprints,
+  normalizeAttributesMap,
+  normalizeConfidenceMap,
   type ImageFingerprintMatch,
   type VisualFingerprintData,
 } from '../db/models/productImageFingerprint';
@@ -153,6 +155,10 @@ function normalizeCustomerExtraction(raw: Partial<CustomerVisionExtraction>): Cu
       typeof raw.product_type === 'string' && raw.product_type.trim() ? raw.product_type.trim() : null,
     flavor: typeof raw.flavor === 'string' && raw.flavor.trim() ? raw.flavor.trim() : null,
     size: typeof raw.size === 'string' && raw.size.trim() ? raw.size.trim() : null,
+    servings: typeof raw.servings === 'string' && raw.servings.trim() ? raw.servings.trim() : null,
+    category: typeof raw.category === 'string' && raw.category.trim() ? raw.category.trim() : null,
+    manufacturer:
+      typeof raw.manufacturer === 'string' && raw.manufacturer.trim() ? raw.manufacturer.trim() : null,
     visible_text: Array.isArray(raw.visible_text)
       ? raw.visible_text.filter((t): t is string => typeof t === 'string' && t.trim().length > 0).slice(0, 20)
       : [],
@@ -171,6 +177,8 @@ function normalizeCustomerExtraction(raw: Partial<CustomerVisionExtraction>): Cu
       typeof raw.packaging_version_note === 'string' && raw.packaging_version_note.trim()
         ? raw.packaging_version_note.trim()
         : null,
+    attributes: normalizeAttributesMap(raw.attributes),
+    attribute_confidence: normalizeConfidenceMap(raw.attribute_confidence),
   };
 
   const qualityRaw = typeof raw.image_quality === 'string' ? raw.image_quality.toLowerCase() : 'fair';
@@ -209,9 +217,14 @@ Focus rules:
 
 Return ONLY valid JSON with keys:
 - brand_name, product_name, product_type, flavor, size (string|null each — for the PRIMARY product)
+- category (string|null — product category if printed or strongly implied)
+- manufacturer (string|null — manufacturer/distributor if printed and distinct from the brand)
+- servings (string|null — serving count/serving info if printed, e.g. "60 servings")
 - visible_text (string[] — label text you can read on the primary product, max 20)
 - packaging_colors, distinguishing_features, packaging_version_note (string|null)
 - sku_visible (string|null — any SKU or barcode digits legible on the label), barcode_visible (boolean)
+- attributes (object — a map of ANY other clearly-labeled fact on the PRIMARY product's packaging, keyed by a short lowercase attribute name, e.g. {"protein per serving":"24g","calories":"120","directions":"mix 1 scoop with water","ingredients":"whey concentrate","warnings":"keep out of reach of children","made in":"USA"}. Include anything a customer might ask about; omit anything not legibly printed.)
+- attribute_confidence (object — your confidence in [0,1] for each field you filled, keyed by the SAME names used above and in attributes, e.g. {"brand_name":0.95,"flavor":0.9,"servings":0.6}. Lower it for blurry/occluded/ambiguous text.)
 - confidence (number 0-1 — confidence in brand+product identification of the PRIMARY product)
 - image_quality ("good"|"fair"|"poor" — based on blur, crop, angle, lighting, occlusion)
 - contains_product (boolean — false for selfies, receipts, memes, screenshots with no product, empty scenes)
@@ -254,7 +267,7 @@ async function extractCustomerProductFromImages(
     model: OPENAI_VISION_MODEL || 'gpt-4o',
     response_format: { type: 'json_object' },
     temperature: 0,
-    max_tokens: 450,
+    max_tokens: 750,
     messages: [
       { role: 'system', content: CUSTOMER_VISION_SYSTEM },
       {

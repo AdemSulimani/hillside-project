@@ -5,6 +5,7 @@ import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { adminLogin } from '@/api/platformAdminApi';
 import { useAdminAuthStore } from '@/store/adminAuthStore';
+import { queryClient } from '@/lib/query-client';
 import { PasswordInput } from '@/components/auth/PasswordInput';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -35,6 +36,7 @@ export default function AdminLoginPage() {
 
     try {
       const { accessToken, owner } = await adminLogin(email.trim(), password);
+      queryClient.clear();
       setAuth(accessToken, owner);
       toast.success('Signed in to platform admin');
       navigate('/admin/dashboard', { replace: true });

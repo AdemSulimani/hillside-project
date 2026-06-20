@@ -340,13 +340,29 @@ export async function listMessagesPageOldestFirst(params: {
   return { messages, hasMore, nextCursor };
 }
 
-export async function setHumanOverride24h(conversationId: string, tenantId: string): Promise<void> {
+const DEFAULT_HUMAN_HOLD_MINUTES = 10;
+
+/**
+ * Minutes a human reply keeps the AI on hold for a conversation. After this window the
+ * hold expires on its own and the AI resumes replying — businesses no longer need to
+ * manually reactivate the AI after stepping into a chat.
+ */
+export function getHumanHoldMinutes(): number {
+  const parsed = Number(process.env.HUMAN_HOLD_MINUTES ?? DEFAULT_HUMAN_HOLD_MINUTES);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_HUMAN_HOLD_MINUTES;
+}
+
+/**
+ * Puts the conversation on a short, auto-expiring human hold. Each human reply re-extends
+ * the window, so the hold effectively ends N minutes after the last human activity.
+ */
+export async function setHumanOverrideHold(conversationId: string, tenantId: string): Promise<void> {
   await pool.query(
     `UPDATE conversations
-     SET human_override_until = NOW() + INTERVAL '24 hours',
+     SET human_override_until = NOW() + ($3::numeric * INTERVAL '1 minute'),
          updated_at = NOW()
      WHERE id = $1 AND tenant_id = $2`,
-    [conversationId, tenantId],
+    [conversationId, tenantId, getHumanHoldMinutes()],
   );
 }
 
