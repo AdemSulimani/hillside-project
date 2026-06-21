@@ -138,6 +138,52 @@ describe('dedupeInfoLabels', () => {
   it('removes empty/whitespace labels', () => {
     assert.deepEqual(dedupeInfoLabels(['brand', '', '   ']), ['brand']);
   });
+  it('collapses brand synonyms ("brandi"/"marka") to the canonical label', () => {
+    assert.deepEqual(dedupeInfoLabels(['brandi', 'marka']), ['marka']);
+  });
+  it('collapses English brand synonyms ("trademark"/"brand")', () => {
+    assert.deepEqual(dedupeInfoLabels(['trademark', 'brand']), ['brand']);
+  });
+  it('collapses flavor synonyms ("aroma"/"shija")', () => {
+    assert.deepEqual(dedupeInfoLabels(['aroma', 'shija']), ['shija']);
+  });
+  it('collapses weight synonyms ("masa"/"pesha")', () => {
+    assert.deepEqual(dedupeInfoLabels(['masa', 'pesha']), ['pesha']);
+  });
+  it('keeps the first synonym when none is canonical', () => {
+    assert.deepEqual(dedupeInfoLabels(['brandi', 'trademark']), ['brandi']);
+  });
+  it('does NOT collapse distinct attributes (brand vs weight)', () => {
+    assert.deepEqual(dedupeInfoLabels(['marka', 'pesha']), ['marka', 'pesha']);
+  });
+  it('keeps free-form labels that are not in any synonym group', () => {
+    assert.deepEqual(dedupeInfoLabels(['marka', 'përbërësit']), ['marka', 'përbërësit']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #4 regression: a single requested attribute is named once even when the
+// LLM label and the deterministic structured label are synonyms.
+// ---------------------------------------------------------------------------
+
+describe('buildMissingInfoNotice synonym collapsing', () => {
+  it('mentions the brand attribute only once (sq)', () => {
+    // Merge order mirrors processAIReply: LLM label first, structured label second.
+    const merged = dedupeInfoLabels(['brandi', ...localizedAttributeLabels(['brand'], 'sq')]);
+    assert.deepEqual(merged, ['marka']);
+    assert.equal(
+      buildMissingInfoNotice(merged, 'sq'),
+      "Do t'ju njoftojmë së shpejti lidhur me marka.",
+    );
+  });
+  it('mentions the brand attribute only once (en)', () => {
+    const merged = dedupeInfoLabels(['trademark', ...localizedAttributeLabels(['brand'], 'en')]);
+    assert.deepEqual(merged, ['brand']);
+    assert.equal(
+      buildMissingInfoNotice(merged, 'en'),
+      'We will notify you shortly regarding the brand information.',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

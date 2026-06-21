@@ -77,22 +77,71 @@ function normalizeLabel(label: string): string {
 }
 
 /**
- * De-duplicate a list of human-readable info labels while preserving the first
- * occurrence's original casing/wording. Empty/whitespace labels are dropped.
+ * Synonym groups for the same underlying product attribute, in BOTH locales plus
+ * the informal spellings the model tends to emit. The LLM ("missing" labels) and
+ * the deterministic structured net localize the SAME attribute differently (e.g.
+ * the model returns "brandi" while the structured net returns "marka"), which made
+ * a single requested attribute appear twice ("...lidhur me brandi dhe marka").
+ * Mapping every synonym to one canonical key lets de-duplication collapse them so
+ * each requested attribute is mentioned exactly once. Values are matched after
+ * `normalizeLabel` (lowercase, diacritics stripped).
+ */
+const ATTRIBUTE_SYNONYM_GROUPS: Record<string, string[]> = {
+  brand: ['brand', 'brands', 'brandi', 'brend', 'brendi', 'marka', 'marke', 'markes', 'trademark', 'prodhuesi', 'manufacturer'],
+  weight: ['weight', 'pesha', 'masa', 'gramazhi', 'gramatura'],
+  flavor: ['flavor', 'flavour', 'taste', 'shija', 'shije', 'aroma'],
+  size: ['size', 'madhesia', 'permasa', 'permasat', 'dimension', 'dimensions'],
+  color: ['color', 'colour', 'ngjyra'],
+  variant: ['variant', 'varianti'],
+  category: ['category', 'product type', 'lloji i produktit', 'lloji', 'kategoria', 'type'],
+};
+
+/** normalized synonym -> canonical group key (for synonym-aware de-duplication). */
+const SYNONYM_GROUP_BY_LABEL: ReadonlyMap<string, string> = (() => {
+  const map = new Map<string, string>();
+  for (const [group, synonyms] of Object.entries(ATTRIBUTE_SYNONYM_GROUPS)) {
+    for (const synonym of synonyms) {
+      map.set(normalizeLabel(synonym), group);
+    }
+  }
+  return map;
+})();
+
+/** Normalized localized structured labels — the canonical wording to prefer when shown. */
+const CANONICAL_LABEL_NORMS: ReadonlySet<string> = new Set(
+  Object.values(STRUCTURED_ATTRIBUTE_LABELS).flatMap((labels) =>
+    Object.values(labels).map((label) => normalizeLabel(label)),
+  ),
+);
+
+/**
+ * De-duplicate a list of human-readable info labels. Synonyms for the same
+ * attribute (e.g. "brandi"/"marka", "flavor"/"shija") collapse to a single entry,
+ * preferring the canonical localized wording when present; otherwise the first
+ * occurrence's wording/casing is kept. Empty/whitespace labels are dropped.
  */
 export function dedupeInfoLabels(labels: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
+  const groups = new Map<string, { display: string; canonical: boolean }>();
+  const order: string[] = [];
   for (const raw of labels) {
     if (typeof raw !== 'string') continue;
     const trimmed = raw.trim();
     if (!trimmed) continue;
     const norm = normalizeLabel(trimmed);
-    if (!norm || seen.has(norm)) continue;
-    seen.add(norm);
-    out.push(trimmed);
+    if (!norm) continue;
+    const key = SYNONYM_GROUP_BY_LABEL.get(norm) ?? norm;
+    const isCanonical = CANONICAL_LABEL_NORMS.has(norm);
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, { display: trimmed, canonical: isCanonical });
+      order.push(key);
+    } else if (!existing.canonical && isCanonical) {
+      // A later synonym uses the system's canonical wording — prefer it.
+      existing.display = trimmed;
+      existing.canonical = true;
+    }
   }
-  return out;
+  return order.map((key) => groups.get(key)!.display);
 }
 
 /**
