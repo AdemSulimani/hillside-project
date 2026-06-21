@@ -22,7 +22,10 @@ export class AttachPdfService extends AttachDocumentService {
     return { rawText, products };
   }
 
-  private extractProducts(text: string): ExtractedProductData[] {
+  private static readonly IMAGE_URL_REGEX =
+    /https?:\/\/\S+\.(?:jpe?g|png|webp|gif|svg)(?:[?#]\S*)?/gi;
+
+  protected extractProducts(text: string): ExtractedProductData[] {
     const products: ExtractedProductData[] = [];
     const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
 
@@ -43,9 +46,16 @@ export class AttachPdfService extends AttachDocumentService {
           price: parseFloat(priceStr) || undefined,
         };
       } else if (current && !priceMatch) {
-        current.description = current.description
-          ? `${current.description} ${line}`
-          : line;
+        const imageMatches = [...line.matchAll(AttachPdfService.IMAGE_URL_REGEX)].map((m) => m[0]);
+        if (imageMatches.length > 0) {
+          current.image_urls = [...(current.image_urls ?? []), ...imageMatches];
+        }
+        const textWithoutUrls = line.replace(AttachPdfService.IMAGE_URL_REGEX, '').replace(/\s+/g, ' ').trim();
+        if (textWithoutUrls) {
+          current.description = current.description
+            ? `${current.description} ${textWithoutUrls}`
+            : textWithoutUrls;
+        }
       }
     }
 
