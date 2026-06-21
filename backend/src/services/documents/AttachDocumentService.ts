@@ -11,6 +11,7 @@ export interface ExtractedProductData {
   sku?: string;
   tags?: string[];
   category?: string;
+  image_urls?: string[];
 }
 
 export function extractedDataToProductInput(
@@ -33,6 +34,8 @@ export function extractedDataToProductInput(
 
   const category = repairOptionalUtf8Text(data.category)?.slice(0, 255) ?? null;
 
+  const validImageUrls = (data.image_urls ?? []).filter((url) => /^https?:\/\/.+/.test(url));
+
   return {
     tenant_id: tenantId,
     name: repairOptionalUtf8Text(data.name) || defaultName,
@@ -44,6 +47,7 @@ export function extractedDataToProductInput(
     sku: repairOptionalUtf8Text(data.sku)?.slice(0, 100) ?? null,
     category,
     tags: (data.tags ?? (category ? [category] : [])).map((tag) => repairOptionalUtf8Text(tag) ?? tag),
+    image_urls: validImageUrls.length > 0 ? validImageUrls : undefined,
     source_type: sourceType,
     extracted_text: rawText,
     metadata,

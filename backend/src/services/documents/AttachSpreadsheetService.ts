@@ -87,6 +87,16 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       if (fieldMap.category) {
         product.category = repairMojibake(String(row[fieldMap.category] ?? '').trim()) || undefined;
       }
+      if (fieldMap.image) {
+        const val = row[fieldMap.image];
+        if (typeof val === 'string' && val.trim()) {
+          const urls = val
+            .split(/[,;\s]+/)
+            .map((u) => u.trim())
+            .filter((u) => /^https?:\/\/.+/.test(u));
+          if (urls.length > 0) product.image_urls = urls;
+        }
+      }
 
       return product;
     }).filter((p) => p.name || p.price);
@@ -109,6 +119,8 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       sku: /^(sku|code|product[_\s-]?code|item[_\s-]?code|barcode|upc|ean)/,
       tags: /^(tags?|labels?|keywords?)/,
       category: /^(category|type|group|class)/,
+      image:
+        /^(image[_\s-]?urls?|images?|photos?(?:[_\s-]?urls?)?|pictures?(?:[_\s-]?urls?)?|img(?:[_\s-]?urls?)?|thumbnails?(?:[_\s-]?urls?)?|fotos?(?:[_\s-]?urls?)?)/,
     };
 
     const fieldOrder = [
@@ -121,6 +133,7 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       'sku',
       'tags',
       'category',
+      'image',
     ] as const;
 
     for (const field of fieldOrder) {
