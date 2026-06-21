@@ -53,6 +53,7 @@ import {
   buildOrderConfirmationDeliveryLine,
   ensureOrderConfirmationDeliveryAndFollowUp,
 } from '../services/orderConfirmationFormatting';
+import { sanitizeOutboundMessageText } from '../services/outboundMessageFormatting';
 import {
   buildProductKnowledgeContext,
   detectRequestedAttributes,
@@ -2545,6 +2546,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} score: ${qualityEval.quality_score} flagged: ${qualityFailing} rule: ${ruleDisplay} reasoning: ${logJsonStringOrNull(qualityEval.reason)}`,
     );
   }
+
+  // Presentation-only cleanup applied as the very last step so the sent message and
+  // the persisted message match: strip Markdown emphasis (no bold product names) and
+  // collapse excessive blank lines (no big vertical gaps on Instagram). This changes
+  // formatting only, never the wording or any decision made above.
+  finalReplyText = sanitizeOutboundMessageText(finalReplyText);
 
   const contact = await findContactById(conversation.contact_id);
   let sendResult:
