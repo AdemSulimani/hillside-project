@@ -40,6 +40,13 @@ export interface CustomerVisionExtraction extends VisualFingerprintData {
   /** True when one product is the clear foreground/primary subject (others are background or duplicates). */
   primary_subject_clear: boolean;
   /**
+   * True when the customer's message named/described a specific product and the vision
+   * model selected that one among several visible DIFFERENT products. When set, the
+   * customer's words — not visual prominence — disambiguated the target, so we must NOT
+   * ask "which one do you mean?".
+   */
+  primary_selected_via_message_text: boolean;
+  /**
    * Number of visually DISTINCT products (different SKUs). Identical duplicates of
    * the same item count as 1. This is the signal that decides whether to ask
    * "which one do you mean?" — not the raw item count.
@@ -124,6 +131,7 @@ export function deriveVisionCounts(raw: {
   distinct_product_count?: unknown;
   all_visible_products_identical?: unknown;
   primary_subject_clear?: unknown;
+  primary_selected_via_message_text?: unknown;
   contains_product?: unknown;
 }): {
   multipleDetected: boolean;
@@ -131,6 +139,7 @@ export function deriveVisionCounts(raw: {
   distinctProductCount: number;
   allIdentical: boolean;
   primarySubjectClear: boolean;
+  primarySelectedViaMessageText: boolean;
   containsProduct: boolean;
 } {
   const multipleDetected = raw.multiple_products_detected === true;
@@ -154,8 +163,15 @@ export function deriveVisionCounts(raw: {
   }
   if (allIdentical) distinctProductCount = 1;
 
+  // When the customer's message named the product they mean, their words disambiguate
+  // the target even if no single item is visually dominant — so the primary subject is
+  // considered clear and we must not fall into the "which one?" clarification branch.
+  const primarySelectedViaMessageText = raw.primary_selected_via_message_text === true;
+
   const primarySubjectClear =
-    distinctProductCount <= 1 ? true : raw.primary_subject_clear === true;
+    distinctProductCount <= 1
+      ? true
+      : raw.primary_subject_clear === true || primarySelectedViaMessageText;
 
   return {
     multipleDetected,
@@ -163,6 +179,7 @@ export function deriveVisionCounts(raw: {
     distinctProductCount,
     allIdentical,
     primarySubjectClear,
+    primarySelectedViaMessageText,
     containsProduct,
   };
 }

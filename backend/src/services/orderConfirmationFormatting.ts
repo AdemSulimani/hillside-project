@@ -175,7 +175,7 @@ function insertDeliveryLineBeforeOrderFollowUp(
     }
   }
 
-  const marker = '\nNëse keni ndonjë pyetje tjetër';
+  const marker = '\nNëse keni pyetje';
   const mIdx = text.lastIndexOf(marker);
   if (mIdx >= 0) {
     const before = text.slice(0, mIdx).trimEnd();

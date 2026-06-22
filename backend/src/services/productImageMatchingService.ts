@@ -200,6 +200,7 @@ function normalizeCustomerExtraction(raw: Partial<CustomerVisionExtraction>): Cu
         : null,
     contains_product: counts.containsProduct,
     primary_subject_clear: counts.primarySubjectClear,
+    primary_selected_via_message_text: counts.primarySelectedViaMessageText,
     distinct_product_count: counts.distinctProductCount,
     all_visible_products_identical: counts.allIdentical,
     has_distracting_objects: raw.has_distracting_objects === true,
@@ -210,7 +211,9 @@ const CUSTOMER_VISION_SYSTEM = `You are a strict product-image analyst for a ret
 Extract ONLY what is clearly visible. Identify the SINGLE primary product the customer is asking about.
 
 Focus rules:
-- The primary product is the one that is in the foreground, centered, held up, or largest. Describe THAT product in brand_name/product_name/etc.
+- The customer's message takes PRIORITY when choosing which product to identify. If the message names or describes a specific product (by brand, product name, type, flavor, color, size, or any visible label text) and that product is visible in the image — even alongside several other DIFFERENT products — treat THAT named product as the primary one: describe it in brand_name/product_name/etc., set primary_subject_clear=true, and set primary_selected_via_message_text=true. The customer's words override visual prominence for CHOOSING which product to describe.
+- Only use the customer's words to SELECT among visible products. Never invent or infer details that are not actually legible on that product — report what the label shows, not what the message claims.
+- If the message does NOT name a specific product (or the named product is not visible), fall back to visual prominence: the primary product is the one in the foreground, centered, held up, or largest. Describe THAT product, and leave primary_selected_via_message_text=false.
 - IGNORE hands holding the item, reflections, glare, shadows, price tags, shelves, and unrelated background products. Do not let them change the identified product.
 - If several copies of the SAME item appear (e.g. three identical bottles), that is ONE distinct product, not many — set all_visible_products_identical=true and distinct_product_count=1.
 - Only count products as distinct when they are genuinely different items (different brand/name/variant).
@@ -232,7 +235,8 @@ Return ONLY valid JSON with keys:
 - product_count_estimate (integer — total product instances visible)
 - distinct_product_count (integer — number of visually DIFFERENT products; identical copies count as 1)
 - all_visible_products_identical (boolean — every visible product is the same item)
-- primary_subject_clear (boolean — true if one product is clearly the main subject)
+- primary_subject_clear (boolean — true if one product is clearly the main subject, either visually or because the customer's message named it)
+- primary_selected_via_message_text (boolean — true ONLY when the customer's message named/described a specific product and you selected that one among several visible products; false when selection was by visual prominence alone)
 - has_distracting_objects (boolean — hands, reflections, glare, or unrelated objects partially obscure the product)
 - is_social_media_screenshot (boolean — Instagram/Facebook post screenshot with UI chrome)
 - extraction_notes (string|null — e.g. "product partially occluded by hand", "old packaging design")
