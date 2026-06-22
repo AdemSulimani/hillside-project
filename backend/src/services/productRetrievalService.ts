@@ -496,7 +496,8 @@ Product-group answer rules (IMPORTANT):
 - Aggregate requested information across EVERY matching product in the catalog context and the aggregated attribute summary.
 - List all distinct attribute values (flavors, sizes, colors, variants, brands, weights, types, etc.) found across the group.
 - Never answer using only one product when multiple relevant products exist unless the customer explicitly chose one.
-- If information is missing for some products, say what is known and what is not — do not guess.`;
+- If information is missing for some products, say what is known and what is not — do not guess.
+- Keep it compact: list the values directly with no intro line, no restating the question, and no closing summary. Group products that share a value instead of repeating it.`;
 }
 
 /** Combined catalog text for knowledge-gap checks across a product group. */

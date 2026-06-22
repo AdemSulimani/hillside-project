@@ -37,6 +37,7 @@ function mockExtraction(
     extraction_notes: null,
     contains_product: true,
     primary_subject_clear: true,
+    primary_selected_via_message_text: false,
     distinct_product_count: 1,
     all_visible_products_identical: false,
     has_distracting_objects: false,
@@ -67,6 +68,24 @@ describe('deriveVisionCounts', () => {
     });
     assert.equal(counts.distinctProductCount, 3);
     assert.equal(counts.primarySubjectClear, false);
+    assert.equal(counts.primarySelectedViaMessageText, false);
+  });
+
+  it('treats the primary subject as clear when the customer named the product among several', () => {
+    // Photo with 4 different products; the customer named one in their message, so the
+    // vision model selected it via the message text even though no item is visually dominant.
+    const counts = deriveVisionCounts({
+      multiple_products_detected: true,
+      product_count_estimate: 4,
+      distinct_product_count: 4,
+      all_visible_products_identical: false,
+      primary_subject_clear: false,
+      primary_selected_via_message_text: true,
+    });
+    assert.equal(counts.distinctProductCount, 4);
+    assert.equal(counts.primarySelectedViaMessageText, true);
+    // Customer's words disambiguate the target → treated as a clear primary subject.
+    assert.equal(counts.primarySubjectClear, true);
   });
 
   it('defaults contains_product to true when the field is absent (backward compatible)', () => {
@@ -130,6 +149,28 @@ describe('decideVisionMatch', () => {
     assert.equal(out.decision, 'clarify_multiple_distinct');
     assert.equal(out.shouldAskClarification, true);
     assert.equal(out.clarificationReason, 'multiple_products_in_image');
+  });
+
+  it('does NOT ask which one when the customer named the product among several distinct products', () => {
+    // 4 different products in the photo, none visually dominant, but the customer's
+    // message named the one they mean (e.g. "Do you have the Gold Standard Whey?").
+    const out = decideVisionMatch({
+      extraction: mockExtraction({
+        multiple_products_detected: true,
+        distinct_product_count: 4,
+        // deriveVisionCounts promotes this to true when selected via message text; the
+        // policy receives the already-derived extraction, so reflect that here.
+        primary_subject_clear: true,
+        primary_selected_via_message_text: true,
+      }),
+      matchConfidence: CONFIDENT_MATCH_FLOOR + 0.1,
+      topSimilarity: IMAGE_SIMILARITY_THRESHOLD + 0.1,
+      hasCatalogCandidates: true,
+      brandLikelyAbsent: false,
+      exactSkuMatch: false,
+    });
+    assert.equal(out.decision, 'confident_match');
+    assert.equal(out.shouldAskClarification, false);
   });
 
   it('does NOT ask when multiple distinct products but one is the clear primary', () => {

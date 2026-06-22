@@ -8,7 +8,7 @@ import {
 } from '../orderConfirmationFormatting';
 
 const ORDER_FOLLOW_UP_SQ =
-  'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.';
+  'Nëse keni pyetje të tjera ose doni të porosisni sërish, jam këtu për t’ju ndihmuar.';
 
 describe('orderConfirmationFormatting', () => {
   it('strips embedded Albanian delivery ETA from model confirmation text', () => {
@@ -34,7 +34,7 @@ describe('orderConfirmationFormatting', () => {
   it('removes duplicate delivery ETA and keeps one canonical line at the end', () => {
     const deliveryLine = buildOrderConfirmationDeliveryLine('24h', 'sq');
     const modelReply =
-      'Porosia juaj është konfirmuar dhe do të dorëzohet brenda 24 orëve. Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.';
+      'Porosia juaj është konfirmuar dhe do të dorëzohet brenda 24 orëve. Nëse keni pyetje të tjera ose doni të porosisni sërish, jam këtu për t’ju ndihmuar.';
 
     const result = ensureOrderConfirmationDeliveryAndFollowUp(
       modelReply,

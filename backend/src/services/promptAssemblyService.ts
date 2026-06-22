@@ -39,16 +39,16 @@ export function buildGuidelinePlaceholderMap(ctx: GuidelinePlaceholderContext): 
     : 'No discount is available for this product; the current price is final.';
 
   const orderConfirmationFollowUp = isSq
-    ? 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t\u2019ju ndihmuar.'
-    : 'If you have any other questions or would like to place another order, I am here to help.';
+    ? 'Nëse keni pyetje të tjera ose doni të porosisni sërish, jam këtu për t\u2019ju ndihmuar.'
+    : 'I\u2019m here if you have other questions or want to order again.';
 
   const dataConfirmationSentence = isSq
-    ? 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që të dhënat që keni dhënë janë korrekte?'
-    : 'Thank you for your order! To avoid any mistakes, could you please confirm that the information you provided is correct?';
+    ? 'Faleminderit për porosinë! A mund të konfirmoni që të dhënat që keni dhënë janë korrekte?'
+    : 'Thank you for your order! Please confirm the information you provided is correct.';
 
   const postPurchaseIssueSentence = isSq
-    ? 'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t\u2019ju përgjigjet.'
-    : 'Hello, we are sorry for the issue. A member of our team will get back to you shortly.';
+    ? 'Na vjen keq për problemin. Një anëtar i ekipit tonë do t\u2019ju përgjigjet së shpejti.'
+    : 'Sorry about the issue. A team member will get back to you shortly.';
 
   const fixedPhraseLanguageDirective = isSq ? 'In Albanian use exactly' : 'In English use exactly';
   const orderConfirmationLanguageDirective = isSq

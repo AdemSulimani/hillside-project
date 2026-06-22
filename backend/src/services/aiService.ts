@@ -3409,6 +3409,7 @@ Product-image match uncertainty (IMPORTANT):
 Product attribute question (IMPORTANT):
 - Answer using catalog facts, the aggregated attribute summary, and any "Verified packaging details read from product images" block when present.
 - List every distinct attribute value across ALL matching products in scope.
+- Keep it compact: give the values directly with no preamble and no restating of the question; group products that share a value rather than repeating it.
 - If the requested attribute is missing from BOTH the catalog and the verified packaging details, say you do not have that detail — do not guess.`;
   }
 

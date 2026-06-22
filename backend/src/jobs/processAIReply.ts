@@ -552,23 +552,23 @@ const HOLDING_MESSAGES: Record<
 > = {
   sq: {
     postPurchaseSupport:
-      'Përshëndetje, na vjen keq për problemin. Pas pak, një anëtar i ekipit tonë do t’ju përgjigjet.',
+      'Na vjen keq për problemin. Një anëtar i ekipit tonë do t’ju përgjigjet së shpejti.',
     usageEscalation:
-      'Përshëndetje, së shpejti do t’ju kontaktojë një specialist lidhur me këtë çështje.',
+      'Së shpejti do t’ju kontaktojë një specialist për këtë çështje.',
     productKnowledgeEscalation:
-      'Përshëndetje, së shpejti do t’ju kontaktojë një specialist me informacion të saktë për produktin.',
+      'Së shpejti do t’ju kontaktojë një specialist me informacion të saktë për produktin.',
     orderInfoUpdated:
-      'Informacioni i porosinës suaj është përditësuar me sukses. Faleminderit për porosinën tuaj!',
+      'Informacioni i porosisë suaj u përditësua. Faleminderit!',
   },
   en: {
     postPurchaseSupport:
-      'Hello, we are sorry for the issue. A member of our team will get back to you shortly.',
+      'Sorry about the issue. A team member will get back to you shortly.',
     usageEscalation:
-      'Hello, a specialist from our team will contact you shortly regarding this matter.',
+      'A specialist will contact you shortly about this matter.',
     productKnowledgeEscalation:
-      'Hello, a product specialist from our team will contact you shortly with accurate product details.',
+      'A product specialist will contact you shortly with accurate details.',
     orderInfoUpdated:
-      'Your order information has been updated successfully. Thank you for your order!',
+      'Your order info has been updated. Thank you!',
   },
 };
 
@@ -581,14 +581,14 @@ const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
 function buildDeliveryEtaReply(deliveryTime: DeliveryTime, locale: ReplyLocale): string {
   const hours = DELIVERY_TIME_LABEL_HOURS[deliveryTime];
   return locale === 'sq'
-    ? `Përshëndetje, porosia juaj do të mbërrijë brenda ${hours} orëve.`
-    : `Hello, your order will arrive within ${hours} hours.`;
+    ? `Porosia juaj do të mbërrijë brenda ${hours} orëve.`
+    : `Your order will arrive within ${hours} hours.`;
 }
 
 type HoldingMessageLocale = ReplyLocale;
 const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
-  sq: 'Nëse keni ndonjë pyetje tjetër apo dëshironi të porosisni diçka tjetër, jam këtu për t’ju ndihmuar.',
-  en: 'If you have any other questions or would like to place another order, I am here to help.',
+  sq: 'Nëse keni pyetje të tjera ose doni të porosisni sërish, jam këtu për t’ju ndihmuar.',
+  en: 'I’m here if you have other questions or want to order again.',
 };
 
 /**
@@ -597,8 +597,8 @@ const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
  * messageIsDataConfirmationRequest can identify it in conversation history.
  */
 const DATA_CONFIRMATION_MESSAGES: Record<ReplyLocale, string> = {
-  sq: 'Faleminderit për porosinë tuaj! Për të shmanguar çdo gabim, a mund të konfirmoni që të dhënat që keni dhënë janë korrekte?',
-  en: 'Thank you for your order! To avoid any mistakes, could you please confirm that the information you provided is correct?',
+  sq: 'Faleminderit për porosinë! A mund të konfirmoni që të dhënat që keni dhënë janë korrekte?',
+  en: 'Thank you for your order! Please confirm the information you provided is correct.',
 };
 
 /**
@@ -607,8 +607,8 @@ const DATA_CONFIRMATION_MESSAGES: Record<ReplyLocale, string> = {
  * order) to ensure the name is explicitly collected before the data-confirmation step.
  */
 const MISSING_CUSTOMER_NAME_MESSAGES: Record<ReplyLocale, string> = {
-  sq: 'Faleminderit për të dhënat tuaja! Për të plotësuar porosinë, ju lutem na tregoni edhe emrin tuaj.',
-  en: 'Thank you for your details! To complete your order, could you please also share your first name?',
+  sq: 'Faleminderit për të dhënat! Për të plotësuar porosinë, na tregoni edhe emrin tuaj.',
+  en: 'Thanks for your details! To complete your order, please share your first name.',
 };
 
 /**
@@ -928,6 +928,10 @@ const FIXED_PHRASES_BY_LOCALE: Record<ReplyLocale, readonly string[]> = {
     // when running in Albanian mode and the model accidentally falls back to old wording.
     "Hello, we're sorry for the issue. A member of our team will reply to you shortly.",
     'Hello, a specialist from our team will contact you shortly regarding this issue.',
+    // Pre-shortening platform wording (see migration-era constants) — kept for the same reason.
+    'Hello, we are sorry for the issue. A member of our team will get back to you shortly.',
+    'Hello, a specialist from our team will contact you shortly regarding this matter.',
+    'Hello, a product specialist from our team will contact you shortly with accurate product details.',
   ],
 };
 
