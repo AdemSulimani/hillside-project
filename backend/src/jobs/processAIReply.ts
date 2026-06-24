@@ -30,11 +30,13 @@ import { findActiveProductNamesForTenant } from '../db/models/product';
 import { resolveOrderProduct } from '../services/orderProductResolutionService';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
+  classifyFollowUpInvitationInReply,
   classifyNegativeAvailabilityReply,
   classifyNewOrderSignal,
   classifyOrderClosingQuestionReplyIntent,
   classifyOrderDetailsCollectionReplyIntent,
   classifyOrderConfirmationReplyIntent,
+  classifySpeculativeHealthAdvice,
   classifyUsageQuestionIntent,
   containsSpeculativeHealthAdvice,
   detectCancellationOrRefundIntent,
@@ -43,9 +45,11 @@ import {
   detectPostPurchaseSupportIntent,
   detectWrongProductIntent,
   detectReplyLanguage,
+  filterHallucinatedProductNames,
   generateReply,
   isOutOfStockProductReply,
   isUsageQuestionUnanswered,
+  HISTORY_FETCH_LIMIT,
   type ReplyLocale,
 } from '../services/aiService';
 import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
@@ -54,13 +58,25 @@ import {
   ensureOrderConfirmationDeliveryAndFollowUp,
 } from '../services/orderConfirmationFormatting';
 import { sanitizeOutboundMessageText } from '../services/outboundMessageFormatting';
+import { isProductRecommendationOrComparisonQuestion } from '../services/productDescriptionPromptService';
 import {
   buildProductKnowledgeContext,
   detectRequestedAttributes,
-  getProductStructuredAttributes,
+  getProductInferredAttributes,
 } from '../services/productRetrievalService';
 import { getProductImageDerivedContext } from '../services/productImageAttributeService';
+import { detectSpecifiedAttributes } from '../services/productAttributeAvailabilityService';
 import { assessProductInformationRequest } from '../services/productInformationGapService';
+import {
+  buildCatalogPriceSet,
+  filterHallucinatedPrices,
+} from '../services/priceConsistencyGuard';
+import { detectCrossMessagePriceInconsistency } from '../services/conversationFactConsistencyGuard';
+import {
+  GET_BACK_TO_YOU_MESSAGES,
+  UNCERTAIN_ANSWER_ALERT_REASON,
+  shouldEscalateUncertainAnswer,
+} from '../services/uncertainAnswerFallbackGuard';
 import {
   buildMissingInfoHoldingMessage,
   composePartialAnswer,
@@ -68,6 +84,8 @@ import {
   dedupeInfoLabels,
   deriveAnswerabilityStatus,
   localizedAttributeLabels,
+  reconcileMissingAgainstAnswer,
+  stripContradictoryMissingInfoNotice,
 } from '../services/productInformationGapHelpers';
 import {
   evaluateReply,
@@ -541,6 +559,12 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
   return looksLikeAlbanianEscalation || looksLikeEnglishEscalation;
 }
 
+// LOCALE EXTENSION: to support a new reply locale, add an entry to ALL of the
+// following Record<ReplyLocale, …> tables in this file:
+//   HOLDING_MESSAGES, DATA_CONFIRMATION_MESSAGES, MISSING_CUSTOMER_NAME_MESSAGES,
+//   ORDER_CONFIRMATION_FOLLOW_UP, VARIANT_CLARIFICATION_LEAD_IN.
+// Also update productInformationGapHelpers.ts (see its InfoGapLocale checklist) and
+// aiService.ts (ReplyLocale union + locale-dispatch tables there).
 const HOLDING_MESSAGES: Record<
   ReplyLocale,
   {
@@ -571,6 +595,14 @@ const HOLDING_MESSAGES: Record<
       'Your order info has been updated. Thank you!',
   },
 };
+
+/**
+ * Master switch for the additive uncertain-answer fallback layer (defaults ON).
+ * When a tenant explicitly sets UNCERTAIN_ANSWER_FALLBACK_ENABLED=false the guard
+ * never fires and the raw AI reply behaviour is preserved unchanged.
+ */
+const UNCERTAIN_ANSWER_FALLBACK_ENABLED =
+  (process.env.UNCERTAIN_ANSWER_FALLBACK_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 
 const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
   '24h': 24,
@@ -832,21 +864,33 @@ function sentenceContainsFollowUpInvitation(value: string): boolean {
 }
 
 /**
- * When an order-closing question has already been asked earlier in the conversation and the
- * current reply is NOT an order-confirmation reply, strip any trailing generic follow-up
- * invitations the AI may have added (e.g., "Nëse dëshironi detaje më tregoni.").
+ * Strips generic follow-up invitations from the AI reply when `shouldStrip` is true.
  *
- * This is a safety net on top of the system-prompt rules in `aiService.buildSystemPrompt`.
+ * Examples of stripped phrases: "më tregoni", "më shkruani", "let me know",
+ * "feel free to ask", "anything else?", "nëse keni pyetje jemi këtu",
+ * "don't hesitate to reach out".
+ *
+ * This is applied to ALL non-order-confirmation replies unconditionally, enforcing
+ * the business rule that product, price, stock, and comparison replies must end
+ * immediately after the answer — no closing invitation appended.
+ *
+ * Uses `classifyFollowUpInvitationInReply` (LLM-first, regex fallback) for the
+ * whole-reply gate so novel phrasings beyond the known list are caught. Per-sentence
+ * stripping uses the fast synchronous regex to isolate exactly which sentence to drop.
  */
-function stripGenericFollowUpInvitation(
+async function stripGenericFollowUpInvitation(
   replyText: string,
   shouldStrip: boolean,
-): string {
+): Promise<string> {
   const reply = (replyText ?? '').trim();
   if (!reply) return reply;
   if (!shouldStrip) return reply;
-  if (!sentenceContainsFollowUpInvitation(reply)) return reply;
 
+  // LLM-first whole-reply check: catches novel phrasings beyond the known regex list.
+  const hasInvitation = await classifyFollowUpInvitationInReply(reply);
+  if (!hasInvitation) return reply;
+
+  // Per-sentence stripping: regex identifies exactly which sentence(s) to remove.
   const sentences = reply
     .split(/(?<=[.!?])\s+/u)
     .map((chunk) => chunk.trim())
@@ -865,6 +909,13 @@ function stripGenericFollowUpInvitation(
     .filter((line) => !sentenceContainsFollowUpInvitation(line));
   if (cleanedLines.length > 0 && cleanedLines.length < reply.split(/\r?\n/).filter((l) => l.trim()).length) {
     return cleanedLines.join('\n').trim();
+  }
+
+  // The LLM confirmed an invitation exists but the regex couldn't isolate the sentence
+  // (novel phrasing). Remove the last sentence as the safest heuristic — follow-up
+  // invitations are almost always the closing sentence of a reply.
+  if (sentences.length > 1) {
+    return sentences.slice(0, -1).join(' ').trim();
   }
 
   return reply;
@@ -1060,6 +1111,34 @@ end
 return count
 `;
 
+// ---------------------------------------------------------------------------
+// Per-conversation processing lock
+//
+// The worker runs multiple AI jobs concurrently, and there is no other
+// guarantee that two jobs for the SAME conversation (e.g. a retried job plus a
+// newer inbound's job, or two rapid inbounds) won't execute at the same time.
+// Concurrent/out-of-order processing of one conversation scrambles the loaded
+// history and product context and can produce contradictory replies. This lock
+// serializes processing per conversation: only one job runs at a time; the rest
+// re-delay themselves until the lock is free. The stale-inbound guard inside the
+// job then ensures the surviving job answers the latest message.
+//
+// SET NX PX gives an atomic acquire-with-TTL; the TTL bounds the lock so a
+// crashed job cannot wedge a conversation permanently. Release is token-checked
+// so a job can never delete a lock that a later job acquired after TTL expiry.
+// ---------------------------------------------------------------------------
+const CONVERSATION_LOCK_TTL_MS = (() => {
+  const n = parseInt(process.env.AI_CONVERSATION_LOCK_TTL_MS ?? '300000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 300000;
+})();
+
+const CONVERSATION_LOCK_RELEASE_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId, traceId } = data;
   console.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
@@ -1102,6 +1181,38 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     if (tenantSlotReleased) return;
     tenantSlotReleased = true;
     await redisConnection.decr(tenantActiveKey).catch(() => undefined);
+  };
+
+  // ---- Per-conversation serialization lock ---------------------------------
+  // Acquire BEFORE any conversation processing so two jobs for the same
+  // conversation can never run concurrently. If another job holds the lock,
+  // re-delay this one (releasing the tenant slot we just took) and let the
+  // active job finish first.
+  const conversationLockKey = `ai_conv_lock:${conversationId}`;
+  const conversationLockToken = crypto.randomUUID();
+  const conversationLockAcquired = await redisConnection
+    .set(conversationLockKey, conversationLockToken, 'PX', CONVERSATION_LOCK_TTL_MS, 'NX')
+    .then((res) => res === 'OK')
+    .catch(() => false);
+
+  if (!conversationLockAcquired) {
+    await releaseTenantSlot();
+    await aiQueue.add('ai.reply', data, { delay: AI_FAIRNESS_BACKOFF_MS });
+    console.info('[ai.reply] Conversation busy — re-delayed job to serialize processing', {
+      tenantId,
+      conversationId,
+      backoffMs: AI_FAIRNESS_BACKOFF_MS,
+    });
+    return;
+  }
+
+  let conversationLockReleased = false;
+  const releaseConversationLock = async (): Promise<void> => {
+    if (conversationLockReleased) return;
+    conversationLockReleased = true;
+    await redisConnection
+      .eval(CONVERSATION_LOCK_RELEASE_SCRIPT, 1, conversationLockKey, conversationLockToken)
+      .catch(() => undefined);
   };
 
   try {
@@ -1218,7 +1329,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
-  const recentMessages = await findMessagesByConversation(conversationId, 25);
+  const recentMessages = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT);
   const { latestInbound: lastInbound, mergedInboundText, mergedAttachmentUrls } =
     buildInboundBurstContext(recentMessages);
   if (!lastInbound) {
@@ -2092,6 +2203,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   let productKnowledgeEscalated = false;
+  // Set to true when a multi-product query has missing attributes for SOME (not all)
+  // products — used to suppress Layer 3 contradictory-notice stripping, which would
+  // otherwise remove a valid "we'll notify you" notice for the products that lack the
+  // attribute just because another product's value appears in the same reply.
+  let isMultiProductGap = false;
 
   // ---------------------------------------------------------------------------
   // PARTIAL PRODUCT ANSWER + attribute-level escalation
@@ -2122,8 +2238,25 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // / attribute intent, OR a detected structured attribute request. Pure price
   // questions ("how much is X") resolve to neither, so the AI's price answer is sent
   // untouched.
+  //
+  // Recommendation / comparison questions ("which one would you recommend?", "cilen me
+  // sugjeron?", "cilen mkishe than ti me marr?") are explicitly excluded: the AI has
+  // all the catalog data needed to compare products and answer directly. Triggering the
+  // product-information-gap assessment on these questions causes a spurious "specialist
+  // will contact you" alert because the catalog knowledge contains no "recommendation"
+  // fact — which is a false positive, not a genuine knowledge gap.
+  const isProductRecommendationQuestion =
+    Boolean(inboundText) && isProductRecommendationOrComparisonQuestion(inboundText);
+  if (isProductRecommendationQuestion) {
+    console.info('[ai.reply] Detected recommendation/comparison question — skipping product-information-gap escalation', {
+      conversationId,
+      tenantId,
+      messagePreview: inboundText.slice(0, 120),
+    });
+  }
   const isProductInformationQuestion =
     Boolean(inboundText) &&
+    !isProductRecommendationQuestion &&
     (attributeIntent.is_product_knowledge_question || requestedStructuredAttributes.length > 0);
 
   if (!usageEscalated && isProductInformationQuestion && !isOosCannedReply) {
@@ -2159,13 +2292,39 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         console.warn('[ai.reply] image-derived knowledge context failed', { conversationId, tenantId, err });
       }
 
+      // Vocabulary-independent availability signal: an LLM confirms which requested
+      // attributes are explicitly specified in the matched products' text/fields. This
+      // makes the "is it present?" check robust to values absent from the fixed regex
+      // vocabulary (a new flavor like "Tiramisu", an unusual color/size/weight), so the
+      // deterministic net can never flag — and therefore never contradict — a value the
+      // catalog actually states. Fail-open: an empty set on error falls back to the
+      // deterministic structured + regex signals below.
+      let aiSpecifiedKeys = new Set<string>();
+      try {
+        aiSpecifiedKeys = await detectSpecifiedAttributes(
+          requestedStructuredAttributes,
+          matchedProducts,
+        );
+      } catch (err) {
+        console.warn('[ai.reply] attribute availability classifier failed', {
+          conversationId,
+          tenantId,
+          err,
+        });
+      }
+
       // Deterministic safety net: structured attributes that NO matched product can
-      // provide (neither a catalog field nor a confident packaging read) are definitely
-      // missing — independent of the LLM.
+      // provide are definitely missing — independent of the LLM. We treat an attribute
+      // as AVAILABLE when ANY of three signals confirm it: (1) the text-aware resolver
+      // (getProductInferredAttributes — structured column OR regex match in the name/
+      // description/extracted text/tags), (2) a high-confidence packaging read from the
+      // product image, or (3) the vocabulary-independent AI classifier. Only attributes
+      // none of these can confirm are escalated, so a known value is never contradicted.
+      const availableKeys = new Set<string>([...imageUsableKeys, ...aiSpecifiedKeys]);
       const deterministicMissingKeys = computeMissingStructuredAttributes(
         requestedStructuredAttributes,
-        matchedProducts.map((p) => getProductStructuredAttributes(p)),
-        imageUsableKeys,
+        matchedProducts.map((p) => getProductInferredAttributes(p)),
+        availableKeys,
       );
 
       // LLM composer: grounded answer for what we know + labels for what we don't.
@@ -2176,12 +2335,59 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // Merge missing info: the LLM labels (customer language; covers free-form info
       // such as ingredients) unioned with the deterministic structured labels (a
       // guarantee we never silently drop a known-missing attribute), de-duplicated.
-      const mergedMissing = dedupeInfoLabels([
-        ...assessment.missing,
-        ...localizedAttributeLabels(deterministicMissingKeys, replyLocale),
-      ]);
+      // Then reconcile against the grounded answer: never escalate an attribute the
+      // answer already states (final guard against self-contradicting partial replies).
+      const mergedMissing = reconcileMissingAgainstAnswer(
+        dedupeInfoLabels([
+          ...assessment.missing,
+          ...localizedAttributeLabels(deterministicMissingKeys, replyLocale),
+        ]),
+        assessment.answer,
+      );
 
-      const status = deriveAnswerabilityStatus(assessment.answer, mergedMissing);
+      // ---------------------------------------------------------------------------
+      // Multi-product per-product gap detection.
+      //
+      // The cross-product signals above (computeMissingStructuredAttributes with
+      // availableKeys, and the LLM assessment) treat an attribute as "available" when
+      // AT LEAST ONE matched product carries it.  When the customer asks about the same
+      // attribute across several products, this masks any products that are missing it:
+      //   • Product A has flavor → "flavor is available" → nothing escalated for B & C.
+      //   • reconcileMissingAgainstAnswer then removes "flavor" from missing because
+      //     the answer already states it for Product A.
+      //
+      // This block catches those "partially available" gaps by checking each requested
+      // attribute against EVERY individual product using only per-product inferred
+      // attributes (deliberately NOT using cross-product availableKeys / aiSpecifiedKeys,
+      // which would mask the per-product absence).  Any attribute that is missing for
+      // at least one product is added to the missing set, bypassing reconciliation —
+      // the answer may mention it for Product A, but the notice is still valid for B/C.
+      // ---------------------------------------------------------------------------
+      const perProductMissingLabels: string[] = [];
+      if (matchedProducts.length > 1) {
+        for (const key of requestedStructuredAttributes) {
+          // Already flagged as globally missing by the deterministic net → skip.
+          if (deterministicMissingKeys.includes(key)) continue;
+          // Per-product check: is this attribute absent from at least one product?
+          const anyProductMissingIt = matchedProducts.some((p) => {
+            const val = getProductInferredAttributes(p)[key];
+            return !(typeof val === 'string' && val.trim().length > 0);
+          });
+          if (anyProductMissingIt) {
+            perProductMissingLabels.push(...localizedAttributeLabels([key], replyLocale));
+          }
+        }
+      }
+
+      // Combine and deduplicate: per-product labels bypass reconciliation so that the
+      // "we'll notify you" notice is preserved even when the answer already states the
+      // attribute for the products that have it.
+      const finalMergedMissing = dedupeInfoLabels([...mergedMissing, ...perProductMissingLabels]);
+      if (perProductMissingLabels.length > 0) {
+        isMultiProductGap = true;
+      }
+
+      const status = deriveAnswerabilityStatus(assessment.answer, finalMergedMissing);
 
       // Escalate whenever the request is not fully answerable OR the assessment could
       // not be performed (fail-closed). A fully-answerable request keeps the original,
@@ -2198,8 +2404,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         // gap (or a generic notice when the gap could not be determined).
         const escalationReply =
           status === 'partial'
-            ? composePartialAnswer(assessment.answer, mergedMissing, replyLocale)
-            : buildMissingInfoHoldingMessage(mergedMissing, replyLocale);
+            ? composePartialAnswer(assessment.answer, finalMergedMissing, replyLocale)
+            : buildMissingInfoHoldingMessage(finalMergedMissing, replyLocale);
 
         const client = await pool.connect();
         let alert: AIAlert | undefined;
@@ -2216,7 +2422,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
               details: {
                 kind: 'product_information_gap',
                 partial: status === 'partial',
-                missing_info: mergedMissing,
+                missing_info: finalMergedMissing,
                 requested_attributes: requestedStructuredAttributes,
                 customer_question: inboundText,
                 answered_info: status === 'partial' ? assessment.answer : null,
@@ -2243,7 +2449,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             conversationId,
             tenantId,
             status,
-            missingInfo: mergedMissing,
+            missingInfo: finalMergedMissing,
           });
           const contactForAlert = await findContactById(conversation.contact_id);
           socketService.emitAIAlert(tenantId, {
@@ -2280,7 +2486,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     !productKnowledgeEscalated &&
     !isOosCannedReply &&
     usageQuestionIntent &&
-    containsSpeculativeHealthAdvice(finalReplyText)
+    // AI-backed classifier: LLM-first (catches novel phrasings the keyword list misses),
+    // keyword fallback. The sync containsSpeculativeHealthAdvice is kept for the catalog
+    // check below — catalog text is structured data where phrase matching is sufficient.
+    (await classifySpeculativeHealthAdvice(finalReplyText))
   ) {
     // Only escalate when the usage description itself does NOT already contain the same
     // health-consultation language — if the catalog says "consult a doctor if pregnant"
@@ -2445,13 +2654,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       finalReplyText,
       effectiveOrderClosingAsked,
     );
-    // Generic follow-up invitations ("më tregoni", "let me know", etc.) are only allowed in
-    // (a) the first product reply and (b) order-confirmation replies. If the order-closing
-    // was already asked (or implied by intent) and this is not an order-confirmation reply,
-    // strip them.
-    finalReplyText = stripGenericFollowUpInvitation(
+    // Generic follow-up invitations ("më tregoni", "let me know", "feel free to ask", etc.)
+    // are stripped from ALL non-order-confirmation replies regardless of conversation state.
+    // Order-confirmation replies are the only exception because the fixed follow-up sentence
+    // (e.g. "konfirmoni nëse dëshironi ...") is part of the required confirmation format.
+    finalReplyText = await stripGenericFollowUpInvitation(
       finalReplyText,
-      effectiveOrderClosingAsked && !isOrderConfirmationReply,
+      !isOrderConfirmationReply,
     );
   }
 
@@ -2551,6 +2760,168 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     );
   }
 
+  // Price-consistency guard (per-reply): hard gate — if the reply states a concrete
+  // price that is NOT present in the catalog for any matched product, replace the reply
+  // with a specialist holding message and schedule a post-send alert + AI pause.
+  // Fail-open: skipped when no products were matched, when another escalation already
+  // fired, or when the catalog carries no prices (can't validate nothing).
+  let priceHallucinationEscalated = false;
+  let priceHallucinationDetails: Record<string, unknown> | null = null;
+
+  if (!knowledgeGapEscalated && matchedProducts.length > 0 && !isOosCannedReply) {
+    const catalogPriceSet = buildCatalogPriceSet(matchedProducts);
+    const hallucinatedPrices = filterHallucinatedPrices(finalReplyText, catalogPriceSet);
+    if (hallucinatedPrices.length > 0) {
+      console.warn('[PRICE GUARD] Reply states price(s) not in catalog — escalating to holding message', {
+        tenantId,
+        conversationId,
+        statedPrices: hallucinatedPrices.map((p) => p.raw),
+        catalogPrices: catalogPriceSet.prices,
+        replyPreview: finalReplyText.slice(0, 120),
+      });
+      priceHallucinationDetails = {
+        statedPrices: hallucinatedPrices.map((p) => p.raw),
+        catalogPrices: catalogPriceSet.prices,
+        originalReplyPreview: finalReplyText.slice(0, 200),
+      };
+      priceHallucinationEscalated = true;
+      // Replace the hallucinated-price reply with a safe holding message. Using the
+      // product-knowledge escalation copy because the issue is incorrect catalog data
+      // in the reply, requiring a specialist to provide the accurate price.
+      finalReplyText = HOLDING_MESSAGES[replyLocale].productKnowledgeEscalation;
+      // Clear quality-eval flags: they were computed against the replaced reply and are
+      // no longer applicable to the (safe) holding message being sent instead.
+      qualityFailing = false;
+      flagReason = null;
+    }
+
+    // Cross-turn price consistency (advisory only): log when the current reply
+    // contradicts a price stated by the AI in a recent prior turn. Left as a warning
+    // because a genuine price change is legitimate and would produce false positives if
+    // escalated. Human agents can review via the conversation history.
+    if (!priceHallucinationEscalated) {
+      const crossTurnInconsistencies = detectCrossMessagePriceInconsistency(
+        finalReplyText,
+        recentMessages,
+      );
+      if (crossTurnInconsistencies.length > 0) {
+        console.warn('[PRICE GUARD] Cross-turn price inconsistency detected', {
+          tenantId,
+          conversationId,
+          inconsistencies: crossTurnInconsistencies,
+          replyPreview: finalReplyText.slice(0, 120),
+        });
+      }
+    }
+  }
+
+  // Product-name hallucination guard: block any reply that names a specific product
+  // not present in the matched catalog products. Architecturally mirrors the price
+  // hallucination guard: when fired it replaces the reply with a safe holding message,
+  // creates an alert, and pauses AI so a human specialist can follow up.
+  //
+  // Skipped when: no products were matched (nothing to validate against), another
+  // escalation already fired, the reply is a canned OOS message, or the guard itself
+  // errors out (fail-open — the guard must never silently suppress a valid reply).
+  let productNameHallucinationEscalated = false;
+  let productNameHallucinationDetails: Record<string, unknown> | null = null;
+
+  if (
+    !knowledgeGapEscalated &&
+    !priceHallucinationEscalated &&
+    !isOosCannedReply &&
+    matchedProducts.length > 0
+  ) {
+    try {
+      const nameGuardResult = await filterHallucinatedProductNames(finalReplyText, matchedProducts);
+      if (nameGuardResult.hasHallucination) {
+        console.warn('[PRODUCT NAME GUARD] Reply names product(s) not in matched catalog — escalating to holding message', {
+          tenantId,
+          conversationId,
+          suspectedNames: nameGuardResult.suspectedNames,
+          catalogNames: matchedProducts.map((p) => p.name),
+          replyPreview: finalReplyText.slice(0, 120),
+        });
+        productNameHallucinationDetails = {
+          suspectedNames: nameGuardResult.suspectedNames,
+          catalogNames: matchedProducts.map((p) => p.name),
+          originalReplyPreview: finalReplyText.slice(0, 200),
+        };
+        productNameHallucinationEscalated = true;
+        finalReplyText = HOLDING_MESSAGES[replyLocale].productKnowledgeEscalation;
+        qualityFailing = false;
+        flagReason = null;
+      }
+    } catch (err) {
+      console.warn('[PRODUCT NAME GUARD] Guard check failed — continuing with original reply', {
+        tenantId,
+        conversationId,
+        err,
+      });
+    }
+  }
+
+  // Uncertain-answer fallback guard (additive safety layer — runs last among the
+  // content guards). When the about-to-be-sent reply is a generic
+  // knowledge/uncertainty deflection ("we don't have information about that",
+  // "I'm not sure", "I don't know", "we don't carry that product") and NO earlier
+  // escalation already handled this turn, replace it with a polite holding message
+  // and escalate to a human. This prevents unprofessional deflections and hands
+  // genuinely-uncertain cases to the business instead of risking a wrong answer.
+  //
+  // Reuses the upstream negative-availability classifier result and adds
+  // deterministic knowledge/uncertainty detection. Excludes the deliberate
+  // out-of-stock canned reply and order-flow replies so normal behaviour is never
+  // affected. The actual pause/alert/flag happens after the message is persisted
+  // (mirrors the price/name hallucination guards) so the alert can link to it.
+  let uncertainAnswerEscalated = false;
+  let uncertainAnswerDetails: Record<string, unknown> | null = null;
+  if (
+    shouldEscalateUncertainAnswer({
+      replyText: finalReplyText,
+      enabled: UNCERTAIN_ANSWER_FALLBACK_ENABLED,
+      alreadyEscalated:
+        knowledgeGapEscalated || priceHallucinationEscalated || productNameHallucinationEscalated,
+      isOosCannedReply,
+      isOrderFlowReply: isOrderConfirmationReply,
+      negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
+    })
+  ) {
+    console.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {
+      tenantId,
+      conversationId,
+      negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
+      replyPreview: finalReplyText.slice(0, 120),
+    });
+    uncertainAnswerDetails = {
+      kind: 'uncertain_answer_fallback',
+      negative_availability_detected: containsNegativeAvailabilityPhrase,
+      customer_question: inboundText || null,
+      originalReplyPreview: finalReplyText.slice(0, 200),
+    };
+    uncertainAnswerEscalated = true;
+    finalReplyText = GET_BACK_TO_YOU_MESSAGES[replyLocale === 'sq' ? 'sq' : 'en'];
+    // The quality flags were computed against the replaced reply and no longer apply
+    // to the safe holding message being sent instead.
+    qualityFailing = false;
+    flagReason = null;
+  }
+
+  // Final consistency guard: strip any "we'll notify you shortly regarding X" notice
+  // whose attribute the reply has ALREADY answered, so a single message can never both
+  // state a value and promise to provide that same value later. Runs on the fully
+  // composed text (covers every upstream path) and is a no-op when no contradiction
+  // exists. Locale narrows to the notice copy's supported locales ('sq' | 'en').
+  //
+  // In multi-product partial escalations the notice legitimately names an attribute that
+  // appears in the reply for one product but is genuinely missing for others — the
+  // multiProduct flag prevents it from being stripped in that case.
+  finalReplyText = stripContradictoryMissingInfoNotice(
+    finalReplyText,
+    replyLocale === 'sq' ? 'sq' : 'en',
+    { multiProduct: isMultiProductGap && productKnowledgeEscalated },
+  );
+
   // Presentation-only cleanup applied as the very last step so the sent message and
   // the persisted message match: strip Markdown emphasis (no bold product names) and
   // collapse excessive blank lines (no big vertical gaps on Instagram). This changes
@@ -2561,11 +2932,27 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
+
+  // ---- Idempotent send guard ----------------------------------------------
+  // If the channel send on a PRIOR attempt succeeded but a later step (e.g.
+  // persisting the outbound message) failed, BullMQ retries the whole job. This
+  // marker — keyed by the inbound message this reply answers — ensures the retry
+  // does NOT deliver a second copy of the reply to the customer. We still fall
+  // through to persist the outbound row (reusing the original channel message id)
+  // so the conversation record self-heals.
+  const sendIdemKey = `ai_send_done:${conversationId}:${data.messageExternalId}`;
+  const priorSendMarker = await redisConnection.get(sendIdemKey).catch(() => null);
+  const alreadySent = !!priorSendMarker;
+  const priorGraphMessageId =
+    priorSendMarker && priorSendMarker !== '1' ? priorSendMarker : null;
+
   // When usage escalation fired we already set ai_paused=true ourselves.
   // shouldStillSendAutomatedReply would read that flag and abort the send,
   // preventing the holding message from ever reaching the customer.
   // Skip the precheck in that case — we still need to deliver the holding message.
-  const mainSendPrecheck = knowledgeGapEscalated
+  // Also skip it when a prior attempt already sent this reply: re-running the
+  // precheck on retry could abort and leave the sent message unpersisted.
+  const mainSendPrecheck = knowledgeGapEscalated || alreadySent
     ? ({ ok: true } as const)
     : await shouldStillSendAutomatedReply({
         tenantId,
@@ -2582,18 +2969,43 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     });
     return;
   }
-  if (contact) {
+  if (alreadySent) {
+    console.warn('[ai.reply] Reply already delivered on a prior attempt — skipping duplicate send', {
+      conversationId,
+      scheduledFor: data.messageExternalId,
+    });
+  } else if (contact) {
     sendResult = await sendMessage(channel, contact.external_id, finalReplyText);
+    // Record the successful delivery so a retry cannot double-send. Stores the
+    // channel message id (when available) so the persisted row stays consistent.
+    if (sendResult?.success) {
+      await redisConnection
+        .set(sendIdemKey, sendResult.graphMessageId ?? '1', 'EX', 3600)
+        .catch(() => undefined);
+    }
   } else {
     console.error('[ai.reply] Contact not found for conversation', {
       contactId: conversation.contact_id,
     });
   }
 
+  // When the turn was replaced by a generic holding/escalation message (knowledge gap,
+  // price or product-name hallucination), the customer was NOT actually shown these
+  // products. Persisting them would let a later follow-up ("what's the price?", "what
+  // flavors?") silently reuse products the assistant never presented, producing a
+  // contradictory thread. Only carry product_ids forward when the reply genuinely
+  // presented the matched products.
+  const replyWasHoldingOrEscalation =
+    knowledgeGapEscalated ||
+    priceHallucinationEscalated ||
+    productNameHallucinationEscalated ||
+    uncertainAnswerEscalated;
+
   const outboundMessage = await createMessage({
     tenant_id: tenantId,
     conversation_id: conversationId,
-    external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+    external_message_id:
+      sendResult?.graphMessageId ?? priorGraphMessageId ?? `ai_${crypto.randomUUID()}`,
     direction: 'outbound',
     type: 'text',
     content: finalReplyText,
@@ -2605,8 +3017,140 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     // prices?", "what flavors?", "are these in stock?") can deterministically reuse
     // them instead of re-running a fragile text lookup that may fail and wrongly claim
     // the products are not in the catalog.
-    product_ids: matchedProducts.map((p) => p.id),
+    product_ids: replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id),
   });
+
+  // Price-hallucination alert: created after the holding message is persisted so the
+  // alert can link to the outbound message ID. Pauses AI so a human agent can provide
+  // the correct price. Does not create a feedback-log row (the original reply was not
+  // sent, so there is no correctable model output; the catalog data needs fixing).
+  if (priceHallucinationEscalated) {
+    const client = await pool.connect();
+    let priceAlert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      priceAlert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: 'hallucinated_price',
+          details: priceHallucinationDetails,
+        },
+        client,
+      );
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[ai.reply] Price hallucination alert / pause failed', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    } finally {
+      client.release();
+    }
+    if (priceAlert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...priceAlert,
+        message_content: outboundMessage.content,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    }
+  }
+
+  // Product-name hallucination alert: created after the holding message is persisted so
+  // the alert can reference the outbound message ID. Pauses AI so a human specialist can
+  // provide the correct product information. Mirrors the price hallucination alert pattern.
+  if (productNameHallucinationEscalated) {
+    const client = await pool.connect();
+    let nameAlert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      nameAlert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: 'hallucinated_product_name',
+          details: productNameHallucinationDetails,
+        },
+        client,
+      );
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[ai.reply] Product name hallucination alert / pause failed', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    } finally {
+      client.release();
+    }
+    if (nameAlert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...nameAlert,
+        message_content: outboundMessage.content,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    }
+  }
+
+  // Uncertain-answer fallback alert: created after the holding message is persisted so
+  // the alert can reference the outbound message ID. Pauses AI and flags the conversation
+  // for human review so the business can reply directly with a reliable answer. Mirrors
+  // the price/name hallucination alert pattern.
+  if (uncertainAnswerEscalated) {
+    const client = await pool.connect();
+    let uncertainAlert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      uncertainAlert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: UNCERTAIN_ANSWER_ALERT_REASON,
+          details: uncertainAnswerDetails,
+        },
+        client,
+      );
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationHumanReplied(conversationId, tenantId, false, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[ai.reply] Uncertain answer alert / pause failed', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    } finally {
+      client.release();
+    }
+    if (uncertainAlert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...uncertainAlert,
+        message_content: outboundMessage.content,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    }
+  }
 
   if (qualityFailing && flagReason) {
     const client = await pool.connect();
@@ -2740,7 +3284,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       return;
     }
 
-    const messagesForIntent = await findMessagesByConversation(conversationId, 40);
+    const messagesForIntent = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT);
     const catalogProductNames = await findActiveProductNamesForTenant(tenantId);
     const intent = await detect(messagesForIntent, tenantId, catalogProductNames);
     const qtyDisplay = intent.quantity === null ? 'null' : String(intent.quantity);
@@ -2780,14 +3324,25 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     });
     const hasCustomerName = resolvedCustomerName.firstName !== null;
 
-    const recentCustomerAffirmation = messagesForIntent
-      .slice(-20)
-      .some(
-        (msg) =>
-          msg.sent_by === 'customer' &&
-          typeof msg.content === 'string' &&
-          looksLikeOrderAffirmation(msg.content),
-      );
+    // Only treat a customer message as an order affirmation when it came AFTER the
+    // data-confirmation request was sent. Scanning all recent messages broadly risks
+    // treating a "po" (yes) or "ok" from an unrelated earlier exchange (e.g. confirming
+    // their use-case, answering a product question) as order consent.
+    const dataConfirmationIdx = messagesForIntent.reduce(
+      (lastIdx, msg, idx) =>
+        msg.sent_by !== 'customer' && messageIsDataConfirmationRequest(msg.content ?? '')
+          ? idx
+          : lastIdx,
+      -1,
+    );
+    const messagesAfterDataConfirmation =
+      dataConfirmationIdx >= 0 ? messagesForIntent.slice(dataConfirmationIdx + 1) : [];
+    const recentCustomerAffirmation = messagesAfterDataConfirmation.some(
+      (msg) =>
+        msg.sent_by === 'customer' &&
+        typeof msg.content === 'string' &&
+        looksLikeOrderAffirmation(msg.content),
+    );
 
     const assistantAskedOrderClosingEarlier = await hasAssistantAskedOrderClosingInConversation(
       messagesForIntent,
@@ -2984,6 +3539,22 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         });
         return;
       }
+
+      // An order already exists in this conversation. Even when the resolved product
+      // differs from the existing one, only allow a new order when the CURRENT message
+      // itself signals new-order intent. Historical affirmations (recentCustomerAffirmation)
+      // from the now-completed order flow must not re-trigger order creation on unrelated
+      // follow-up messages (e.g. "Do you have any other creatine products?").
+      if (!explicitNewOrder && !latestMessageAffirmsOrder) {
+        console.info('[ai.reply] Skipping follow-up order: existing order found and current message carries no new-order signal', {
+          conversationId,
+          existingOrderId: latestActiveOrder.id,
+          existingProduct: latestActiveOrder.product_name,
+          incomingProduct: productName,
+          intent_score: intent.intent_score,
+        });
+        return;
+      }
     }
 
     const humanInOrderWindow = await hasHumanParticipationInCurrentOrderWindow(
@@ -3038,8 +3609,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   } finally {
-    // Always release the per-tenant concurrency slot, even if the job threw
-    // or returned early at any point inside the try block above.
+    // Always release the per-conversation lock and the per-tenant concurrency
+    // slot, even if the job threw or returned early at any point in the try
+    // block above. The lock is released first so a waiting job for the same
+    // conversation can proceed as soon as possible.
+    await releaseConversationLock();
     await releaseTenantSlot();
   }
 }

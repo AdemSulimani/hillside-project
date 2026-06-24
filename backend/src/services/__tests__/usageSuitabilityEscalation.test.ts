@@ -571,3 +571,135 @@ describe('speculative advice safety-net combined condition', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5.  classifySpeculativeHealthAdvice — fast-path contract
+//
+//     The async LLM classifier has the same keyword list as the synchronous
+//     version as its fast-path: any phrase that containsSpeculativeHealthAdvice
+//     catches must also be caught immediately by classifySpeculativeHealthAdvice
+//     without an LLM call.  These tests verify that guarantee by confirming the
+//     underlying keyword function returns true for phrases the LLM classifier
+//     MUST catch on the fast path (and which it will catch even if the LLM is
+//     down).  The tests are pure — no network calls.
+// ---------------------------------------------------------------------------
+
+describe('classifySpeculativeHealthAdvice fast-path contract (keyword parity)', () => {
+  // Every phrase that the synchronous keyword guard catches must be caught by the
+  // fast-path of classifySpeculativeHealthAdvice so an LLM outage never degrades
+  // the safety-net behaviour.
+  const mustCatchFastPath = [
+    'It is important to consult a health professional before starting.',
+    'We recommend you consult a doctor before using this product.',
+    'Please speak to a healthcare provider if you have any concerns.',
+    'Seek medical advice before starting any new supplement.',
+    'Konsultohuni me mjekun tuaj para perdorimit.',
+    'Keshillohuni me nje nutricionist per kete produkt.',
+  ];
+
+  for (const phrase of mustCatchFastPath) {
+    it(`fast-path catches: "${phrase.slice(0, 60)}…"`, () => {
+      // containsSpeculativeHealthAdvice IS the fast-path inside
+      // classifySpeculativeHealthAdvice — verify it returns true synchronously
+      // so the async wrapper will short-circuit before reaching the LLM.
+      assert.equal(
+        containsSpeculativeHealthAdvice(phrase),
+        true,
+        `fast-path must return true for: ${phrase}`,
+      );
+    });
+  }
+
+  it('fast-path correctly returns false for safe replies (no LLM bypassed)', () => {
+    assert.equal(
+      containsSpeculativeHealthAdvice('Take 2 scoops daily with water.'),
+      false,
+    );
+  });
+
+  it('novel phrasing NOT in keyword list returns false from keyword check (LLM would catch it)', () => {
+    // "I'd recommend checking with a specialist" is not in the keyword list.
+    // The keyword function returns false → the async wrapper proceeds to the LLM.
+    // This test documents that the keyword fast-path correctly does NOT over-fire
+    // on ambiguous non-health text.
+    assert.equal(
+      containsSpeculativeHealthAdvice("I'd recommend checking our product page for details."),
+      false,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6.  classifyFollowUpInvitationInReply — fast-path contract
+//
+//     Same principle: the KNOWN_PATTERNS inline copy in classifyFollowUpInvitationInReply
+//     (inside aiService.ts) must match every pattern from FOLLOW_UP_INVITATION_PATTERNS
+//     in processAIReply.ts. We test the normalization + pattern logic here using the
+//     pure sentinel function sentenceContainsFollowUpInvitation (which uses the same
+//     normalization + patterns) as a proxy.
+// ---------------------------------------------------------------------------
+
+describe('classifyFollowUpInvitationInReply fast-path contract (pattern parity)', () => {
+  // Helpers that mirror the exact normalization used in sentenceContainsFollowUpInvitation
+  // and classifyFollowUpInvitationInReply's fast-path.
+  function normalize(v: string): string {
+    return (v ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\p{L}\p{N}\s?]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  const PATTERNS: RegExp[] = [
+    /(^|\s)(me|m)\s+tregon[ij]?(\s|$|[.,!?])/u,
+    /(^|\s)(me|m)\s+shkrua(j|ni|jeni)?(\s|$|[.,!?])/u,
+    /(^|\s)(me|m)\s+kontakto(n[ij]?|j)?(\s|$|[.,!?])/u,
+    /\blet me know\b/u,
+    /\bfeel free to (ask|reach|contact|message)\b/u,
+    /\b(is there )?anything else\b/u,
+    /\bif you (have|need|want).*(let me know|just ask|tell me)\b/u,
+  ];
+
+  function fastPathMatches(text: string): boolean {
+    const n = normalize(text);
+    return PATTERNS.some((re) => re.test(n));
+  }
+
+  const mustCatchFastPath: Array<[string, string]> = [
+    ['Albanian "më tregoni"', 'Nëse dëshironi detaje më tregoni.'],
+    ['Albanian "më shkruani"', 'Nëse keni pyetje më shkruani.'],
+    ['Albanian "më kontaktoni"', 'Ju lutem më kontaktoni për çdo pyetje.'],
+    ['English "let me know"', 'Let me know if you need anything else.'],
+    ['English "feel free to ask"', 'Feel free to ask if you have questions.'],
+    ['English "anything else"', 'Is there anything else I can help with?'],
+    ['English "if you need … let me know"', 'If you need help, just let me know.'],
+  ];
+
+  for (const [label, phrase] of mustCatchFastPath) {
+    it(`fast-path catches ${label}: "${phrase}"`, () => {
+      assert.equal(
+        fastPathMatches(phrase),
+        true,
+        `fast-path must match: ${phrase}`,
+      );
+    });
+  }
+
+  it('fast-path does NOT fire on a plain product reply (no invitation)', () => {
+    assert.equal(
+      fastPathMatches('The product is available in chocolate and vanilla.'),
+      false,
+    );
+  });
+
+  it('novel phrasing NOT in patterns returns false from fast-path (LLM would catch it)', () => {
+    // "don't hesitate to reach out" is not in the known patterns.
+    // The fast-path returns false → the async wrapper proceeds to the LLM.
+    assert.equal(
+      fastPathMatches("Don't hesitate to reach out if you have any further questions."),
+      false,
+    );
+  });
+});

@@ -55,7 +55,8 @@ Critical rules:
 - Treat any "Verified packaging details read from product images" block as reliable, available knowledge.
 - If the customer asked for ONE thing and it is missing → answer="" and missing=[that thing].
 - If the customer asked for MULTIPLE things, put the available ones in "answer" and the unavailable ones in "missing".
-- NEVER place the same concept in both "answer" and "missing".`;
+- NEVER place the same concept in both "answer" and "missing".
+- MULTI-PRODUCT RULE: When the catalog knowledge contains MULTIPLE products and the customer asked about a specific attribute (e.g. flavor, brand, weight) for several of them, include that attribute in "missing" if it is absent from AT LEAST ONE of those products — even if it IS present for some of them. Example: 3 products but only 1 has a flavor value → include the flavor label in "missing" because the other 2 cannot be answered for that attribute. Do NOT omit it from "missing" just because one product already provided it.`;
 
 /**
  * Assess answerability. Fail-closed by default: on empty context, an empty model

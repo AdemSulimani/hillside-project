@@ -83,6 +83,57 @@ const RECOMMENDATION_CUE_PATTERNS: RegExp[] = [
   /\b(sugjero|rekomand|cfare me sugjeron|çfarë më sugjeron|me mire|më mirë)\b/i,
 ];
 
+/**
+ * Comprehensive patterns that detect recommendation or comparison questions in both
+ * English and Albanian (including informal/dialect forms). These run against the
+ * diacritic-stripped, lowercased form produced by normalizeForRecommendationIntent().
+ *
+ * Kept intentionally broad: false-positives are harmless (they skip the product-gap
+ * escalation for a benign question), whereas false-negatives cause spurious alerts.
+ */
+const RECOMMENDATION_COMPARISON_PATTERNS: RegExp[] = [
+  // English — explicit recommendation / suggestion / comparison words
+  /\b(recommend|suggest(ion)?|which\s+one|which\s+should|which\s+is\s+bet+er|which\s+is\s+best|best\s+(option|choice|pick|one)|compare|vs\b|versus)\b/i,
+  /\b(what\s+(would|do)\s+you\s+(recommend|suggest)|which\s+(would|should)\s+(i|you)\s+(buy|get|take|choose|pick|recommend))\b/i,
+  /\b(which\s+(one|product)\s+(to|should\s+i)\s+(buy|get|choose|take|pick))\b/i,
+  // English — price ranking / value comparison (cheapest, most expensive, lowest price, etc.)
+  /\b(cheapest|least\s+expensive|lowest[\s-]priced?|most\s+affordable|most\s+expensive|priciest|highest[\s-]priced?)\b/i,
+  /\b(which\s+(is\s+)?(the\s+)?(cheapest|most\s+expensive|lowest[\s-]priced?|best[\s-]priced?|least\s+expensive))\b/i,
+  /\b(what\s+(is|are)\s+(the\s+)?(cheapest|most\s+expensive|least\s+expensive|lowest[\s-]price[sd]?))\b/i,
+  /\b(which\s+(costs?\s+)?(more|less|the\s+most|the\s+least))\b/i,
+  /\b(compare\s+(the\s+)?prices?|price\s+comparison|which\s+has\s+(the\s+)?(best|lowest|highest)\s+price)\b/i,
+  // Albanian — recommendation / suggestion keywords (diacritic-stripped)
+  /\b(sugjero|sugjeron|sugjeron|rekomand|rekomandon|preferoni?|preferencen?)\b/i,
+  /\b(cfare|cila|cilin|cilen|cilat)\b.{0,30}\b(sugjeron|rekomandon|preferon|rekomand)\b/i,
+  // Albanian — "me mire" / "me e mire" (better / the best)
+  /\bme\s+e?\s*mire\b/i,
+  // Albanian — "cili/cila/cilin/cilen eshte me ..." (which is the better/best/cheapest)
+  /\b(cili|cila|cilin|cilen|cilat)\s+eshte\s+me\b/i,
+  // Albanian — "cilen/cilin te marr / te blej / te zgjedh" (which to take/buy/choose)
+  /\b(cilen|cilin|cilat|cila)\b.{0,60}\b(te\s+marr|me\s+marr|te\s+blej|me\s+blej|te\s+zgjidh|me\s+zgjidh|te\s+zgjedh|me\s+zgjedh|te\s+preferon?|me\s+preferon?)\b/i,
+  // Albanian — "cilen mkishe than ..." / "cilin do te kishe zgjedhur" (which would you have told/chosen)
+  /\b(cilen|cilin|cilat|cila)\b.{0,80}\b(mkishe|do\s+te\s+kishe|kishe\s+than|than\s+ti|do\s+te\s+zgjidhnit?|zgjidhni?)\b/i,
+  // Albanian — "cfare me thuaj" / "cfare me rekomandon" (what do you suggest/recommend for me)
+  /\bcfare\s+me\s+(sugjeron|rekomandon|thuaj|thoni?)\b/i,
+  // Albanian — "me thuaj cilen" / "na thuaj cilin" (tell me which)
+  /\b(me|na)\s+thuaj\b.{0,30}\b(cilen|cilin|cilat|cila)\b/i,
+  // Albanian — price ranking: "me i lire" (cheapest), "me i shtrenjte" (most expensive).
+  // Accepts both Tosk "më" and Gheg "ma", and masculine/feminine endings
+  // (lirë/lira, shtrenjtë/shtrenjta), so dialect forms like "cila osht ma e lira"
+  // ("which is the cheapest") and "ma i shtrejt" are detected.
+  /\b(me|ma)\s+[ie]?\s*lir[aei]?\b/i,
+  /\b(me|ma)\s+[ie]?\s*shtre(njt|jt)[aei]?\b/i,
+  // Albanian — "ma e mire" / "ma mire" (better / the best, Gheg)
+  /\bma\s+e?\s*mir[ae]\b/i,
+  // Albanian — "cmim me te ulet/lire" (lowest price), "cmim me te larte/shtrenjte" (highest price)
+  /\b[cq]mim\s+me\s+te?\s+(ulet|lire)\b/i,
+  /\b[cq]mim\s+me\s+te?\s+(larte|shtrenjte)\b/i,
+  // Albanian — "cili/cilin kushton me pak/shume" (which costs less/more)
+  /\b(cili|cilin|cila|cilen)\b.{0,40}\b(kushton\s+me|me\s+pak|me\s+shume)\b/i,
+  // Albanian — "krahasim cmimesh" / "krahaso cmimet" (price comparison)
+  /\b(krahaso\s+[cq]mimet?|krahasim\s+[cq]mimesh?)\b/i,
+];
+
 function normalizeForDescriptionIntent(message: string): string {
   return message
     .trim()
@@ -92,6 +143,29 @@ function normalizeForDescriptionIntent(message: string): string {
     .replace(/[^\p{L}\p{N}\s?!.]/gu, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Same normalization used for recommendation detection. */
+function normalizeForRecommendationIntent(message: string): string {
+  return normalizeForDescriptionIntent(message);
+}
+
+/**
+ * Returns true when the customer is asking for a product recommendation or comparison
+ * (e.g. "which one would you recommend?", "cilen me sugjeron?", "cilen mkishe than ti
+ * me marr?") and NOT asking for factual catalog details.
+ *
+ * Used as a deterministic guard to prevent the product-information-gap escalation path
+ * from firing on recommendation questions: the AI CAN compare products using the catalog
+ * context it already has and should answer directly without creating a specialist alert.
+ *
+ * Covers both English and Albanian including informal/dialect spellings and diacritic-
+ * free text (patterns run on the diacritic-stripped, lowercased form).
+ */
+export function isProductRecommendationOrComparisonQuestion(message: string): boolean {
+  const t = normalizeForRecommendationIntent(message);
+  if (!t || t.length > 300) return false;
+  return RECOMMENDATION_COMPARISON_PATTERNS.some((re) => re.test(t));
 }
 
 /** Customer wants product facts from the description, not a recommendation list. */
@@ -130,14 +204,16 @@ Answer length (HIGHEST PRIORITY — this overrides any tone or sales-strategy nu
 - Never repeat or rephrase the customer's question, and never restate information the customer already gave you.
 - No opening pleasantries or filler ("Of course!", "Sure", "Thanks for reaching out", "I'd be happy to help") — lead directly with the answer.
 - Stay natural and polite — concise, not cold or robotic. Keep the words needed for the answer to be clear and grammatical; just cut everything that adds no information.
-- Give a longer answer ONLY when the question genuinely needs it or another rule requires fixed/verbatim wording: verbatim usage/dosage instructions, order confirmations (delivery line + the required follow-up sentence), unavailable-product handling (acknowledge + 1–2 alternatives), attribute questions that need every value listed, recommendations (1–2 products), or a genuinely multi-part question.
-- Even in those longer cases, stay compact: no intro/preamble line, do not restate the customer's question, do not repeat the same fact twice, and add no closing summary. Return only the required content (and any fixed/verbatim wording) — nothing extra.`;
+- Give a longer answer ONLY when the question genuinely needs it or another rule requires fixed/verbatim wording: verbatim usage/dosage instructions, order confirmations (delivery line + the required follow-up sentence), unavailable-product handling (acknowledge + up to 2–3 alternatives where available), attribute questions that need every value listed, recommendations (up to 2–3 products where available), or a genuinely multi-part question.
+- Even in those longer cases, stay compact: no intro/preamble line, do not restate the customer's question, do not repeat the same fact twice, and add no closing summary. Return only the required content (and any fixed/verbatim wording) — nothing extra.
+- NO GENERIC FOLLOW-UP INVITATIONS: Never end a product-information, price, stock, or comparison reply with a generic closing invitation such as "Do you want more information?", "Let me know if you need anything", "Feel free to ask", "Is there anything else?", "më tregoni", "më shkruani", "nëse keni pyetje", or any similar phrase. The ONLY permitted exception is the single order-oriented follow-up question allowed by the follow-up/closing policy (at most once per conversation, on the very first product turn) — outside that one case, stop immediately after answering the question, nothing extra.`;
 
 export const PRODUCT_DESCRIPTION_CONCISE_APPEND = `
 
 Product description rules (IMPORTANT):
 - NEVER send the full product description to the customer, even when a longer "Full description" appears in the catalog context.
-- For recommendations, comparisons, or general product suggestions: mention at most 2 products — pick the best fits. For each, write at most 1–2 short lines with only the key benefits or selling points from the catalog — do not copy or paraphrase long catalog text.
+- For recommendations, comparisons, or general product suggestions: list ONLY the product name(s) — one per line, no descriptions, no benefits, no details. Example: "Product A\nProduct B\nProduct C". Do NOT add any description or bullet-point text after each name. Only provide descriptions when the customer explicitly follows up and asks for more detail about a specific product (e.g. "tell me more about Product A", "what does it do", "what is the difference?").
+- PRICE COMPARISON EXCEPTION: when the customer asks which product is cheapest, most expensive, or asks to compare prices (e.g. "which is cheapest?", "cili eshte me i lire?", "compare prices"), include the price next to the product name — one per line in the format "Product Name: €X". Identify and state directly which is the cheapest/most expensive. Do not add descriptions beyond the price.
 - When the customer asks a specific question about a product: answer ONLY what they asked using relevant facts from the catalog; do not dump the entire description.
 - If a broader overview is needed, write a very short summary (1–2 lines) of the most important points — never paste the full description verbatim.
 - Do NOT proactively mention product attributes (flavor, size, color, variant, weight) unless the customer explicitly asks about them. These fields are provided as internal reference only — include them in your reply only when the customer's question directly asks about that attribute.

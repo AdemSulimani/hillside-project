@@ -307,6 +307,25 @@ export async function findActiveProductsByIds(
   return ordered;
 }
 
+/**
+ * Fields whose value is fed into buildProductText() and therefore into the embedding.
+ * Editing any of these invalidates the stored vector — see EMBEDDING_INVALIDATING_FIELDS
+ * usage in updateProduct().
+ */
+const EMBEDDING_INVALIDATING_FIELDS = new Set<keyof UpdateProductInput>([
+  'name',
+  'brand',
+  'description',
+  'usage_description',
+  'category',
+  'tags',
+  'flavor',
+  'size',
+  'color',
+  'variant',
+  'weight',
+]);
+
 export async function updateProduct(
   id: string,
   tenantId: string,
@@ -331,6 +350,17 @@ export async function updateProduct(
     paramIdx++;
   }
   setClauses.push('updated_at = now()');
+
+  // Atomically null the stale embedding (and its hash) in the SAME statement whenever an
+  // embedding-input field changes. This closes the window where the product's new text was
+  // already live while the OLD vector was still searchable — which made hybrid (RRF) search
+  // fuse a fresh keyword hit with a stale semantic identity and surface the wrong product.
+  // The row stays keyword-searchable; the priority re-embed job (queued by the caller) and
+  // the fast reconcile lane repopulate the vector within seconds.
+  const touchesEmbedding = keys.some((k) => EMBEDDING_INVALIDATING_FIELDS.has(k));
+  if (touchesEmbedding) {
+    setClauses.push('embedding = NULL', 'embedding_input_hash = NULL');
+  }
 
   const { rows } = await pool.query<Product>(
     `UPDATE products SET ${setClauses.join(', ')} WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL RETURNING *`,
@@ -704,6 +734,21 @@ const HNSW_EF_SEARCH = (() => {
 })();
 
 /**
+ * Upper bound for the ADAPTIVE ef_search escalation. Because the HNSW index is global and
+ * the tenant filter is applied AFTER the ANN scan, a small tenant whose products are a
+ * tiny fraction of all rows can have its correct matches fall outside the global
+ * top-`HNSW_EF_SEARCH` candidate pool — so the first pass returns fewer than `limit` rows
+ * even though the right product exists ("exists but wasn't retrieved"). When that happens
+ * we retry once with this much larger pool to recover recall, paying the extra latency
+ * only on the suspicious under-filled case rather than on every query.
+ */
+const HNSW_EF_SEARCH_MAX = (() => {
+  const raw = process.env.HNSW_EF_SEARCH_MAX;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 500;
+})();
+
+/**
  * Vector similarity search using pgvector's cosine distance operator.
  * Returns products ordered by closest embedding match.
  *
@@ -715,31 +760,58 @@ export async function searchProductsBySimilarity(
   tenantId: string,
   queryEmbedding: number[],
   limit = 5,
+  expectedModel?: string,
 ): Promise<SimilarProduct[]> {
-  const efSearch = Math.max(HNSW_EF_SEARCH, limit);
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
-    const { rows } = await client.query<SimilarProduct>(
-      `SELECT *, 1 - (embedding <=> $2) AS similarity
-       FROM products
-       WHERE tenant_id = $1
-         AND deleted_at IS NULL
-         AND is_active = true
-         AND embedding IS NOT NULL
-       ORDER BY embedding <=> $2
-       LIMIT $3`,
-      [tenantId, toSql(queryEmbedding), limit],
-    );
-    await client.query('COMMIT');
-    return rows;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    throw err;
-  } finally {
-    client.release();
+  // When the caller knows which embedding model produced the QUERY vector, exclude rows
+  // whose stored vector came from a DIFFERENT model. Comparing vectors across models
+  // yields meaningless cosine distances (effectively-random neighbours) → wrong/irrelevant
+  // products. Rows with a NULL model are treated as compatible (legacy rows embedded
+  // before the model column existed share the current model/dimensions); they are healed
+  // by the reconcile job over time.
+  const modelGuard = expectedModel
+    ? 'AND (embedding_model IS NULL OR embedding_model = $4)'
+    : '';
+  const params: unknown[] = [tenantId, toSql(queryEmbedding), limit];
+  if (expectedModel) params.push(expectedModel);
+
+  const runWithEfSearch = async (efSearch: number): Promise<SimilarProduct[]> => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+      const { rows } = await client.query<SimilarProduct>(
+        `SELECT *, 1 - (embedding <=> $2) AS similarity
+         FROM products
+         WHERE tenant_id = $1
+           AND deleted_at IS NULL
+           AND is_active = true
+           AND embedding IS NOT NULL
+           ${modelGuard}
+         ORDER BY embedding <=> $2
+         LIMIT $3`,
+        params,
+      );
+      await client.query('COMMIT');
+      return rows;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  };
+
+  const firstPass = await runWithEfSearch(Math.max(HNSW_EF_SEARCH, limit));
+
+  // Adaptive recall recovery: an under-filled result on a GLOBAL index usually means the
+  // tenant's true matches were crowded out of the candidate pool by other tenants' rows.
+  // Retry once with a much larger pool. (If the tenant genuinely has fewer than `limit`
+  // embedded products the retry simply returns the same rows — a cheap, bounded cost.)
+  const widerEfSearch = Math.max(HNSW_EF_SEARCH_MAX, limit);
+  if (firstPass.length < limit && widerEfSearch > Math.max(HNSW_EF_SEARCH, limit)) {
+    return runWithEfSearch(widerEfSearch);
   }
+  return firstPass;
 }
 
 /** Returns the number of active, non-deleted products for a tenant. */

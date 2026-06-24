@@ -5,6 +5,7 @@ import {
   type ExtractedProductData,
 } from './AttachDocumentService';
 import { decodeLegacyTextBuffer, repairMojibake } from '../../utils/textEncoding';
+import { parsePrice } from './priceParsing';
 
 interface SpreadsheetRow {
   [key: string]: unknown;
@@ -61,11 +62,11 @@ export class AttachSpreadsheetService extends AttachDocumentService {
         product.description = repairMojibake(String(row[fieldMap.description] ?? '').trim()) || undefined;
       }
       if (fieldMap.price) {
-        const parsed = this.parsePrice(row[fieldMap.price]);
+        const parsed = parsePrice(row[fieldMap.price]);
         if (parsed != null) product.price = parsed;
       }
       if (fieldMap.discounted_price) {
-        const parsed = this.parsePrice(row[fieldMap.discounted_price]);
+        const parsed = parsePrice(row[fieldMap.discounted_price]);
         if (parsed != null) product.discounted_price = parsed;
       }
       if (fieldMap.brand) {
@@ -148,12 +149,4 @@ export class AttachSpreadsheetService extends AttachDocumentService {
     return map;
   }
 
-  private parsePrice(value: unknown): number | undefined {
-    if (typeof value === 'number' && !isNaN(value) && value >= 0) {
-      return value;
-    }
-    const raw = String(value ?? '').replace(/[^0-9.]/g, '');
-    const parsed = parseFloat(raw);
-    return !isNaN(parsed) && parsed >= 0 ? parsed : undefined;
-  }
 }

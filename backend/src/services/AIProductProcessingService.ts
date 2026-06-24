@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import type { ExtractedProductData } from './documents/AttachDocumentService';
+import { parsePrice } from './documents/priceParsing';
 
 const SYSTEM_PROMPT = `You are a product data extraction assistant. Given raw text extracted from a document or image, identify and structure product information.
 
@@ -48,7 +49,9 @@ export class AIProductProcessingService {
           content: `Extract product data from the following text:\n\n${truncated}`,
         },
       ],
-      temperature: 0.1,
+      // Deterministic extraction so the same source document always yields the same
+      // structured product data (names, prices, attributes) instead of drifting per run.
+      temperature: 0,
       max_tokens: 4096,
       response_format: { type: 'json_object' },
     });
@@ -101,17 +104,13 @@ export class AIProductProcessingService {
         if (typeof item.usage_description === 'string' && item.usage_description.trim()) {
           product.usage_description = item.usage_description.trim().slice(0, 10000);
         }
-        if (typeof item.price === 'number' && item.price >= 0) {
-          product.price = item.price;
-        } else if (typeof item.price === 'string') {
-          const parsed = parseFloat(item.price);
-          if (!isNaN(parsed) && parsed >= 0) product.price = parsed;
+        {
+          const parsed = parsePrice(item.price);
+          if (parsed !== undefined) product.price = parsed;
         }
-        if (typeof item.discounted_price === 'number' && item.discounted_price >= 0) {
-          product.discounted_price = item.discounted_price;
-        } else if (typeof item.discounted_price === 'string') {
-          const parsed = parseFloat(item.discounted_price);
-          if (!isNaN(parsed) && parsed >= 0) product.discounted_price = parsed;
+        {
+          const parsed = parsePrice(item.discounted_price);
+          if (parsed !== undefined) product.discounted_price = parsed;
         }
         if (typeof item.sku === 'string' && item.sku.trim()) {
           product.sku = item.sku.trim().slice(0, 100);

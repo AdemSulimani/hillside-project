@@ -1,4 +1,4 @@
-import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
+import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL, OPENAI_EMBEDDING_MODEL } from './openaiClient';
 import { findTenantById } from '../db/models/tenant';
 import {
   collectRecentlyDiscussedProductIds,
@@ -35,6 +35,7 @@ import {
   CATEGORY_GROUP_MATCH_LIMIT,
   detectProductQueryScope,
   expandProductsForAttributeQuery,
+  extractConversationProductAnchor,
   isCategoryAttributeFollowUp,
   resolveProductsForContextualQuery,
   type AttributeQueryIntentHint,
@@ -48,6 +49,7 @@ import {
   formatCatalogDescriptionLine,
   formatCatalogUsageLine,
   isProductDescriptionQuestion,
+  isProductRecommendationOrComparisonQuestion,
   PRODUCT_DESCRIPTION_CONCISE_APPEND,
   PRODUCT_DESCRIPTION_TARGETED_APPEND,
   SHORTEST_ANSWER_APPEND,
@@ -91,7 +93,34 @@ const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 6000;
 })();
 const RECENT_RAW_HISTORY_MESSAGES = 10;
-const HISTORY_FETCH_LIMIT = 40;
+
+/**
+ * Single source of truth for how many recent messages every AI decision path loads for
+ * a conversation — the reply generator, the intent classifiers, and the burst/context
+ * builder in processAIReply all use this. Keeping them identical prevents the situation
+ * where intent routing and product resolution "see" a different slice of the conversation
+ * than the generator that writes the reply, which previously produced contradictory
+ * handling within a single turn. Configurable via env so it can be tuned without a deploy.
+ */
+export const HISTORY_FETCH_LIMIT = (() => {
+  const raw = process.env.AI_HISTORY_FETCH_LIMIT;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 40;
+})();
+
+/**
+ * Sampling temperature for the customer-facing reply. A LOW default makes the assistant
+ * resolve the prompt (and any overlapping guideline rules) the SAME way every time, which
+ * is the single biggest lever against "different answers to the same question" and against
+ * inconsistent resolution of layered instructions. It does NOT change the assistant's
+ * personality, tone, or any business rule — only the run-to-run randomness. Tunable via
+ * AI_REPLY_TEMPERATURE so it can be adjusted without a deploy.
+ */
+const AI_REPLY_TEMPERATURE = (() => {
+  const raw = process.env.AI_REPLY_TEMPERATURE;
+  const n = raw ? parseFloat(raw) : NaN;
+  return Number.isFinite(n) && n >= 0 && n <= 2 ? n : 0.3;
+})();
 
 /** Rough GPT token estimate: ~4 characters per token. */
 function estimateTokens(text: string): number {
@@ -579,12 +608,27 @@ const EMBEDDING_QUERY_TIMEOUT_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 5000;
 })();
 
-/** In-process LRU-style cache for query embeddings (maps trimmed text → vector). */
+/** In-process LRU-style cache for query embeddings (maps model+trimmed text → vector). */
 const QUERY_EMBEDDING_CACHE_MAX = 256;
 const queryEmbeddingCache = new Map<string, number[]>();
 
+/** Active embedding model — mirrors embeddingService.generateEmbedding's resolution. */
+function activeEmbeddingModel(): string {
+  return process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL;
+}
+
+/**
+ * Cache key includes the active embedding model so that changing OPENAI_EMBEDDING_MODEL at
+ * runtime (or across a deploy that reuses a warm process) can never serve a vector produced
+ * by a DIFFERENT model. Mixing vectors from two models yields meaningless cosine distances
+ * and effectively-random nearest neighbours → wrong/irrelevant product retrieval.
+ */
+function queryEmbeddingCacheKey(text: string): string {
+  return `${activeEmbeddingModel()}\u0000${text}`;
+}
+
 function getCachedQueryEmbedding(text: string): number[] | undefined {
-  return queryEmbeddingCache.get(text);
+  return queryEmbeddingCache.get(queryEmbeddingCacheKey(text));
 }
 
 function setCachedQueryEmbedding(text: string, vector: number[]): void {
@@ -593,7 +637,7 @@ function setCachedQueryEmbedding(text: string, vector: number[]): void {
     const oldest = queryEmbeddingCache.keys().next().value;
     if (oldest !== undefined) queryEmbeddingCache.delete(oldest);
   }
-  queryEmbeddingCache.set(text, vector);
+  queryEmbeddingCache.set(queryEmbeddingCacheKey(text), vector);
 }
 
 /**
@@ -653,7 +697,12 @@ export async function matchProductsForCustomerMessage(
   let semanticSkipped = false;
   if (embeddingVector) {
     try {
-      const similar = await searchProductsBySimilarity(tenantId, embeddingVector, limit);
+      const similar = await searchProductsBySimilarity(
+        tenantId,
+        embeddingVector,
+        limit,
+        activeEmbeddingModel(),
+      );
       semanticCandidates = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
     } catch {
       semanticSkipped = true;
@@ -1204,7 +1253,8 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
           role: 'system',
           content:
             'You are a price-intent classifier. Determine whether the customer is asking about price, cost, or how much something costs — in any language, dialect, slang, shorthand, or with misspellings. ' +
-            'Albanian examples that MUST return true: "sa kushton?", "sa kushtojn?", "sa kushtojne?", "sa kushtoi?", "sa ben?", "cmimi?", "qmimi?". ' +
+            'Also return true for price-comparison and price-ranking questions such as "which is cheapest?", "which costs more?", "which is most expensive?", "cili eshte me i lire?", "cili kushton me pak?", "compare prices", "krahasim cmimesh" — these require price data to answer. ' +
+            'Albanian direct-price examples that MUST return true: "sa kushton?", "sa kushtojn?", "sa kushtojne?", "sa kushtoi?", "sa ben?", "cmimi?", "qmimi?". ' +
             'Return only JSON: {"is_price_question": true} or {"is_price_question": false}.',
         },
         {
@@ -1245,6 +1295,12 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
     'price',
     'cost',
     'how much',
+    'cheapest',
+    'most expensive',
+    'lowest price',
+    'highest price',
+    'compare price',
+    'price comparison',
     'sa kushton',
     'kushton',
     'kushtojne',
@@ -1257,6 +1313,13 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
     'cmim',
     'çmim',
     'qmim',
+    'me i lire',
+    'me e lire',
+    'me i shtrenjte',
+    'me e shtrenjte',
+    'krahasim cmimesh',
+    'krahasim qmimesh',
+    'krahaso cmimet',
     '$',
     '€',
   ].some((needle) => t.includes(needle));
@@ -1330,6 +1393,145 @@ export async function customerAskedAboutDiscount(message: string): Promise<boole
 }
 
 /**
+ * AI-backed speculative-health-advice detector.
+ *
+ * Upgrades `containsSpeculativeHealthAdvice` from a fixed phrase list to an open
+ * vocabulary: novel phrasings the keyword list has never seen — "I'd recommend
+ * checking with a specialist", "it would be wise to see a health expert", new
+ * Albanian formulations, etc. — are now caught by the LLM.
+ *
+ * Architecture (fast → precise):
+ *   1. Keyword fast-path: if the existing phrase list already flags the text the
+ *      LLM call is skipped entirely (zero extra latency for known patterns).
+ *   2. LLM pass: open-vocabulary semantic check that catches anything the list
+ *      missed.
+ *   3. Fail-open on error: returns false so a transient OpenAI outage never
+ *      silently suppresses a valid reply.
+ *
+ * The catalog usage-description check (adviceIsFromCatalog) deliberately keeps
+ * the synchronous keyword version — catalog text is our own structured data, not
+ * free-form model output, so the phrase list is fully adequate there and the
+ * extra round-trip would be wasteful.
+ */
+export async function classifySpeculativeHealthAdvice(text: string): Promise<boolean> {
+  if (!text.trim()) return false;
+
+  // Fast path: keyword list catches the most common known phrases instantly.
+  if (containsSpeculativeHealthAdvice(text)) return true;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict safety classifier for a product sales chatbot. ' +
+            'Determine whether the text contains ANY recommendation that the customer consult, speak to, or seek advice from a doctor, physician, specialist, dietitian, nutritionist, or any health/medical professional — in ANY language, phrasing, or wording, including novel or indirect formulations such as "I would recommend checking with a specialist", "it would be wise to see a health expert", "consider speaking to your GP", or the Albanian equivalents. ' +
+            'Return ONLY JSON: {"contains_speculative_health_advice": true} or {"contains_speculative_health_advice": false}.',
+        },
+        { role: 'user', content: text },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content?.trim();
+    if (raw) {
+      const parsed = JSON.parse(raw) as { contains_speculative_health_advice?: boolean };
+      if (typeof parsed.contains_speculative_health_advice === 'boolean') {
+        return parsed.contains_speculative_health_advice;
+      }
+    }
+  } catch (err) {
+    console.warn('[speculative_health_classifier] classifier failed — falling open', {
+      error: err instanceof Error ? err.message : String(err),
+      text_preview: text.slice(0, 80),
+    });
+  }
+
+  // Keyword check already returned false above; LLM failed → fail-open.
+  return false;
+}
+
+/**
+ * AI-backed follow-up invitation detector for outbound AI replies.
+ *
+ * The existing regex patterns (`FOLLOW_UP_INVITATION_PATTERNS` in processAIReply.ts)
+ * cover a fixed list of known phrases ("let me know", "feel free to ask",
+ * "më tregoni", …). Novel formulations — "don't hesitate to reach out",
+ * "po keni pyetje tjera ju lutem shkruani", "nëse ka ndonjë pyetje jemi këtu" —
+ * escape them entirely.
+ *
+ * Architecture (fast → precise):
+ *   1. Regex fast-path (inline copy of known patterns): instant for phrases
+ *      already in the list. The copy here stays in sync with processAIReply.ts
+ *      by intention — if you add a pattern there, add it here too; the LLM
+ *      backstop covers the gap in between.
+ *   2. LLM pass: catches any novel invitation phrasing.
+ *   3. Fail-open on error: returns false so a transient failure never causes a
+ *      wrongly-stripped reply.
+ *
+ * This is used in processAIReply.ts as the initial whole-reply check gate.
+ * Per-sentence stripping still uses the fast regex (FOLLOW_UP_INVITATION_PATTERNS)
+ * to identify WHICH sentence to remove — once the LLM has confirmed the reply
+ * contains an invitation sentence, the regex narrows it down.
+ */
+export async function classifyFollowUpInvitationInReply(reply: string): Promise<boolean> {
+  const text = (reply ?? '').trim();
+  if (!text) return false;
+
+  // Fast path: normalize and run the known patterns.
+  const normalized = normalizeForIntentMatch(text);
+  const KNOWN_PATTERNS: RegExp[] = [
+    /(^|\s)(me|m)\s+tregon[ij]?(\s|$|[.,!?])/u,
+    /(^|\s)(me|m)\s+shkrua(j|ni|jeni)?(\s|$|[.,!?])/u,
+    /(^|\s)(me|m)\s+kontakto(n[ij]?|j)?(\s|$|[.,!?])/u,
+    /\blet me know\b/u,
+    /\bfeel free to (ask|reach|contact|message)\b/u,
+    /\b(is there )?anything else\b/u,
+    /\bif you (have|need|want).*(let me know|just ask|tell me)\b/u,
+  ];
+  if (KNOWN_PATTERNS.some((re) => re.test(normalized))) return true;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict classifier for a sales chatbot reply filter. ' +
+            'Determine whether the assistant reply contains ANY sentence that invites the customer to follow up with further questions, contact the business, or reach out again — in ANY language or phrasing, including novel or informal formulations such as "don\'t hesitate to reach out", "we\'re always here", "po keni pyetje tjera shkruani", "nëse keni ndonjë pyetje jemi këtu", or similar. ' +
+            'Do NOT flag order-related follow-ups like "would you like to order?" — only flag general follow-up invitations that say the customer may ask more questions or contact the business. ' +
+            'Return ONLY JSON: {"contains_follow_up_invitation": true} or {"contains_follow_up_invitation": false}.',
+        },
+        { role: 'user', content: text },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content?.trim();
+    if (raw) {
+      const parsed = JSON.parse(raw) as { contains_follow_up_invitation?: boolean };
+      if (typeof parsed.contains_follow_up_invitation === 'boolean') {
+        return parsed.contains_follow_up_invitation;
+      }
+    }
+  } catch (err) {
+    console.warn('[follow_up_invitation_classifier] classifier failed — falling open', {
+      error: err instanceof Error ? err.message : String(err),
+      reply_preview: text.slice(0, 80),
+    });
+  }
+
+  return false;
+}
+
+/**
  * LLM classifier (semantic, not keyword-based) that decides whether a message is a
  * follow-up about the product(s) already discussed earlier in the conversation —
  * asking for ANY detail or attribute (price, brand, flavor, size, color, variant,
@@ -1398,6 +1600,160 @@ export async function classifyContextualProductFollowUp(
   }
 
   return false;
+}
+
+export interface OtherProductOptionsIntentResult {
+  is_other_options_request: boolean;
+  /**
+   * The product category/type the customer is asking about (e.g. "protein", "creatine").
+   * Null when the category couldn't be determined or the intent wasn't detected.
+   */
+  category_hint: string | null;
+}
+
+/**
+ * Fast synchronous heuristic for detecting "other options" intent.
+ * Used as a fallback when the LLM classifier is unavailable, and as a
+ * pre-screen to skip the LLM call on obviously non-matching messages.
+ */
+function otherOptionsHeuristic(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!t || t.length > 300) return false;
+
+  const OTHER_OPTIONS_PATTERNS: RegExp[] = [
+    // "any/are there/do you have other|more options/products/alternatives"
+    /\b(any|are there|do you have|a keni|keni)\s+(other|more|different|tjet[ëe]r|ndryshme)\s*\w*\s*(options?|products?|choices?|alternatives?|opsione|produkte|zgjedhje)\b/i,
+    // "other/more/alternative X options/products"
+    /\b(other|more|alternative|tjet[ëe]r)\s+\w+\s+(options?|products?|opsione|produkte)\b/i,
+    // "what else / anything else"
+    /\b(what else|anything else|else do you (have|carry|sell)|cfare tjeter|tjetere|ndonje tjeter)\b/i,
+    // "show/suggest/recommend me more/other"
+    /\b(show|suggest|recommend)\s+(me\s+)?(more|other|different|tjeter)\b/i,
+    // Albanian: "me shumë alternativa/opsione"
+    /\bme\s+(shum[ëe]|alternativa|opsione|mundesi)\b/i,
+    // Albanian: "a keni / keni ... tjetër/more" (single additional word in between)
+    /\b(a\s+keni|keni)\s+\w+\s+(tjet[ëe]r|me\s+teper|tjeter|me shume)\b/i,
+    // Albanian plural "tjera" / "tjetra" — "a keni tjera", "keni tjera", "a ka tjera"
+    // "tjera" is the plural of "tjetër" (= "others/other ones"), not covered by tjet[ëe]r
+    /\b(a\s+keni|keni|a\s+ka|ka)\s+(tjera|tjetra)\b/i,
+    // "ndonjë tjetër" / "ndonje tjeter" — "any other"
+    /\bndonj[eë]\s+tjet[eë]r\b/i,
+    // "more options" / "other options" standalone
+    /\b(more|other)\s+options?\b/i,
+    // "any alternatives" / "any other alternatives"
+    /\bany\s+(other\s+)?alternatives?\b/i,
+  ];
+
+  return OTHER_OPTIONS_PATTERNS.some((re) => re.test(t));
+}
+
+/**
+ * Classifies whether the customer is asking to see DIFFERENT / MORE / OTHER products or
+ * alternatives beyond what has already been shown — in any language, dialect, slang, or with
+ * typos. This cannot be reliably detected with regex alone because natural language varies
+ * enormously (e.g. "got anything else in that line?", "show me the rest", "ndonjë tjetër?").
+ *
+ * Approach: LLM classifier (primary) with a keyword/regex heuristic fallback. The heuristic
+ * is also used as a pre-screen to skip the LLM call on obviously non-matching messages so we
+ * only pay for the classifier when the message is plausibly relevant.
+ *
+ * When "other options" intent is detected the caller should:
+ *   1. Use CATEGORY_GROUP_MATCH_LIMIT (not FOCUSED_PRODUCT_MATCH_LIMIT) to retrieve
+ *      more products from the catalog.
+ *   2. Perform a fresh category search (skip the persisted-product contextual resolver)
+ *      so the customer is shown products they haven't already been shown.
+ */
+export async function classifyOtherProductOptionsIntent(
+  message: string,
+): Promise<OtherProductOptionsIntentResult> {
+  const inbound = message.trim();
+  const falseResult: OtherProductOptionsIntentResult = { is_other_options_request: false, category_hint: null };
+
+  if (!inbound) return falseResult;
+
+  // Fast pre-screen: skip LLM call for very short messages that clearly aren't
+  // "other options" requests (greetings, single-word replies, etc.).
+  const couldBeOtherOptions =
+    inbound.length >= 5 &&
+    !/^(ok|yes|no|po|jo|hi|hello|hey|sure|thanks|ok po|spo)(\s*[!.?])?$/i.test(inbound.trim());
+
+  if (!couldBeOtherOptions) return falseResult;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict intent classifier for an e-commerce assistant. ' +
+            'Determine whether the customer is asking to see MORE / DIFFERENT / OTHER products or alternatives ' +
+            'beyond what they have already been shown — in any language, dialect, slang, or with typos.\n\n' +
+            'Return TRUE when the message expresses intent such as:\n' +
+            '  "are there other options?", "any more alternatives?", "what else do you have?",\n' +
+            '  "show me more", "any other products in this category?", "do you have anything else?",\n' +
+            '  "other variants", "other choices", "tjetër?", "më shumë alternativa", "a keni tjeter",\n' +
+            '  "ndonjë tjetër?", "got anything else?", "show me the rest of the range".\n\n' +
+            'Return FALSE when the message is:\n' +
+            '  - asking about details/price/attributes of a specific product already discussed,\n' +
+            '  - a first-time product inquiry with no prior context,\n' +
+            '  - an order placement or affirmation,\n' +
+            '  - a greeting, closing, or topic unrelated to product browsing.\n\n' +
+            'Also extract the product category/type the customer is asking about when clear ' +
+            '(e.g. "protein", "creatine", "weight gainer"). Return null for category_hint when ' +
+            'the category is not mentioned or cannot be determined.\n\n' +
+            'Return only JSON: {"is_other_options_request": true, "category_hint": "protein"} ' +
+            'or {"is_other_options_request": false, "category_hint": null}.',
+        },
+        {
+          role: 'user',
+          content: `Customer message:\n${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 64,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (raw?.trim()) {
+      const parsed = JSON.parse(raw) as {
+        is_other_options_request?: boolean;
+        category_hint?: string | null;
+      };
+      if (typeof parsed.is_other_options_request === 'boolean') {
+        const result: OtherProductOptionsIntentResult = {
+          is_other_options_request: parsed.is_other_options_request,
+          category_hint:
+            typeof parsed.category_hint === 'string' && parsed.category_hint.trim()
+              ? parsed.category_hint.trim()
+              : null,
+        };
+        console.info('[other_options_classifier]', {
+          result: result.is_other_options_request,
+          category_hint: result.category_hint,
+          message_preview: inbound.slice(0, 80),
+        });
+        return result;
+      }
+    }
+  } catch (err) {
+    console.warn('[other_options_classifier] Classifier failed — falling back to heuristic', {
+      error: err instanceof Error ? err.message : String(err),
+      message_preview: inbound.slice(0, 80),
+    });
+  }
+
+  // Keyword/regex fallback when classifier is unavailable.
+  return { is_other_options_request: otherOptionsHeuristic(inbound), category_hint: null };
 }
 
 /**
@@ -1745,15 +2101,22 @@ export function formatProductCatalog(
 
   // When the catalog has more products than are shown, append a clear instruction
   // so the AI does not falsely claim a product doesn't exist just because it is
-  // absent from the current context window.
+  // absent from the current context window. CRITICAL: the note must also explicitly
+  // prohibit naming or inventing products from the hidden portion — without this
+  // the model may hallucinate product names for the "missing" slots when the
+  // customer asks for other/more options in a category.
   const hiddenCount = totalCatalogCount > products.length ? totalCatalogCount - products.length : 0;
   if (hiddenCount > 0) {
     return (
       catalogLines +
       `\n\n[Note: Only the ${products.length} most relevant product(s) are shown above. ` +
       `The full catalog contains ${totalCatalogCount} active product(s). ` +
+      `IMPORTANT: Do NOT name, invent, or reference any specific product not listed above — only recommend products explicitly shown in this catalog section. ` +
       `If the customer asks about a product not listed here, do NOT say it does not exist — ` +
-      `ask the customer to clarify the product name or provide more details.]`
+      `ask the customer to clarify the product name or provide more details so you can look it up accurately. ` +
+      `CRITICAL: If you recommended a product in a previous conversation turn and it is not shown in the current catalog section, ` +
+      `that product IS in the catalog — do NOT say it is unavailable or missing. ` +
+      `The catalog section shown here is a filtered view for this specific query, not the complete catalog.]`
     );
   }
 
@@ -2736,9 +3099,13 @@ function buildMessagesArray(
   ];
 
   if (olderHistorySummary) {
+    // Inject as a clearly-labeled SYSTEM context note rather than an assistant turn. As an
+    // assistant message the model treats the recap as its own prior statements and tends to
+    // "double down" on it; as labeled background context it is used for grounding only and is
+    // not mistaken for something the assistant actually said to the customer.
     messages.push({
-      role: 'assistant',
-      content: olderHistorySummary,
+      role: 'system',
+      content: `[Background context — summary of earlier messages, not a prior reply]\n${olderHistorySummary}`,
     });
   }
 
@@ -2990,6 +3357,89 @@ async function isConversationEnding(
   }
 }
 
+export interface ProductNameHallucinationResult {
+  hasHallucination: boolean;
+  /** Specific product names in the reply that could not be matched to any catalog entry. */
+  suspectedNames: string[];
+}
+
+/**
+ * Post-generation product-name hallucination guard. Checks whether the AI reply names
+ * any specific products that are NOT present in the matched catalog products.
+ *
+ * Architecture mirrors filterHallucinatedPrices but uses an LLM classifier because
+ * product names cannot be reliably extracted with regex across languages, abbreviations,
+ * and brand variants. The LLM performs fuzzy matching so "MyBrand Protein" is not
+ * flagged when "MyBrand Protein Powder 1kg" is in the catalog.
+ *
+ * Fail-open: returns { hasHallucination: false } on any error so the reply is never
+ * blocked due to a guard failure. Only fires when matchedProducts is non-empty.
+ */
+export async function filterHallucinatedProductNames(
+  replyText: string,
+  matchedProducts: Product[],
+): Promise<ProductNameHallucinationResult> {
+  const empty: ProductNameHallucinationResult = { hasHallucination: false, suspectedNames: [] };
+
+  if (!replyText.trim() || matchedProducts.length === 0) return empty;
+
+  const catalogNames = matchedProducts
+    .map((p) => p.name?.trim())
+    .filter((n): n is string => Boolean(n));
+
+  if (catalogNames.length === 0) return empty;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a strict catalog-grounding validator for an e-commerce assistant reply.\n\n' +
+            'Task: identify specific product names mentioned in the reply that do NOT appear in the provided catalog list.\n\n' +
+            'Rules:\n' +
+            '- Only flag SPECIFIC product names (proper nouns, brand+product combos like "SuperWhey Pro X").\n' +
+            '- Do NOT flag generic category terms used descriptively (e.g. "protein powder", "creatine", "whey", "supplement").\n' +
+            '- Use fuzzy matching: treat a reply name as matching if it is a partial form, abbreviation, or diacritic variant of a catalog name ' +
+            '(e.g. "MyBrand Protein" matches "MyBrand Protein Powder 1kg"; "Carbo One" matches "Carbo One 1kg me shije limon").\n' +
+            '- Be conservative — only flag when you are confident the name does not match any listed catalog product.\n' +
+            '- If the reply does not name any specific products, or all named products match the catalog, return an empty list.\n\n' +
+            'Return only JSON: {"hallucinated_names": ["name1", "name2"]} or {"hallucinated_names": []}',
+        },
+        {
+          role: 'user',
+          content:
+            `Known catalog products (the ONLY products the assistant may name):\n` +
+            `${catalogNames.map((n, i) => `${i + 1}. ${n}`).join('\n')}\n\n` +
+            `Assistant reply to validate:\n${replyText.slice(0, 1200)}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 128,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw?.trim()) return empty;
+
+    const parsed = JSON.parse(raw) as { hallucinated_names?: unknown };
+    const names = Array.isArray(parsed.hallucinated_names)
+      ? (parsed.hallucinated_names as unknown[])
+          .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+          .map((n) => n.trim())
+      : [];
+
+    return { hasHallucination: names.length > 0, suspectedNames: names };
+  } catch (err) {
+    // Fail-open: never block a reply solely due to guard failure.
+    console.warn('[product_name_guard] Guard classifier failed — failing open', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return empty;
+  }
+}
+
 export async function generateReply(
   conversationId: string,
   tenantId: string,
@@ -3029,7 +3479,7 @@ export async function generateReply(
     conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
       ? conversationHistoryWindow.slice(-RECENT_RAW_HISTORY_MESSAGES)
       : conversationHistoryWindow;
-  const [customerAskedPrice, customerAskedDiscount, detectedLanguage, attributeIntent] =
+  const [customerAskedPrice, customerAskedDiscount, detectedLanguage, attributeIntent, otherOptionsIntent] =
     await Promise.all([
       customerAskedAboutPrice(inboundMessage),
       customerAskedAboutDiscount(inboundMessage),
@@ -3037,8 +3487,22 @@ export async function generateReply(
         ? Promise.resolve(precomputedLanguage)
         : detectReplyLanguage(inboundMessage, conversationHistoryWindow),
       classifyProductAttributeIntent(inboundMessage),
+      // Detects "are there any other options?" style requests so we use the wider
+      // category search limit and skip the persisted-product resolver (which would
+      // return the same products the customer has already seen).
+      classifyOtherProductOptionsIntent(inboundMessage),
     ]);
   const language: ReplyLocale = detectedLanguage;
+  // "Do you have other brands/weights?" is already handled deterministically by
+  // isCategoryAttributeFollowUp — don't let the other-options classifier override it.
+  // Also exclude when classifyProductAttributeIntent (already LLM-based) already determined
+  // this is an attribute question: attribute questions need the persisted product context for
+  // aggregation, not a fresh search. This means novel phrasings like "can you show me
+  // different brands?" land in the contextual-resolver path, not the fresh-search path.
+  const isOtherOptionsRequest =
+    otherOptionsIntent.is_other_options_request &&
+    !isCategoryAttributeFollowUp(inboundMessage) &&
+    !attributeIntent.is_attribute_question;
 
   if (!tenant) {
     throw new Error(`Tenant not found: ${tenantId}`);
@@ -3076,10 +3540,20 @@ export async function generateReply(
 
   const searchText = inboundMessage.trim();
   const attributeIntentHint: AttributeQueryIntentHint = attributeIntent;
+  // A price-comparison or recommendation follow-up ("which is the cheapest?",
+  // "cila osht ma e lira?", "which do you recommend?") names no product — it refers to
+  // the set the assistant just discussed.
+  const isComparisonOrRecommendation = isProductRecommendationOrComparisonQuestion(searchText);
   const contextualMatchLimit =
     needsConversationProductContext(searchText) ||
     isCategoryAttributeFollowUp(searchText) ||
-    attributeIntent.is_attribute_question
+    attributeIntent.is_attribute_question ||
+    // A comparison ("which is cheapest?") must consider the WHOLE discussed group, not a
+    // focused subset, or the chosen "cheapest/most expensive" would be wrong.
+    isComparisonOrRecommendation ||
+    // "Are there any other protein options?" → use the full category retrieval limit so
+    // we surface as many real catalog products as possible before the LLM replies.
+    isOtherOptionsRequest
       ? CATEGORY_GROUP_MATCH_LIMIT
       : FOCUSED_PRODUCT_MATCH_LIMIT;
 
@@ -3087,7 +3561,90 @@ export async function generateReply(
   // product group the assistant just discussed — not re-search the short follow-up alone.
   // resolveContextualProductSet prefers the deterministic persisted product IDs from the
   // most recent recommendation, then falls back to anchor-based and assistant-text lookups.
-  if (needsConversationProductContext(searchText)) {
+  //
+  // attributeIntent.is_attribute_question covers novel phrasings that the regex in
+  // needsConversationProductContext() misses — e.g. "can you show me different brands?",
+  // "what manufacturers do you carry?", "a keni ndonje marka tjeter?" — all correctly
+  // detected by classifyProductAttributeIntent (which runs on every message via Promise.all)
+  // but not by fixed keyword patterns. Routing those through resolveContextualProductSet
+  // ensures they aggregate against the product group already in context, not a raw search.
+  //
+  // Exception: "other options" requests intentionally skip this resolver. The customer is
+  // asking for DIFFERENT products — returning the same persisted set from the prior turn
+  // would give them exactly what they're asking to go beyond.
+  // A price-comparison or recommendation follow-up ("which is the cheapest?",
+  // "cila osht ma e lira?", "which do you recommend?") names no product — it refers to
+  // the set the assistant just discussed. Routing it through the contextual resolver
+  // (persisted IDs first) avoids a fresh keyword search that matches unrelated products
+  // on stop-words (e.g. "cila"/"ma"/"lira") and then wrongly reports the discussed
+  // products as unavailable. resolveContextualProductSet falls back gracefully to a fresh
+  // search when there is no prior context (a genuinely new comparison question).
+  const needsContextualResolver =
+    !isOtherOptionsRequest &&
+    (needsConversationProductContext(searchText) ||
+      attributeIntent.is_attribute_question ||
+      isComparisonOrRecommendation);
+
+  if (isOtherOptionsRequest) {
+    // Use the category_hint from the classifier when available (most specific), otherwise
+    // fall back to the prior substantive product query from conversation history (the anchor).
+    // Using the anchor instead of the raw "other options" message text ("do you have other
+    // protein?") produces far more relevant results because the anchor contains the actual
+    // product/category name that the catalog was indexed on.
+    //
+    // Pass skipMostRecentCustomerMessage=true so the anchor function unconditionally
+    // skips the inbound "other options" message — the LLM already confirmed the intent,
+    // so we don't need regex to re-detect it. This covers novel phrasings, slang, and
+    // dialect forms (e.g. "trego me tjeter", "show me the rest", "got anything else?")
+    // that a regex fallback would miss.
+    const anchor = extractConversationProductAnchor(conversationHistoryWindow, {
+      skipMostRecentCustomerMessage: true,
+    });
+
+    // Secondary fallback: when the anchor is null (no substantive prior customer query —
+    // e.g. the AI proactively introduced products and the customer only asked follow-ups),
+    // derive the search category from the products already recommended in this conversation.
+    // This ensures "a keni tjera?" still finds more products in the SAME category rather
+    // than returning empty results or searching with the follow-up text itself.
+    let freshSearchQuery = otherOptionsIntent.category_hint ?? anchor ?? null;
+    if (!freshSearchQuery) {
+      try {
+        const persistedFromHistory = await resolveProductsFromPersistedContext(
+          tenantId,
+          conversationHistoryWindow,
+          contextualMatchLimit,
+        );
+        if (persistedFromHistory.length > 0) {
+          const derivedTerms = [
+            ...new Set([
+              ...persistedFromHistory.map((p) => p.category).filter(Boolean),
+              ...persistedFromHistory.flatMap((p) => p.tags),
+            ]),
+          ]
+            .slice(0, 6)
+            .join(' ');
+          if (derivedTerms.trim()) freshSearchQuery = derivedTerms.trim();
+        }
+      } catch (err) {
+        console.warn('[aiService] Other-options persisted-product category fallback failed', err);
+      }
+    }
+
+    console.info('[aiService] Other-options request detected — fresh category search', {
+      conversationId,
+      tenantId,
+      categoryHint: otherOptionsIntent.category_hint,
+      anchor: anchor?.slice(0, 80) ?? null,
+      freshSearchQuery: freshSearchQuery?.slice(0, 80) ?? null,
+    });
+    if (freshSearchQuery) {
+      try {
+        products = await matchProductsForCustomerMessage(tenantId, freshSearchQuery, contextualMatchLimit);
+      } catch (err) {
+        console.warn('[aiService] Other-options anchor search failed', err);
+      }
+    }
+  } else if (needsContextualResolver) {
     products = await resolveContextualProductSet(
       tenantId,
       searchText,
@@ -3398,6 +3955,20 @@ Product-image match uncertainty (IMPORTANT):
     systemPrompt += aggregationInstructions;
   }
 
+  // When the customer is asking for other/more/different products, add an explicit guard
+  // against the AI incorrectly saying a previously recommended product "is not in the
+  // catalog". The catalog section here is a fresh search result — it does NOT contain
+  // everything that was shown in prior turns, but that does not make prior products invalid.
+  if (isOtherOptionsRequest) {
+    systemPrompt += `
+
+Customer is asking for more/other products in the same category (IMPORTANT):
+- Present the products listed in the catalog section above as fresh alternatives.
+- Do NOT say that any product you recommended in a previous conversation turn "is not in the catalog" or "is not available" — prior recommendations were real catalog products. The current catalog section is a new search result, not a replacement of what came before.
+- Do NOT recommend products from a completely different category unless the customer explicitly asks to change categories.
+- If you found no new alternatives to show, say so honestly rather than inventing products or switching categories without being asked.`;
+  }
+
   systemPrompt += SHORTEST_ANSWER_APPEND;
   systemPrompt += PRODUCT_DESCRIPTION_CONCISE_APPEND;
   if (descriptionQuestionTurn) {
@@ -3530,10 +4101,13 @@ Using packaging-derived details (IMPORTANT — source precedence):
     ? OPENAI_VISION_MODEL
     : (config.custom_model_id || process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o');
 
+  // Keep the "be extra careful when the image match is uncertain" intent: never exceed the
+  // already-conservative 0.3 in that case, while the normal path uses the configured low
+  // default for reproducible answers.
   const replyTemperature =
     hasImages && (productNotInCatalog || shouldAskImageClarification || imageMatchConfidence < 0.65)
-      ? 0.3
-      : 0.7;
+      ? Math.min(AI_REPLY_TEMPERATURE, 0.3)
+      : AI_REPLY_TEMPERATURE;
 
   const completion = await openai.chat.completions.create({
     model,

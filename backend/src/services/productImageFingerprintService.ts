@@ -101,8 +101,14 @@ Return ONLY valid JSON with keys:
 - attribute_confidence (object — your confidence in [0,1] for each field you filled, keyed by the SAME names you used above and in attributes. Example: {"brand_name":0.97,"flavor":0.9,"servings":0.6,"protein per serving":0.85}. Lower the value when text is blurry, partially occluded, or ambiguous.)
 Use null/empty for unknown fields. Do not invent brand, numbers, or claims if unreadable.`;
 
-export async function extractCatalogImageFingerprint(imageUrl: string): Promise<VisualFingerprintData> {
-  const cacheKey = `img_fp:v${CURRENT_FINGERPRINT_VERSION}:${hashImageUrl(imageUrl)}`;
+export async function extractCatalogImageFingerprint(
+  imageUrl: string,
+  tenantId: string,
+): Promise<VisualFingerprintData> {
+  // Namespace by tenantId: a CDN/stock image URL reused across tenants must not let one
+  // tenant's packaging analysis populate another tenant's catalog fingerprint
+  // (data-isolation guarantee).
+  const cacheKey = `img_fp:v${CURRENT_FINGERPRINT_VERSION}:${tenantId}:${hashImageUrl(imageUrl)}`;
   const cached = await redisConnection.get(cacheKey);
   if (cached) {
     try {
@@ -139,12 +145,27 @@ export async function extractCatalogImageFingerprint(imageUrl: string): Promise<
   return parsed;
 }
 
+/**
+ * Delete the cached vision fingerprint(s) for the given catalog image URLs so a
+ * replaced/removed product image is never re-analysed from a 7-day-stale cache.
+ * Tenant-scoped to match the cache key written by extractCatalogImageFingerprint.
+ */
+export async function invalidateImageFingerprintCache(
+  tenantId: string,
+  imageUrls: string[],
+): Promise<void> {
+  const keys = [...new Set(imageUrls.filter((u) => typeof u === 'string' && u.trim().length > 0))]
+    .map((url) => `img_fp:v${CURRENT_FINGERPRINT_VERSION}:${tenantId}:${hashImageUrl(url)}`);
+  if (keys.length === 0) return;
+  await redisConnection.del(...keys).catch(() => undefined);
+}
+
 export async function generateAndStoreProductImageFingerprint(
   productId: string,
   tenantId: string,
   imageUrl: string,
 ): Promise<void> {
-  const fingerprintJson = await extractCatalogImageFingerprint(imageUrl);
+  const fingerprintJson = await extractCatalogImageFingerprint(imageUrl, tenantId);
   const fingerprintText = buildFingerprintText(fingerprintJson);
   if (!fingerprintText.trim()) {
     console.warn('[imageFingerprint] Empty fingerprint text, skipping embed', { productId, imageUrl });

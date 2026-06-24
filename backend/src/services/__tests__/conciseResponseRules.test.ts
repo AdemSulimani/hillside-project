@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { SHORTEST_ANSWER_APPEND } from '../productDescriptionPromptService';
+import {
+  SHORTEST_ANSWER_APPEND,
+  PRODUCT_DESCRIPTION_CONCISE_APPEND,
+} from '../productDescriptionPromptService';
 import { assembleGuidelinesFromBlocks } from '../promptAssemblyService';
 import type { TenantPromptBlockRow } from '../../db/models/promptBlock';
 
@@ -59,6 +62,28 @@ describe('SHORTEST_ANSWER_APPEND (platform-enforced brevity rule)', () => {
 
   it('stays natural — explicitly not cold or robotic', () => {
     assert.match(SHORTEST_ANSWER_APPEND, /not cold or robotic/);
+  });
+
+  it('does not contradict the order-closing policy: carves out the one allowed order question', () => {
+    // The runtime (stripRepeatedOrderClosingQuestion / stripGenericFollowUpInvitation)
+    // deliberately KEEPS the single order-closing question on the first product turn and
+    // only strips generic invitations. The brevity append must therefore not blanket-ban
+    // "Would you like to order?" — otherwise the prompt contradicts the business logic.
+    assert.doesNotMatch(SHORTEST_ANSWER_APPEND, /Would you like to order\?/);
+    assert.match(SHORTEST_ANSWER_APPEND, /NO GENERIC FOLLOW-UP INVITATIONS/);
+    assert.match(SHORTEST_ANSWER_APPEND, /order-oriented follow-up question/);
+    // Generic invitations stay forbidden.
+    assert.match(SHORTEST_ANSWER_APPEND, /Let me know if you need anything/);
+  });
+});
+
+describe('PRODUCT_DESCRIPTION_CONCISE_APPEND vs guidelines.recommendations consistency', () => {
+  it('enforces names-only recommendations (must match the reconciled guideline block)', () => {
+    assert.match(PRODUCT_DESCRIPTION_CONCISE_APPEND, /list ONLY the product name/);
+    assert.match(
+      PRODUCT_DESCRIPTION_CONCISE_APPEND,
+      /Only provide descriptions when the customer explicitly follows up/,
+    );
   });
 });
 

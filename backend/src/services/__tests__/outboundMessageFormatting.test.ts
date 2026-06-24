@@ -29,8 +29,8 @@ describe('sanitizeOutboundMessageText', () => {
   });
 
   it('collapses multiple blank lines between sections to a single blank line', () => {
-    const input = 'Rekomandimet:\n\n\n\n- Mass Gainer\n\n\n- Mega Mass';
-    assert.equal(sanitizeOutboundMessageText(input), 'Rekomandimet:\n\n- Mass Gainer\n\n- Mega Mass');
+    const input = 'Rekomandimet:\n\n\n\nMass Gainer\n\n\nMega Mass';
+    assert.equal(sanitizeOutboundMessageText(input), 'Rekomandimet:\n\nMass Gainer\n\nMega Mass');
   });
 
   it('treats whitespace-only lines as blank and collapses them', () => {
@@ -52,6 +52,34 @@ describe('sanitizeOutboundMessageText', () => {
     assert.equal(
       sanitizeOutboundMessageText('**Mass Gainer** dhe **Mega Mass** janë në dispozicion.'),
       'Mass Gainer dhe Mega Mass janë në dispozicion.',
+    );
+  });
+
+  it('strips a leading dash-space bullet from a product name line', () => {
+    assert.equal(
+      sanitizeOutboundMessageText('Disa prej tyre janë:\n- Creatine Monohydrate\n- Applied Nutrition Creatine 250gr'),
+      'Disa prej tyre janë:\nCreatine Monohydrate\nApplied Nutrition Creatine 250gr',
+    );
+  });
+
+  it('strips leading bullet (•) and middle-dot (·) markers from lines', () => {
+    assert.equal(
+      sanitizeOutboundMessageText('• Mass Gainer\n· Mega Mass'),
+      'Mass Gainer\nMega Mass',
+    );
+  });
+
+  it('does not strip a hyphen that is part of a product name (no trailing space)', () => {
+    assert.equal(
+      sanitizeOutboundMessageText('N-Acetyl Cysteine\n-Creatine'),
+      'N-Acetyl Cysteine\n-Creatine',
+    );
+  });
+
+  it('strips dash bullets even when blank lines separate list items', () => {
+    assert.equal(
+      sanitizeOutboundMessageText('- Mass Gainer\n\n- Mega Mass'),
+      'Mass Gainer\n\nMega Mass',
     );
   });
 

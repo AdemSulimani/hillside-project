@@ -25,6 +25,8 @@ import {
   deriveAnswerabilityStatus,
   formatInfoList,
   localizedAttributeLabels,
+  reconcileMissingAgainstAnswer,
+  stripContradictoryMissingInfoNotice,
   type AnswerabilityStatus,
   type StructuredAttributeMap,
 } from '../productInformationGapHelpers';
@@ -76,6 +78,117 @@ describe('computeMissingStructuredAttributes', () => {
       computeMissingStructuredAttributes(['brand', 'color', 'weight'], products).sort(),
       ['brand', 'color', 'weight'],
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reconcileMissingAgainstAnswer (Layer 2) — never escalate an attribute the
+// grounded answer already provides.
+// ---------------------------------------------------------------------------
+
+describe('reconcileMissingAgainstAnswer', () => {
+  it('drops a flavor label when the answer already states the flavor (sq)', () => {
+    assert.deepEqual(
+      reconcileMissingAgainstAnswer(['shija'], 'E kemi Carbo One 1kg me shije limon.'),
+      [],
+    );
+  });
+
+  it('drops a flavor label when the answer states the flavor (en)', () => {
+    assert.deepEqual(
+      reconcileMissingAgainstAnswer(['flavor'], 'We have Carbo One 1kg in lemon flavor.'),
+      [],
+    );
+  });
+
+  it('matches concepts across locales/synonyms (answer in sq, label in en)', () => {
+    assert.deepEqual(
+      reconcileMissingAgainstAnswer(['flavor'], 'E kemi me shije limon.'),
+      [],
+    );
+  });
+
+  it('keeps a label whose concept is NOT in the answer', () => {
+    assert.deepEqual(
+      reconcileMissingAgainstAnswer(['marka'], 'Çmimi është €20.'),
+      ['marka'],
+    );
+  });
+
+  it('keeps only the genuinely missing labels in a multi-attribute request', () => {
+    // Answer states flavor but not brand → only brand survives.
+    assert.deepEqual(
+      reconcileMissingAgainstAnswer(['shija', 'marka'], 'Ka shije çokollatë.'),
+      ['marka'],
+    );
+  });
+
+  it('matches inflected forms (shije → shijet)', () => {
+    assert.deepEqual(reconcileMissingAgainstAnswer(['shija'], 'Shijet janë limon.'), []);
+  });
+
+  it('returns all labels unchanged when the answer is empty (none case)', () => {
+    assert.deepEqual(reconcileMissingAgainstAnswer(['marka', 'shija'], ''), ['marka', 'shija']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripContradictoryMissingInfoNotice (Layer 3) — final validation pass that
+// removes a "we'll notify you" notice contradicted by info already in the reply.
+// ---------------------------------------------------------------------------
+
+describe('stripContradictoryMissingInfoNotice', () => {
+  it('removes the notice when the flavor is already stated (sq) — Issue #1 reproduction', () => {
+    const contradictory =
+      "E kemi Carbo One 1kg me shije limon. Do t'ju njoftojmë së shpejti lidhur me shije.";
+    assert.equal(
+      stripContradictoryMissingInfoNotice(contradictory, 'sq'),
+      'E kemi Carbo One 1kg me shije limon.',
+    );
+  });
+
+  it('removes the notice when the flavor is already stated (en)', () => {
+    const contradictory =
+      'We have Carbo One 1kg in lemon flavor. We will notify you shortly regarding the flavor information.';
+    assert.equal(
+      stripContradictoryMissingInfoNotice(contradictory, 'en'),
+      'We have Carbo One 1kg in lemon flavor.',
+    );
+  });
+
+  it('keeps a genuinely-missing notice untouched (no contradiction)', () => {
+    const legit = 'The price is €20. We will notify you shortly regarding the brand information.';
+    assert.equal(stripContradictoryMissingInfoNotice(legit, 'en'), legit);
+  });
+
+  it('rebuilds the notice to keep only the still-missing attribute (en)', () => {
+    // Reply states the flavor but promises flavor AND brand → keep brand only.
+    const mixed =
+      'The chocolate flavor is available. We will notify you shortly regarding the flavor and brand information.';
+    assert.equal(
+      stripContradictoryMissingInfoNotice(mixed, 'en'),
+      'The chocolate flavor is available. We will notify you shortly regarding the brand information.',
+    );
+  });
+
+  it('leaves the generic (no named attribute) notice untouched (en)', () => {
+    const generic = 'The chocolate flavor is available. We will notify you shortly regarding this information.';
+    assert.equal(stripContradictoryMissingInfoNotice(generic, 'en'), generic);
+  });
+
+  it('leaves the generic notice untouched (sq)', () => {
+    const generic = "Ka shije limon. Do t'ju njoftojmë së shpejti lidhur me këtë informacion.";
+    assert.equal(stripContradictoryMissingInfoNotice(generic, 'sq'), generic);
+  });
+
+  it('is a no-op for replies with no notice', () => {
+    const plain = 'The price is €20 and the flavor is chocolate.';
+    assert.equal(stripContradictoryMissingInfoNotice(plain, 'en'), plain);
+  });
+
+  it('does not alter a standalone holding message (nothing answered to contradict)', () => {
+    const holding = 'Hello, we will notify you shortly regarding the brand information.';
+    assert.equal(stripContradictoryMissingInfoNotice(holding, 'en'), holding);
   });
 });
 
@@ -316,10 +429,13 @@ function decideOutcome(input: ScenarioInput): {
     input.products,
     input.imageUsableKeys ?? new Set(),
   );
-  const merged = dedupeInfoLabels([
-    ...input.assessment.missing,
-    ...localizedAttributeLabels(deterministicMissing, input.locale),
-  ]);
+  const merged = reconcileMissingAgainstAnswer(
+    dedupeInfoLabels([
+      ...input.assessment.missing,
+      ...localizedAttributeLabels(deterministicMissing, input.locale),
+    ]),
+    input.assessment.answer,
+  );
   const status = deriveAnswerabilityStatus(input.assessment.answer, merged);
   if (status === 'complete') {
     return { status, reply: null, escalated: false, missing: [] };
@@ -424,5 +540,35 @@ describe('partial-answer scenario combiner', () => {
       locale: 'en',
     });
     assert.deepEqual(outcome.missing, ['brand']);
+  });
+
+  it('Issue #1 regression: flavor in the product name → complete answer, NO contradictory notice (sq)', () => {
+    // Mirrors "Carbo One 1kg me shije limon": structured flavor column is empty but the
+    // text-aware resolver (Layer 1) supplies flavor="limon", and the grounded answer
+    // states it — so the request is fully answerable with no "we'll notify you" notice.
+    const outcome = decideOutcome({
+      assessment: { answer: 'E kemi Carbo One 1kg me shije limon.', missing: [] },
+      requested: ['flavor'],
+      // What getProductInferredAttributes(product) returns for the matched SKU.
+      products: [{ flavor: 'limon' }],
+      locale: 'sq',
+    });
+    assert.equal(outcome.status, 'complete');
+    assert.equal(outcome.escalated, false);
+    assert.equal(outcome.reply, null);
+  });
+
+  it('Issue #1 belt-and-suspenders: even if the net flags flavor, reconciliation drops it', () => {
+    // Simulate Layer 1 failing (flavor column empty AND not inferred) but the grounded
+    // answer still stating the flavor. Layer 2 reconciliation must remove it so the
+    // reply is never self-contradictory.
+    const outcome = decideOutcome({
+      assessment: { answer: 'E kemi me shije limon.', missing: [] },
+      requested: ['flavor'],
+      products: [{ flavor: null }], // net would flag flavor missing
+      locale: 'sq',
+    });
+    assert.equal(outcome.status, 'complete');
+    assert.equal(outcome.escalated, false);
   });
 });

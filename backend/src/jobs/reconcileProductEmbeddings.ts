@@ -78,9 +78,19 @@ function computeHash(text: string): string {
 export async function processReconcileProductEmbeddings(): Promise<void> {
   const activeModel = process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL;
 
-  // Fetch candidates: rows missing an embedding, missing the hash, or embedded with a
-  // different model version. We re-compute the hash in-process rather than in SQL to
-  // keep the DB-side query simple and avoid installing pgcrypto.
+  // Fetch candidates and re-compute the embedding-input hash in-process (rather than in
+  // SQL, to keep the query simple and avoid pgcrypto).
+  //
+  // IMPORTANT: we intentionally do NOT pre-filter on embedding state here. A row whose
+  // embedding fields were edited AFTER its last embed but whose live embedding job then
+  // failed/was-dropped keeps a NON-NULL embedding, a NON-NULL (but STALE) hash, and a
+  // matching model — so an `embedding IS NULL OR embedding_input_hash IS NULL OR
+  // embedding_model <> $1` filter would never surface it, and the stale vector would
+  // persist indefinitely. Scanning recently-updated active rows and comparing the stored
+  // hash to the freshly-computed one is the only way to catch that drift. Rows that are
+  // missing/model-mismatched are still caught because they also fail the in-process check
+  // below. Ordered by updated_at DESC and capped so the scan stays bounded; genuinely
+  // NULL-embedding rows older than this window are healed by the fast reconcile lane.
   const { rows } = await pool.query<ReconcileCandidateRow>(
     `SELECT
        id,
@@ -102,15 +112,9 @@ export async function processReconcileProductEmbeddings(): Promise<void> {
      FROM products
      WHERE deleted_at IS NULL
        AND is_active = true
-       AND (
-         embedding IS NULL
-         OR embedding_input_hash IS NULL
-         OR embedding_model IS NULL
-         OR embedding_model <> $1
-       )
      ORDER BY updated_at DESC
-     LIMIT $2`,
-    [activeModel, RECONCILE_BATCH_LIMIT * 3], // Fetch extra — some may be hash-current
+     LIMIT $1`,
+    [RECONCILE_BATCH_LIMIT * 3], // Fetch extra — most will be hash-current and skipped
   );
 
   let queued = 0;
@@ -276,6 +280,9 @@ export async function initEmbeddingReconcileScheduler(): Promise<void> {
 }
 
 export async function initFastEmbeddingReconcileScheduler(): Promise<void> {
+  // Remove stale scheduler registered under the old name in a previous deployment.
+  await defaultQueue.removeJobScheduler('offerEmbeddingReconcileFast').catch(() => {});
+
   await defaultQueue.upsertJobScheduler(
     'embeddingReconcileFast',
     { pattern: FAST_EMBEDDING_RECONCILE_CRON },

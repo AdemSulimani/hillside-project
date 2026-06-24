@@ -21,7 +21,21 @@
  */
 import type { StructuredAttributeKey } from './productRetrievalService';
 
-/** Locales supported by the holding/notice copy (matches aiService ReplyLocale). */
+/**
+ * Locales supported by the holding/notice copy (matches aiService ReplyLocale).
+ *
+ * ADDING A NEW LOCALE — single-table-change checklist:
+ *   1. Add the new key to this union type.
+ *   2. Add an entry to `STRUCTURED_ATTRIBUTE_LABELS` (attribute display names in the new language).
+ *   3. Add an entry to `GENERIC_NOTICE_LIST_NORMS` (normalized text of the generic "this information" phrase).
+ *   4. Add an entry to `MISSING_NOTICE_PATTERNS` (regex matching the locale's "we will notify you" sentence).
+ *   5. In processAIReply.ts: add an entry to HOLDING_MESSAGES, DATA_CONFIRMATION_MESSAGES,
+ *      MISSING_CUSTOMER_NAME_MESSAGES, ORDER_CONFIRMATION_FOLLOW_UP, and VARIANT_CLARIFICATION_LEAD_IN.
+ *   6. In aiService.ts: add the locale to the ReplyLocale union and all locale-dispatch tables there.
+ *
+ * Every locale-specific string lives in a single Record<Locale, …> table; no regex,
+ * switch, or if/else chain outside these tables needs updating.
+ */
 export type InfoGapLocale = 'sq' | 'en';
 
 /**
@@ -145,6 +159,76 @@ export function dedupeInfoLabels(labels: string[]): string[] {
 }
 
 /**
+ * Normalize free reply/answer text for word-level concept scanning: lowercase,
+ * strip diacritics, drop punctuation, collapse whitespace.
+ */
+function normalizeForConceptScan(text: string): string {
+  return (text ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The set of normalized tokens that indicate a given info label's underlying concept
+ * is being discussed. For attributes in a synonym group this returns every synonym in
+ * BOTH locales (so "shija" matches an answer that says "shije"); for free-form labels
+ * (e.g. "ingredients"/"përbërësit") it returns the label's own normalized form.
+ */
+function conceptTokensForLabel(label: string): string[] {
+  const norm = normalizeLabel(label);
+  if (!norm) return [];
+  const group = SYNONYM_GROUP_BY_LABEL.get(norm);
+  if (group) {
+    return ATTRIBUTE_SYNONYM_GROUPS[group]
+      .map((synonym) => normalizeLabel(synonym))
+      .filter((token) => token.length > 0);
+  }
+  return [norm];
+}
+
+/**
+ * Whether the supplied (already concept-normalized) text mentions the concept named by
+ * `label`. Single-word tokens match by word-prefix (so "shije" also matches "shijet"
+ * and "marka" matches "markes"); multi-word tokens match as a substring.
+ */
+function textMentionsConcept(normalizedText: string, label: string): boolean {
+  if (!normalizedText) return false;
+  return conceptTokensForLabel(label).some((token) => {
+    if (token.includes(' ')) return normalizedText.includes(token);
+    // Word-boundary prefix match: token may be followed by inflectional letters.
+    const re = new RegExp(`(?:^|\\s)${escapeRegExp(token)}[\\p{L}]*(?:\\s|$)`, 'u');
+    return re.test(normalizedText);
+  });
+}
+
+/**
+ * SAFEGUARD (Layer 2): drop from `missing` any label whose concept the grounded
+ * `answeredText` already provides. This prevents the contradictory "X is lemon. We'll
+ * notify you shortly about X." class of replies at composition time — independent of
+ * whether the spurious label came from the LLM or the deterministic structured net.
+ *
+ * It relies on the composer's contract (the answer states a value only when known and
+ * never mentions a missing concept), so a concept appearing in the answer means it was
+ * answered and must not also be escalated.
+ */
+export function reconcileMissingAgainstAnswer(
+  missing: string[],
+  answeredText: string,
+): string[] {
+  const known = normalizeForConceptScan(answeredText);
+  if (!known) return [...missing];
+  return missing.filter((label) => !textMentionsConcept(known, label));
+}
+
+/**
  * Join labels into a natural-language list using the locale conjunction.
  *   en: ["brand"]                -> "brand"
  *       ["brand", "ingredients"] -> "brand and ingredients"
@@ -255,4 +339,92 @@ export function computeMissingStructuredAttributes(
     }
   }
   return missing;
+}
+
+/**
+ * Locale-specific matchers for the trailing "we will notify you shortly regarding …"
+ * notice produced by buildMissingInfoNotice. Capture group 1 is the named info list
+ * (e.g. "shije", "marka dhe pesha", or the generic "këtë informacion" / "this").
+ */
+const MISSING_NOTICE_PATTERNS: Record<InfoGapLocale, RegExp> = {
+  sq: /\s*Do t['’]ju njoftojm[ëe] s[ëe] shpejti lidhur me\s+([^.!?]+?)\s*[.!?]+/u,
+  en: /\s*We will notify you shortly regarding\s+(?:the\s+)?([^.!?]+?)\s*[.!?]+/iu,
+};
+
+/** Normalized form of the generic (no named attribute) notice list, per locale. */
+const GENERIC_NOTICE_LIST_NORMS: Record<InfoGapLocale, string[]> = {
+  sq: ['kete informacion'],
+  en: ['this information', 'this'],
+};
+
+/** Split a notice's info list back into individual labels using the locale conjunction. */
+function splitNoticeInfoList(list: string, locale: InfoGapLocale): string[] {
+  const conjunction = locale === 'sq' ? 'dhe' : 'and';
+  return list
+    .split(new RegExp(`\\s*,\\s*|\\s+${conjunction}\\s+`, 'i'))
+    .map((part) => part.replace(/\s+information$/i, '').trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * FINAL VALIDATION LAYER (Layer 3): the last line of defence run on the fully composed
+ * outbound reply, right before it is sent. It detects the "we will notify you shortly
+ * regarding X" notice and removes any attribute from it that the rest of the reply has
+ * ALREADY answered — eliminating self-contradictory messages such as:
+ *
+ *   "We have Carbo One 1kg in lemon flavor. We will notify you shortly regarding the flavor."
+ *
+ * Behaviour:
+ *   - If every named attribute in the notice is already answered → the whole notice
+ *     sentence is removed.
+ *   - If only some are answered → the notice is rebuilt naming only the still-missing
+ *     attributes.
+ *   - The generic notice ("…regarding this information") names nothing specific and is
+ *     left untouched (it cannot contradict a stated value).
+ *   - Replies without the notice are returned unchanged.
+ *   - When `options.multiProduct` is true the function returns the reply unchanged: in
+ *     multi-product queries the notice legitimately names an attribute that appears in
+ *     the reply for ONE product but is genuinely absent for OTHERS, so stripping it
+ *     would hide the per-product knowledge gap.
+ *
+ * Pure and deterministic; safe to run on every outbound message regardless of channel.
+ */
+export function stripContradictoryMissingInfoNotice(
+  reply: string,
+  locale: InfoGapLocale,
+  options?: { multiProduct?: boolean },
+): string {
+  // Multi-product replies: an attribute may be stated for one product while still
+  // missing for others — the notice is valid for those products, do not strip it.
+  if (options?.multiProduct) return reply ?? '';
+  const text = reply ?? '';
+  const pattern = MISSING_NOTICE_PATTERNS[locale] ?? MISSING_NOTICE_PATTERNS.en;
+  const match = pattern.exec(text);
+  if (!match) return text;
+
+  const list = match[1]?.trim() ?? '';
+  const listNorm = normalizeForConceptScan(list);
+
+  // Generic, non-specific notice — nothing to contradict; leave the reply as-is.
+  if (!list || GENERIC_NOTICE_LIST_NORMS[locale].includes(listNorm)) {
+    return text;
+  }
+
+  // Everything OUTSIDE the notice sentence is the "answered" portion of the reply.
+  const before = text.slice(0, match.index);
+  const after = text.slice(match.index + match[0].length);
+  const answeredPortion = normalizeForConceptScan(`${before} ${after}`);
+
+  const labels = splitNoticeInfoList(list, locale);
+  if (labels.length === 0) return text;
+
+  const stillMissing = labels.filter((label) => !textMentionsConcept(answeredPortion, label));
+
+  // No contradiction detected — keep the original notice exactly.
+  if (stillMissing.length === labels.length) return text;
+
+  const rebuilt = stillMissing.length > 0 ? ` ${buildMissingInfoNotice(stillMissing, locale)}` : '';
+  const result = `${before.trimEnd()}${rebuilt}${after}`;
+  // Tidy any double spaces / stray leading punctuation introduced by the removal.
+  return result.replace(/[ \t]{2,}/g, ' ').replace(/\s+([.!?])/g, '$1').trim();
 }
