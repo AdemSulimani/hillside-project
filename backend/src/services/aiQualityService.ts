@@ -170,7 +170,9 @@ If the AI said a product is not available and that product genuinely does not ap
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent },
       ],
-      temperature: 0.1,
+      // Deterministic: the quality score gates flagging/pausing against a fixed threshold,
+      // so sampling randomness would make the same reply flip between flagged and clean.
+      temperature: 0,
       max_tokens: 256,
       response_format: { type: 'json_object' },
     });

@@ -10,6 +10,7 @@ const LABELS: Record<string, string> = {
   low_confidence: 'Low confidence',
   usage_question_unanswered: 'Usage question unanswered',
   product_question_unanswered: 'Product question unanswered',
+  uncertain_answer_escalated: 'Uncertain answer — needs human reply',
   cancellation_request: 'Cancellation request',
   refund_request: 'Refund request',
   post_purchase_support_request: 'Delivery or product issue',

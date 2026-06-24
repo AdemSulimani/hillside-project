@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import XLSX from 'xlsx';
 import {
   extractedDataToProductInput,
+  buildExtractedTextForProduct,
   type ExtractedProductData,
 } from '../documents/AttachDocumentService';
 import { AttachSpreadsheetService } from '../documents/AttachSpreadsheetService';
@@ -93,6 +94,54 @@ describe('extractedDataToProductInput — image_urls', () => {
     assert.deepEqual(input.image_urls, [
       'https://res.cloudinary.com/demo/image/upload/v1234/product',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildExtractedTextForProduct — per-product text isolation (no cross-product bleed)
+// ---------------------------------------------------------------------------
+
+describe('buildExtractedTextForProduct — per-product isolation', () => {
+  it('contains only the product\'s own fields', () => {
+    const data: ExtractedProductData = {
+      name: 'Alpha Whey 1kg',
+      brand: 'AlphaNutrition',
+      category: 'Protein',
+      sku: 'AW-1KG',
+      description: 'Whey protein concentrate, chocolate flavor.',
+      usage_description: 'Mix 1 scoop with 250ml water.',
+      tags: ['protein', 'whey'],
+      price: 29.99,
+    };
+    const text = buildExtractedTextForProduct(data);
+    assert.ok(text.includes('Alpha Whey 1kg'));
+    assert.ok(text.includes('AlphaNutrition'));
+    assert.ok(text.includes('SKU: AW-1KG'));
+    assert.ok(text.includes('chocolate flavor'));
+    assert.ok(text.includes('Tags: protein, whey'));
+  });
+
+  it('does NOT leak a sibling product\'s data', () => {
+    const alpha: ExtractedProductData = {
+      name: 'Alpha Whey 1kg',
+      description: 'Chocolate whey.',
+      price: 29.99,
+    };
+    const beta: ExtractedProductData = {
+      name: 'Beta Creatine 500g',
+      description: 'Unflavored creatine monohydrate.',
+      price: 19.99,
+    };
+    const alphaText = buildExtractedTextForProduct(alpha);
+    assert.ok(alphaText.includes('Alpha Whey'));
+    assert.ok(!alphaText.includes('Beta Creatine'));
+    assert.ok(!alphaText.includes('creatine'));
+    assert.ok(!alphaText.includes('19.99'));
+  });
+
+  it('returns empty string when the product has no usable own-field text', () => {
+    const data: ExtractedProductData = { price: 10 };
+    assert.equal(buildExtractedTextForProduct(data), '');
   });
 });
 

@@ -59,6 +59,52 @@ export interface DocumentParseResult {
   products: ExtractedProductData[];
 }
 
+/**
+ * Build a per-product `extracted_text` blob from a SINGLE product's own extracted
+ * fields.
+ *
+ * Why this exists: a multi-product import (PDF/spreadsheet/AI enrichment) produces one
+ * `rawText` that contains EVERY product in the document. Previously that whole blob was
+ * stored as `extracted_text` on every imported SKU, so the retrieval layer
+ * (`inferAttributeFromText`, `buildProductKnowledgeContext`, the attribute-availability
+ * classifier) read product B/C/D's prices, flavors, and descriptions as if they belonged
+ * to product A — a direct cause of the AI "mixing information between products". Scoping the
+ * stored text to the product's own fields removes that cross-product bleed while keeping a
+ * useful per-SKU text record for downstream attribute inference.
+ */
+export function buildExtractedTextForProduct(data: ExtractedProductData): string {
+  const parts = [
+    data.name,
+    data.brand,
+    data.category,
+    data.sku ? `SKU: ${data.sku}` : null,
+    data.description,
+    data.usage_description,
+    data.tags && data.tags.length > 0 ? `Tags: ${data.tags.join(', ')}` : null,
+  ];
+  return parts
+    .map((p) => (typeof p === 'string' ? p.trim() : ''))
+    .filter((p) => p.length > 0)
+    .join('\n');
+}
+
+/**
+ * Choose the `extracted_text` for an imported product:
+ * - When the document yielded exactly ONE product, the full `rawText` genuinely belongs to
+ *   that product (e.g. a single-label OCR), so it is retained verbatim.
+ * - When MULTIPLE products were parsed from one document, fall back to a per-product blob so
+ *   no SKU carries another SKU's text. If the product has no usable own-field text, return
+ *   null rather than poisoning it with the whole-document dump.
+ */
+function resolveExtractedTextForProduct(
+  data: ExtractedProductData,
+  rawText: string,
+  totalProducts: number,
+): string {
+  if (totalProducts <= 1) return rawText;
+  return buildExtractedTextForProduct(data);
+}
+
 export abstract class AttachDocumentService {
   protected tenantId: string;
   protected sourceType: CreateProductInput['source_type'];
@@ -88,9 +134,11 @@ export abstract class AttachDocumentService {
       return products;
     }
 
+    const total = result.products.length;
     for (const data of result.products) {
+      const extractedText = resolveExtractedTextForProduct(data, result.rawText, total);
       const { product } = await upsertProductByName(
-        extractedDataToProductInput(this.tenantId, data, this.sourceType, result.rawText, {
+        extractedDataToProductInput(this.tenantId, data, this.sourceType, extractedText, {
           original_data: data,
         }),
       );
@@ -114,9 +162,11 @@ export abstract class AttachDocumentService {
     }
 
     const products: Product[] = [];
+    const total = result.products.length;
     for (const data of result.products) {
+      const extractedText = resolveExtractedTextForProduct(data, result.rawText, total);
       const { product } = await upsertProductByName(
-        extractedDataToProductInput(this.tenantId, data, this.sourceType, result.rawText, {
+        extractedDataToProductInput(this.tenantId, data, this.sourceType, extractedText, {
           original_data: data,
           ai_enriched: !!aiEnrich,
         }),

@@ -5,6 +5,7 @@ import {
   extractedDataToProductInput,
   type ExtractedProductData,
 } from './documents/AttachDocumentService';
+import { parsePrice } from './documents/priceParsing';
 
 export class ImageProcessingService {
   private tenantId: string;
@@ -43,8 +44,8 @@ export class ImageProcessingService {
     for (const line of lines) {
       const match = line.match(priceRegex);
       if (match) {
-        const priceStr = match[0].replace(/[^0-9.]/g, '');
-        product.price = parseFloat(priceStr);
+        const parsed = parsePrice(match[0]);
+        if (parsed !== undefined) product.price = parsed;
         break;
       }
     }

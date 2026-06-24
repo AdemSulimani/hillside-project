@@ -165,7 +165,11 @@ export const defaultWorker = new Worker<
       await processGenerateProductImageFingerprint(job.data as GenerateProductImageFingerprintJobData);
       return;
     }
-    await processGenerateProductEmbedding(job.data as GenerateProductEmbeddingJobData);
+    if (job.name === 'product.embedding') {
+      await processGenerateProductEmbedding(job.data as GenerateProductEmbeddingJobData);
+      return;
+    }
+    console.warn('[jobs] Unknown default job name, skipping', { name: job.name, jobId: job.id });
   },
   { connection: createWorkerConnection(), concurrency: DEFAULT_CONCURRENCY, ...redisOptimizedWorkerOptions },
 );

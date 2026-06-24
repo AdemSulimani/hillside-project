@@ -5,6 +5,7 @@ import {
   type DocumentParseResult,
   type ExtractedProductData,
 } from './AttachDocumentService';
+import { parsePrice } from './priceParsing';
 
 export class AttachPdfService extends AttachDocumentService {
   constructor(tenantId: string) {
@@ -38,12 +39,11 @@ export class AttachPdfService extends AttachDocumentService {
       if (priceMatch && line.length < 200) {
         if (current) products.push(current);
 
-        const priceStr = priceMatch[0].replace(/[^0-9.]/g, '');
         const name = line.replace(priceRegex, '').replace(/[-–—|:]/g, '').trim();
 
         current = {
           name: name || undefined,
-          price: parseFloat(priceStr) || undefined,
+          price: parsePrice(priceMatch[0]),
         };
       } else if (current && !priceMatch) {
         const imageMatches = [...line.matchAll(AttachPdfService.IMAGE_URL_REGEX)].map((m) => m[0]);

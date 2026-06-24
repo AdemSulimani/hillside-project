@@ -24,7 +24,10 @@ import {
   deleteFingerprintsForProduct,
   deleteAllFingerprintsForTenant,
 } from '../db/models/productImageFingerprint';
-import { queueProductImageFingerprintJobs } from '../services/productImageFingerprintService';
+import {
+  queueProductImageFingerprintJobs,
+  invalidateImageFingerprintCache,
+} from '../services/productImageFingerprintService';
 import { isPgCheckViolation, isPgUniqueViolation, pgConstraintName } from '../utils/pgErrors';
 import { repairOptionalUtf8Text } from '../utils/textEncoding';
 
@@ -287,6 +290,7 @@ export async function update(req: Request, res: Response): Promise<void> {
       }
       if (removedUrls.length > 0) {
         await deleteFingerprintsForImageUrls(tenantId, removedUrls);
+        await invalidateImageFingerprintCache(tenantId, removedUrls);
       }
       if (addedUrls.length > 0) {
         try {

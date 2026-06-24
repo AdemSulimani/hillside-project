@@ -8,9 +8,12 @@ import {
   detectRequestedAttributes,
   detectProductQueryScope,
   extractConversationProductAnchor,
+  getProductInferredAttributes,
   getProductStructuredAttributes,
   isCategoryAttributeFollowUp,
+  isOtherOptionsFollowUp,
   resolveProductsForContextualQuery,
+  sanitizeExtractedText,
 } from '../productRetrievalService';
 
 function mockProduct(overrides: Partial<Product> & Pick<Product, 'id' | 'name'>): Product {
@@ -55,6 +58,41 @@ describe('productRetrievalService', () => {
   it('detectRequestedAttributes merges intent attributes from classifier', () => {
     const attrs = detectRequestedAttributes('tell me more', ['flavor']);
     assert.deepEqual(attrs, ['flavor']);
+  });
+
+  // Layer 1 (root cause for the "we'll notify you about the flavor" contradiction):
+  // an attribute present only in the product NAME / description / extracted text / tags
+  // must be reported as AVAILABLE so the deterministic missing-attribute net never
+  // contradicts an answer that already stated the value.
+  describe('getProductInferredAttributes (text-aware availability)', () => {
+    it('reads a flavor embedded in the product name when the column is empty', () => {
+      const product = mockProduct({
+        id: 'c1',
+        name: 'Carbo One 1kg me shije limon',
+        flavor: null,
+      });
+      assert.equal(getProductInferredAttributes(product).flavor, 'limon');
+    });
+
+    it('reads a flavor from the description when name + column lack it', () => {
+      const product = mockProduct({
+        id: 'c2',
+        name: 'Whey Protein 2kg',
+        flavor: null,
+        description: 'Premium whey with a rich chocolate taste.',
+      });
+      assert.equal(getProductInferredAttributes(product).flavor, 'chocolate');
+    });
+
+    it('prefers the structured column value when present', () => {
+      const product = mockProduct({ id: 'c3', name: 'Gainer', flavor: 'Strawberry' });
+      assert.equal(getProductInferredAttributes(product).flavor, 'Strawberry');
+    });
+
+    it('returns null for an attribute genuinely absent everywhere', () => {
+      const product = mockProduct({ id: 'c4', name: 'Mystery Tub', brand: null });
+      assert.equal(getProductInferredAttributes(product).brand, null);
+    });
   });
 
   it('buildProductAttributeAggregation lists flavors across SKUs', () => {
@@ -352,5 +390,284 @@ describe('resolveProductsForContextualQuery — forceAnchorLookup', () => {
     );
     assert.equal(result.length, 1);
     assert.equal(result[0].id, 'p1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeExtractedText — OCR quality gate
+// ---------------------------------------------------------------------------
+
+describe('sanitizeExtractedText', () => {
+  it('passes through clean prose text unchanged', () => {
+    const text = 'Tiramisu flavor. 1kg bag. Suitable for athletes.';
+    const result = sanitizeExtractedText(text);
+    assert.ok(result?.includes('Tiramisu'));
+  });
+
+  it('strips lines dominated by non-word characters (OCR garbage)', () => {
+    // "▌█░░ ▒▒▒▓ ░░░░" has zero word characters → below the 40% threshold → stripped.
+    const text = 'Valid line with content.\n▌█░░ ▒▒▒▓ ░░░░\nAnother valid line.';
+    const result = sanitizeExtractedText(text);
+    assert.ok(result?.includes('Valid line'));
+    assert.ok(result?.includes('Another valid line'));
+    assert.ok(!result?.includes('▌█'));
+  });
+
+  it('strips very short lines (< 3 chars)', () => {
+    const text = 'AB\nA valid sentence here.\n--';
+    const result = sanitizeExtractedText(text);
+    assert.ok(!result?.startsWith('AB'));
+    assert.ok(result?.includes('A valid sentence'));
+  });
+
+  it('caps output at maxChars', () => {
+    const text = ('Word '.repeat(300)).trim();
+    const result = sanitizeExtractedText(text, 100);
+    assert.ok(result !== null);
+    assert.ok((result ?? '').length <= 100);
+  });
+
+  it('returns null when all lines are garbage', () => {
+    const text = '--- / ---\n▌░░▒▒\n!! !!';
+    assert.equal(sanitizeExtractedText(text), null);
+  });
+
+  it('returns null for empty input', () => {
+    assert.equal(sanitizeExtractedText(''), null);
+    assert.equal(sanitizeExtractedText('   \n  \n'), null);
+  });
+
+  it('keeps lines that mix word chars with punctuation (e.g. "Tiramisu • 1kg")', () => {
+    const text = 'Tiramisu • 1kg';
+    const result = sanitizeExtractedText(text);
+    assert.ok(result?.includes('Tiramisu'));
+  });
+
+  it('uses default maxChars of 800', () => {
+    const text = ('A valid long line of text. '.repeat(50)).trim();
+    const result = sanitizeExtractedText(text);
+    assert.ok((result ?? '').length <= 800);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isOtherOptionsFollowUp — Albanian "tjera" and other follow-up phrases
+// ---------------------------------------------------------------------------
+
+describe('isOtherOptionsFollowUp', () => {
+  it('matches Albanian "a keni tjera" (do you have others)', () => {
+    assert.equal(isOtherOptionsFollowUp('a keni tjera'), true);
+  });
+
+  it('matches "a keni tjera a veq qita" (the exact screenshot phrase)', () => {
+    assert.equal(isOtherOptionsFollowUp('a keni tjera a veq qita'), true);
+  });
+
+  it('matches "keni tjera"', () => {
+    assert.equal(isOtherOptionsFollowUp('keni tjera'), true);
+  });
+
+  it('matches "a keni tjetra"', () => {
+    assert.equal(isOtherOptionsFollowUp('a keni tjetra'), true);
+  });
+
+  it('matches "ndonje tjeter"', () => {
+    assert.equal(isOtherOptionsFollowUp('ndonje tjeter'), true);
+  });
+
+  it('matches "ndonjë tjetër" with diacritics', () => {
+    assert.equal(isOtherOptionsFollowUp('ndonjë tjetër'), true);
+  });
+
+  it('matches English "what else do you have"', () => {
+    assert.equal(isOtherOptionsFollowUp('what else do you have'), true);
+  });
+
+  it('matches "anything else"', () => {
+    assert.equal(isOtherOptionsFollowUp('anything else?'), true);
+  });
+
+  it('matches "more options"', () => {
+    assert.equal(isOtherOptionsFollowUp('more options'), true);
+  });
+
+  it('matches "other options"', () => {
+    assert.equal(isOtherOptionsFollowUp('other options'), true);
+  });
+
+  it('matches "any alternatives"', () => {
+    assert.equal(isOtherOptionsFollowUp('any alternatives'), true);
+  });
+
+  it('does NOT match a specific product query', () => {
+    assert.equal(isOtherOptionsFollowUp('a keni mass gainer 3kg'), false);
+  });
+
+  it('does NOT match a price question', () => {
+    assert.equal(isOtherOptionsFollowUp('sa kushton'), false);
+  });
+
+  it('does NOT match a product attribute question', () => {
+    assert.equal(isOtherOptionsFollowUp('cfare shije ka'), false);
+  });
+
+  it('does NOT match an order affirmation', () => {
+    assert.equal(isOtherOptionsFollowUp('po dua ta porosis'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractConversationProductAnchor — "other options" follow-ups must be skipped
+// ---------------------------------------------------------------------------
+
+describe('extractConversationProductAnchor — other-options follow-ups', () => {
+  it('skips "a keni tjera a veq qita" and returns the prior weight-gain query', () => {
+    // Regression for the screenshot bug: the anchor must be the substantive product
+    // query, not the Albanian "do you have others?" follow-up.
+    const history: Message[] = [
+      mockMessage({ content: 'a keni produkte te mira per shtim peshe', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi X-Mass 3kg Qokolad.', sent_by: 'ai' }),
+      mockMessage({ content: 'a keni tjera a veq qita', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history);
+    assert.equal(anchor, 'a keni produkte te mira per shtim peshe');
+  });
+
+  it('skips "a keni tjera" and finds the prior product query', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'Keni mass gainer?', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi Mass Gainer 3kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'a keni tjera', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history);
+    assert.equal(anchor, 'Keni mass gainer?');
+  });
+
+  it('skips "ndonje tjeter" and finds the prior product query', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'keni proteina?', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi Whey Protein 2kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'ndonje tjeter?', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history);
+    assert.equal(anchor, 'keni proteina?');
+  });
+
+  it('skips "what else do you have?" and finds the prior product query', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'Do you have creatine?', sent_by: 'customer' }),
+      mockMessage({ content: 'Yes, we have ON Creatine.', sent_by: 'ai' }),
+      mockMessage({ content: 'what else do you have?', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history);
+    assert.equal(anchor, 'Do you have creatine?');
+  });
+
+  it('skips "other options" and finds the prior product query', () => {
+    // NOTE: "Show me weight gainers" is intentionally avoided here because "weight"
+    // is an attribute keyword that triggers isNaturalLanguageAttributeFollowUp, which
+    // also skips the message. Instead use a query with no attribute words.
+    const history: Message[] = [
+      mockMessage({ content: 'Keni mass gainer?', sent_by: 'customer' }),
+      mockMessage({ content: 'We have X-Mass 3kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'other options?', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history);
+    assert.equal(anchor, 'Keni mass gainer?');
+  });
+
+  it('falls back to AI text when only follow-up messages from customer are present', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'We have Mass Gainer 3kg and Mega Mass 3kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'a keni tjera', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history);
+    // Should fall back to the AI text since the only customer message is a follow-up
+    assert.ok(anchor?.includes('Mass Gainer') || anchor?.includes('Mega Mass'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractConversationProductAnchor — skipMostRecentCustomerMessage (LLM-confirmed path)
+//
+// When the LLM confirms "other options" intent, the caller passes
+// skipMostRecentCustomerMessage:true so the anchor function bypasses regex
+// entirely and skips the inbound message unconditionally. This covers novel
+// phrasings, slang, and dialect forms that no regex can predict.
+// ---------------------------------------------------------------------------
+
+describe('extractConversationProductAnchor — skipMostRecentCustomerMessage (LLM path)', () => {
+  it('skips the latest customer message unconditionally when flag is set', () => {
+    // "trego me tjeter" (Albanian: "show me another") — not in any regex pattern
+    const history: Message[] = [
+      mockMessage({ content: 'Keni proteina?', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi Whey Protein 2kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'trego me tjeter', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history, { skipMostRecentCustomerMessage: true });
+    assert.equal(anchor, 'Keni proteina?');
+  });
+
+  it('handles novel English phrasing not matched by regex ("show me the rest")', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'Do you have creatine?', sent_by: 'customer' }),
+      mockMessage({ content: 'Yes, we have ON Creatine.', sent_by: 'ai' }),
+      mockMessage({ content: 'show me the rest', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history, { skipMostRecentCustomerMessage: true });
+    assert.equal(anchor, 'Do you have creatine?');
+  });
+
+  it('handles novel Albanian slang not matched by regex ("cka tjeter keni")', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'A keni mass gainer?', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi X-Mass 3kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'cka tjeter keni', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history, { skipMostRecentCustomerMessage: true });
+    assert.equal(anchor, 'A keni mass gainer?');
+  });
+
+  it('still skips OLDER follow-up messages via regex after skipping the inbound', () => {
+    // Three-turn conversation: original query → follow-up → "other options"
+    // After skipping the last customer message (the "other options" one),
+    // the middle message should still be skipped by regex (price follow-up),
+    // and the anchor should be the original product query.
+    const history: Message[] = [
+      mockMessage({ content: 'Keni creatine?', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi ON Creatine 300g.', sent_by: 'ai' }),
+      mockMessage({ content: 'sa kushton?', sent_by: 'customer' }),
+      mockMessage({ content: 'Kushton 2800 ALL.', sent_by: 'ai' }),
+      mockMessage({ content: 'trego me tjeter', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history, { skipMostRecentCustomerMessage: true });
+    assert.equal(anchor, 'Keni creatine?');
+  });
+
+  it('falls back to AI texts when ALL prior customer messages are follow-ups', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'We have Mass Gainer 3kg.', sent_by: 'ai' }),
+      mockMessage({ content: 'sa kushton?', sent_by: 'customer' }),
+      mockMessage({ content: 'Kushton 3500 ALL.', sent_by: 'ai' }),
+      mockMessage({ content: 'cka tjeter keni', sent_by: 'customer' }),
+    ];
+    const anchor = extractConversationProductAnchor(history, { skipMostRecentCustomerMessage: true });
+    // sa kushton? is also a follow-up (price), so anchor falls back to AI text
+    assert.ok(anchor?.includes('Mass Gainer'));
+  });
+
+  it('behaves identically to default when flag is false', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'Keni proteina?', sent_by: 'customer' }),
+      mockMessage({ content: 'Po, kemi Whey Protein.', sent_by: 'ai' }),
+      mockMessage({ content: 'a keni tjera', sent_by: 'customer' }),
+    ];
+    // With flag=false, "a keni tjera" is skipped by isOtherOptionsFollowUp regex
+    const anchorNoFlag = extractConversationProductAnchor(history);
+    // With flag=true, "a keni tjera" is skipped by the unconditional skip
+    const anchorWithFlag = extractConversationProductAnchor(history, { skipMostRecentCustomerMessage: true });
+    // Both should resolve to the same original query
+    assert.equal(anchorNoFlag, 'Keni proteina?');
+    assert.equal(anchorWithFlag, 'Keni proteina?');
   });
 });

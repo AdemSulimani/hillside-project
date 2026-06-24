@@ -49,7 +49,7 @@ const ATTRIBUTE_FOLLOW_UP_PATTERNS: RegExp[] = [
   /\b(what|which|cfare|çfarë|cfare)\s+(types?|lloje(?:t|ve)?|product types?)\b/i,
   /\b(what|which|cfare|çfarë|cfare)\s+(options?|opsione(?:t|ve)?)\b/i,
   /\b(cilat|cila|sa)\s+(shije(?:t|sh)?|madh[eë]si(?:t|ve)?|ngjyra(?:t|ve)?|variantet?|marka(?:t|ve)?)\b/i,
-  /\b(do you have|a keni|keni)\s+(other|tjet[eë]r|different|ndryshme)\s+(flavou?rs?|sizes?|colors?|variants?)\b/i,
+  /\b(do you have|a keni|keni)\s+(other|tjet[eë]r|different|ndryshme)\s+(flavou?rs?|sizes?|colors?|variants?|brands?|marka(?:t|ve)?|weights?|pesha(?:t|ve)?)\b/i,
   /\b(tell me|show me|list)\s+(the\s+)?(flavou?rs?|sizes?|colors?|variants?|options?)\b/i,
   /^(flavou?rs?|sizes?|colors?|variants?|brands?|shije(?:t|sh)?|madh[eë]si(?:t|ve)?|ngjyra(?:t|ve)?)(\s*[.!?]*)?$/i,
 ];
@@ -119,6 +119,62 @@ function isNaturalLanguageAttributeFollowUp(message: string): boolean {
   return NATURAL_LANGUAGE_ATTRIBUTE_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
 }
 
+/**
+ * Patterns that indicate the customer is asking for MORE / DIFFERENT / OTHER products
+ * beyond what has already been shown — in any language, dialect, or phrasing.
+ *
+ * These cover Albanian plural forms ("tjera" = others, the plural of "tjetër") and
+ * common "what else / anything else" expressions that are NOT caught by
+ * isCategoryAttributeFollowUp (which requires a specific attribute type like
+ * flavor/brand/size) or isContextOnlyFollowUp (which only handles price questions).
+ *
+ * Used in extractConversationProductAnchor to skip these messages so the prior
+ * substantive product query is used as the search anchor rather than the follow-up
+ * itself. Without this, searching "a keni tjera a veq qita" returns irrelevant
+ * products and causes the AI to lose the original category context.
+ */
+const OTHER_OPTIONS_FOLLOW_UP_PATTERNS: RegExp[] = [
+  // Albanian plural "tjera" / "tjetra" (plural of "tjetër" = others)
+  // "a keni tjera", "keni tjera", "a ka tjera" — do you have others / are there others
+  /\b(a\s+keni|keni|a\s+ka|ka)\s+(tjera|tjetra)\b/i,
+  // "ndonjë tjetër" / "ndonje tjeter" — any other
+  /\bndonj[eë]\s+tjet[eë]r\b/i,
+  // "a keni X tjeter" — "do you have another/different X" (single attribute, no specific type)
+  /\b(a\s+keni|keni)\s+\w+\s+tjet[eë]r\b/i,
+  // "veq qita/keto" — "only these?" (implies: is that all, or are there more?)
+  /\b(veq|vetem|vet[eë]m)\s+(qita|keto|ket[eë]|ata|to)\b/i,
+  // "what else" / "anything else" in English
+  /\b(what else|anything else)\b/i,
+  // "show/suggest/recommend more/other/different" in English
+  /\b(show|suggest|recommend)\s+(me\s+)?(more|other|different)\b/i,
+  // standalone "other options" / "more options"
+  /\b(other|more)\s+options?\b/i,
+  // standalone "any alternatives"
+  /\bany\s+(other\s+)?alternatives?\b/i,
+  // Albanian "me shume alternativa/opsione" — more alternatives/options
+  /\bme\s+(shum[eë]|alternativa|opsione)\b/i,
+];
+
+/**
+ * Whether the message is asking for more / other / different products beyond what was
+ * already shown. Used in anchor extraction to skip these messages so the prior
+ * substantive product query — not the follow-up itself — is used as the search anchor.
+ *
+ * Exported so tests can verify coverage for newly-added dialect patterns.
+ */
+export function isOtherOptionsFollowUp(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length > 300) return false;
+  return OTHER_OPTIONS_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
+}
+
 function extractKeywords(text: string): string[] {
   const stopWords = new Set([
     'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they',
@@ -143,19 +199,38 @@ function extractKeywords(text: string): string[] {
 /**
  * Pull the most recent substantive product query from the conversation so short
  * follow-ups like "What flavors?" can re-resolve the full matching product set.
+ *
+ * @param options.skipMostRecentCustomerMessage - When `true`, the most recent customer
+ *   message is skipped unconditionally, without relying on regex pattern matching.
+ *   Use this when the caller has already determined via LLM (e.g. classifyOtherProductOptionsIntent)
+ *   that the latest message is a follow-up — the LLM confirmation is authoritative and
+ *   covers novel phrasings, slang, and dialect forms that regex cannot predict.
  */
-export function extractConversationProductAnchor(messages: Message[]): string | null {
+export function extractConversationProductAnchor(
+  messages: Message[],
+  options?: { skipMostRecentCustomerMessage?: boolean },
+): string | null {
   const recent = messages.slice(-10);
+  let mostRecentCustomerSkipped = false;
 
   for (let i = recent.length - 1; i >= 0; i--) {
     const msg = recent[i];
     if (msg.sent_by !== 'customer') continue;
     const text = (msg.content ?? '').trim();
     if (!text || text.length < 3) continue;
+
+    // When the caller has LLM-confirmed the most recent message is a follow-up,
+    // skip it once without regex — covers every phrasing the LLM can understand.
+    if (options?.skipMostRecentCustomerMessage && !mostRecentCustomerSkipped) {
+      mostRecentCustomerSkipped = true;
+      continue;
+    }
+
     if (
       isCategoryAttributeFollowUp(text) ||
       isContextOnlyFollowUp(text) ||
-      isNaturalLanguageAttributeFollowUp(text)
+      isNaturalLanguageAttributeFollowUp(text) ||
+      isOtherOptionsFollowUp(text)
     ) continue;
     const keywords = extractKeywords(text);
     if (keywords.length > 0) return text;
@@ -334,7 +409,11 @@ export function getProductStructuredAttributes(
 const NAME_ATTRIBUTE_PATTERNS: Array<{ key: StructuredAttributeKey; re: RegExp }> = [
   {
     key: 'flavor',
-    re: /\b(chocolate|vanilla|strawberry|berry|unflavored|unflavoured|banana|cookies?\s*&?\s*cream|mango|lemon|orange|mint|caramel|coffee|neutral|cookies? and cream)\b/i,
+    // English + Albanian flavor vocabulary. The deterministic missing-attribute net
+    // relies on this to recognize a flavor stated in the product NAME/description
+    // (e.g. "Carbo One 1kg me shije limon"), so it never escalates a flavor the
+    // grounded answer already provides.
+    re: /\b(chocolate|cokollat[eë]|vanilla|vanilje|strawberry|luleshtrydhe|berry|mjed[eë]r|unflavored|unflavoured|banana|banane|cookies?\s*&?\s*cream|cookies? and cream|mango|lemon|limon|orange|portokall|mint|mente|caramel|karamel|coffee|kafe|neutral|neutrale|coconut|kokos|peach|pjeshk[eë]|cherry|qershi|apple|moll[eë])\b/i,
   },
   { key: 'color', re: /\b(red|blue|black|white|green|yellow|pink|purple|grey|gray|silver|gold)\b/i },
   { key: 'size', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|ml|l|oz|lb|lbs|capsules?|caps|tablets?|servings?))\b/i },
@@ -365,6 +444,28 @@ function inferAttributeFromText(
   }
 
   return null;
+}
+
+/**
+ * Resolve EVERY structured attribute for a product using both the structured catalog
+ * columns AND the product's free text (name, description, extracted catalog text,
+ * tags). This mirrors exactly what the knowledge context fed to the LLM composer can
+ * answer from, so the deterministic "missing attribute" net never contradicts a value
+ * the model legitimately read from the product name/description.
+ *
+ * Example: "Carbo One 1kg me shije limon" has an empty `flavor` column but the flavor
+ * is present in the name — this resolver returns flavor="limon", preventing a bogus
+ * "we'll notify you shortly about the flavor" notice alongside an answer that already
+ * stated the flavor.
+ */
+export function getProductInferredAttributes(
+  product: Product,
+): Partial<Record<StructuredAttributeKey, string | null>> {
+  const out: Partial<Record<StructuredAttributeKey, string | null>> = {};
+  for (const key of ALL_STRUCTURED_ATTRIBUTE_KEYS) {
+    out[key] = inferAttributeFromText(key, product);
+  }
+  return out;
 }
 
 function attributeLabel(key: StructuredAttributeKey): string {
@@ -500,6 +601,31 @@ Product-group answer rules (IMPORTANT):
 - Keep it compact: list the values directly with no intro line, no restating the question, and no closing summary. Group products that share a value instead of repeating it.`;
 }
 
+/**
+ * Quality gate for OCR-derived extracted text before it enters the LLM knowledge
+ * context. Filters out lines dominated by non-word characters (garbled OCR artifacts)
+ * then caps the result at `maxChars`. Returns null when nothing useful remains so the
+ * caller can omit the field entirely — preventing OCR noise from overriding or
+ * confusing the structured catalog data.
+ *
+ * Threshold: a line is kept when at least 40% of its characters are word characters
+ * (Unicode letters or digits). This is permissive enough to keep lines like
+ * "Tiramisu • 1kg" but strips debris like "▌█░░ ▒▒▒▓" or "--- / --- ---".
+ */
+export function sanitizeExtractedText(text: string, maxChars = 800): string | null {
+  const lines = (text ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => {
+      if (l.length < 3) return false;
+      const wordChars = (l.match(/[\p{L}\p{N}]/gu) ?? []).length;
+      return wordChars / l.length >= 0.4;
+    });
+  if (lines.length === 0) return null;
+  const joined = lines.join('\n');
+  return joined.length > maxChars ? joined.slice(0, maxChars) : joined;
+}
+
 /** Combined catalog text for knowledge-gap checks across a product group. */
 export function buildProductKnowledgeContext(products: Product[]): string {
   return products
@@ -515,6 +641,10 @@ export function buildProductKnowledgeContext(products: Product[]): string {
           ? `Price: €${p.price} (discounted: €${p.discounted_price})`
           : `Price: €${p.price}`;
 
+      // Prefer structured/verified-image facts over raw extracted_text; apply a
+      // quality gate to strip garbled OCR lines before feeding to the LLM.
+      const cleanedExtractedText = p.extracted_text ? sanitizeExtractedText(p.extracted_text) : null;
+
       return [
         `Product: ${p.name}`,
         p.brand ? `Brand: ${p.brand}` : null,
@@ -522,7 +652,7 @@ export function buildProductKnowledgeContext(products: Product[]): string {
         priceLabel,
         attrLines ? `Attributes: ${attrLines}` : null,
         p.description ? `Description: ${p.description}` : null,
-        p.extracted_text ? `Extracted catalog text: ${p.extracted_text.slice(0, 800)}` : null,
+        cleanedExtractedText ? `Extracted catalog text: ${cleanedExtractedText}` : null,
         p.usage_description ? `Usage: ${p.usage_description}` : null,
         p.tags.length ? `Tags: ${p.tags.join(', ')}` : null,
       ]

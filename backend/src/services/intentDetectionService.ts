@@ -141,7 +141,10 @@ Respond with a single JSON object only (no markdown), matching that shape exactl
         content: `Tenant context id: ${tenantId}\n\nTranscript:\n${transcript}`,
       },
     ],
-    temperature: 0.2,
+    // Deterministic: purchase-intent gates draft-order creation against a fixed score
+    // threshold, so any sampling randomness causes near-boundary messages to flip between
+    // "create order" and "skip" across runs/retries.
+    temperature: 0,
     max_tokens: 512,
     response_format: { type: 'json_object' },
   });

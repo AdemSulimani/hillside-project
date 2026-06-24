@@ -243,6 +243,7 @@ Return ONLY valid JSON with keys:
 Do NOT invent brand names. Use null when unreadable.`;
 
 async function extractCustomerProductFromImages(
+  tenantId: string,
   inboundMessage: string,
   attachmentUrls: string[],
 ): Promise<CustomerVisionExtraction | null> {
@@ -257,7 +258,11 @@ async function extractCustomerProductFromImages(
   // are near-identical across different images — causing the extraction of one photo
   // to be served for a completely different photo. Hashing the whole payload removes
   // that collision while keeping the key bounded in size.
-  const cacheKey = `cust_vision:${hashVisionCacheInput(resolvedImageUrls, inboundMessage)}`;
+  //
+  // The key is namespaced by tenantId so one tenant's customer-photo analysis can never
+  // be served to another tenant (data-isolation guarantee), even if two customers happen
+  // to send byte-identical images with identical message text.
+  const cacheKey = `cust_vision:${tenantId}:${hashVisionCacheInput(resolvedImageUrls, inboundMessage)}`;
   const cached = await redisConnection.get(cacheKey);
   if (cached) {
     try {
@@ -573,7 +578,11 @@ export async function matchProductsFromCustomerImages(input: {
     };
   }
 
-  const extraction = await extractCustomerProductFromImages(input.inboundMessage, attachmentUrls);
+  const extraction = await extractCustomerProductFromImages(
+    input.tenantId,
+    input.inboundMessage,
+    attachmentUrls,
+  );
 
   let visualMatches: ImageFingerprintMatch[] = [];
   if (extraction) {
