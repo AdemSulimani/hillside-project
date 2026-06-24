@@ -50,6 +50,7 @@ import {
   formatCatalogUsageLine,
   isProductDescriptionQuestion,
   isProductRecommendationOrComparisonQuestion,
+  PRICE_LIST_COMPACT_APPEND,
   PRODUCT_DESCRIPTION_CONCISE_APPEND,
   PRODUCT_DESCRIPTION_TARGETED_APPEND,
   SHORTEST_ANSWER_APPEND,
@@ -3971,6 +3972,9 @@ Customer is asking for more/other products in the same category (IMPORTANT):
 
   systemPrompt += SHORTEST_ANSWER_APPEND;
   systemPrompt += PRODUCT_DESCRIPTION_CONCISE_APPEND;
+  if (customerAskedPrice && products.length > 5) {
+    systemPrompt += PRICE_LIST_COMPACT_APPEND;
+  }
   if (descriptionQuestionTurn) {
     systemPrompt += PRODUCT_DESCRIPTION_TARGETED_APPEND;
   }

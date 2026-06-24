@@ -196,6 +196,13 @@ export interface UncertainAnswerDecisionInput {
   isOrderFlowReply: boolean;
   /** Result of the upstream negative-availability classifier for this reply. */
   negativeAvailabilityDetected: boolean;
+  /**
+   * True when the catalog context for this turn contained matched products that
+   * the AI could offer as alternatives. When the AI says a product is unavailable
+   * but had alternatives to suggest, it is following guidelines.catalog_integrity
+   * — not deflecting — and should not be escalated.
+   */
+  hasMatchingProductsInContext: boolean;
 }
 
 /**
@@ -203,14 +210,21 @@ export interface UncertainAnswerDecisionInput {
  * the caller should replace the reply with the holding message and escalate.
  *
  * Fires when (a) the guard is enabled, (b) no earlier escalation already handled
- * the turn, (c) the reply is not a legitimate out-of-stock or order-flow message,
- * and (d) the reply is EITHER a knowledge/uncertainty deflection (deterministic)
- * OR a negative-availability deflection (from the upstream classifier).
+ * the turn, (c) the reply is not a legitimate out-of-stock, order-flow, or
+ * guidelines-compliant "not available + alternatives" message, and (d) the reply
+ * is EITHER a knowledge/uncertainty deflection (deterministic) OR a
+ * negative-availability deflection (from the upstream classifier).
  *
  * Out-of-stock replies are explicitly NOT escalated: an out-of-stock answer is
  * reliable information the business wants delivered to the customer as-is. This is
  * what separates "the product is out of stock" (sent) from "we don't carry that
  * product" (escalated) — only the latter lacks stock wording.
+ *
+ * Guideline-compliant negative-availability replies are also NOT escalated: when
+ * the AI says a product is unavailable but the catalog context contained matching
+ * alternatives (hasMatchingProductsInContext), the AI is following
+ * guidelines.catalog_integrity ("say it's not available, then suggest
+ * alternatives") and escalating would contradict that guideline.
  */
 export function shouldEscalateUncertainAnswer(input: UncertainAnswerDecisionInput): boolean {
   if (!input.enabled) return false;
@@ -219,5 +233,9 @@ export function shouldEscalateUncertainAnswer(input: UncertainAnswerDecisionInpu
   if (input.isOrderFlowReply) return false;
   // Out-of-stock is legitimate info → deliver as-is, never escalate.
   if (isOutOfStockReply(input.replyText)) return false;
+  // When alternatives were available in the catalog context, a negative-availability
+  // reply is the AI correctly following guidelines.catalog_integrity — not a
+  // bare deflection that should be handed off to a human.
+  if (input.negativeAvailabilityDetected && input.hasMatchingProductsInContext) return false;
   return input.negativeAvailabilityDetected || isUncertainDeflection(input.replyText);
 }

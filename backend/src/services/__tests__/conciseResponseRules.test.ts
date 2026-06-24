@@ -1,8 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SHORTEST_ANSWER_APPEND,
+  PRICE_LIST_COMPACT_APPEND,
   PRODUCT_DESCRIPTION_CONCISE_APPEND,
+  SHORTEST_ANSWER_APPEND,
 } from '../productDescriptionPromptService';
 import { assembleGuidelinesFromBlocks } from '../promptAssemblyService';
 import type { TenantPromptBlockRow } from '../../db/models/promptBlock';
@@ -65,14 +66,12 @@ describe('SHORTEST_ANSWER_APPEND (platform-enforced brevity rule)', () => {
   });
 
   it('does not contradict the order-closing policy: carves out the one allowed order question', () => {
-    // The runtime (stripRepeatedOrderClosingQuestion / stripGenericFollowUpInvitation)
-    // deliberately KEEPS the single order-closing question on the first product turn and
-    // only strips generic invitations. The brevity append must therefore not blanket-ban
-    // "Would you like to order?" — otherwise the prompt contradicts the business logic.
+    // The literal phrase "Would you like to order?" must not appear verbatim in the
+    // brevity rule so the model does not echo it as a suggested reply template.
     assert.doesNotMatch(SHORTEST_ANSWER_APPEND, /Would you like to order\?/);
-    assert.match(SHORTEST_ANSWER_APPEND, /NO GENERIC FOLLOW-UP INVITATIONS/);
-    assert.match(SHORTEST_ANSWER_APPEND, /order-oriented follow-up question/);
-    // Generic invitations stay forbidden.
+    // The rule explicitly bans all follow-up invitations and order-closing questions.
+    assert.match(SHORTEST_ANSWER_APPEND, /NO FOLLOW-UP QUESTIONS OR INVITATIONS/);
+    // Generic invitation examples stay forbidden.
     assert.match(SHORTEST_ANSWER_APPEND, /Let me know if you need anything/);
   });
 });
@@ -105,5 +104,35 @@ describe('assembleGuidelinesFromBlocks with the migration-061 messaging style', 
       { hasImages: false },
     );
     assert.equal(assembled, '');
+  });
+});
+
+describe('PRICE_LIST_COMPACT_APPEND (category price listing cap)', () => {
+  it('caps the list at 5 items', () => {
+    assert.match(PRICE_LIST_COMPACT_APPEND, /5 most relevant/);
+  });
+
+  it('tells the customer how to request the full list', () => {
+    assert.match(PRICE_LIST_COMPACT_APPEND, /full price list/i);
+  });
+
+  it('overrides the cap when the customer explicitly requests everything', () => {
+    assert.match(PRICE_LIST_COMPACT_APPEND, /te gjitha/i);
+    assert.match(PRICE_LIST_COMPACT_APPEND, /full list/i);
+    assert.match(PRICE_LIST_COMPACT_APPEND, /list them all/i);
+  });
+
+  it('does not limit comparison / ranking questions', () => {
+    assert.match(PRICE_LIST_COMPACT_APPEND, /comparison or ranking/i);
+    assert.match(PRICE_LIST_COMPACT_APPEND, /do NOT limit/i);
+  });
+
+  it('does not limit a single named product query', () => {
+    assert.match(PRICE_LIST_COMPACT_APPEND, /single specifically named product/i);
+  });
+
+  it('covers Albanian price comparison phrases', () => {
+    assert.match(PRICE_LIST_COMPACT_APPEND, /cili kushton me pak/i);
+    assert.match(PRICE_LIST_COMPACT_APPEND, /cila eshte me e lire/i);
   });
 });

@@ -125,6 +125,7 @@ describe('shouldEscalateUncertainAnswer', () => {
     isOosCannedReply: false,
     isOrderFlowReply: false,
     negativeAvailabilityDetected: false,
+    hasMatchingProductsInContext: false,
   };
 
   it('escalates a knowledge deflection when enabled and no exclusions apply', () => {
@@ -187,6 +188,44 @@ describe('shouldEscalateUncertainAnswer', () => {
         negativeAvailabilityDetected: true,
       }),
       false,
+    );
+  });
+
+  it('does NOT escalate when AI says product unavailable but catalog alternatives were available (guidelines.catalog_integrity)', () => {
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        ...base,
+        replyText:
+          "We don't carry that exact product, but here are some similar options: Product A, Product B, and Product C.",
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: true,
+      }),
+      false,
+    );
+  });
+
+  it('does NOT escalate Albanian reply following the same guideline', () => {
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        ...base,
+        replyText:
+          'Nuk e kemi këtë produkt, por mund t\'ju sugjerojmë: Produkti A, Produkti B.',
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: true,
+      }),
+      false,
+    );
+  });
+
+  it('STILL escalates a bare negative-availability reply when no catalog alternatives were available', () => {
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        ...base,
+        replyText: 'We do not carry that product.',
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: false,
+      }),
+      true,
     );
   });
 
