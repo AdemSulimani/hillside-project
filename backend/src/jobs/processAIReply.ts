@@ -795,11 +795,10 @@ async function messageContainsOrderClosingAskHybrid(value: string): Promise<bool
 
 async function stripRepeatedOrderClosingQuestion(
   replyText: string,
-  orderClosingAlreadyAskedInConversation: boolean,
+  _orderClosingAlreadyAskedInConversation: boolean,
 ): Promise<string> {
   const reply = (replyText ?? '').trim();
   if (!reply) return reply;
-  if (!orderClosingAlreadyAskedInConversation) return reply;
   if (!(await messageContainsOrderClosingAskHybrid(reply))) return reply;
 
   const sentenceLikeChunks = reply
@@ -2885,6 +2884,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       isOosCannedReply,
       isOrderFlowReply: isOrderConfirmationReply,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
+      hasMatchingProductsInContext: matchedProducts.length > 0,
     })
   ) {
     console.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {
