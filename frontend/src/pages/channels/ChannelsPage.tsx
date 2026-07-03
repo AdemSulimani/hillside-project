@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
 import { Loader2, Plus, Radio } from 'lucide-react';
@@ -6,6 +6,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { deleteChannel, fetchChannels, getInstagramRedirectUrl, getMetaRedirectUrl } from '@/api/channelsApi';
 import { ChannelCard } from '@/components/channels/ChannelCard';
+import { ViberConnectDialog } from '@/components/channels/ViberConnectDialog';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useWhatsAppEmbeddedSignup } from '@/hooks/useWhatsAppEmbeddedSignup';
@@ -22,6 +23,7 @@ export default function ChannelsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { startSignup, isPending: whatsAppSignupPending } = useWhatsAppEmbeddedSignup();
+  const [viberDialogOpen, setViberDialogOpen] = useState(false);
 
   const { data: channels = [], isLoading, isError } = useQuery({
     queryKey: ['channels'],
@@ -64,7 +66,14 @@ export default function ChannelsPage() {
     const type = searchParams.get('type');
 
     if (status === 'connected' && type) {
-      const label = type === 'instagram' ? 'Instagram' : type === 'whatsapp' ? 'WhatsApp' : 'Facebook';
+      const label =
+        type === 'instagram'
+          ? 'Instagram'
+          : type === 'whatsapp'
+            ? 'WhatsApp'
+            : type === 'viber'
+              ? 'Viber'
+              : 'Facebook';
       toast.success(`${label} connected successfully`);
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       navigate('/channels', { replace: true });
@@ -135,8 +144,18 @@ export default function ChannelsPage() {
             <Plus className="size-4" />
             Connect WhatsApp
           </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setViberDialogOpen(true)}
+          >
+            <Plus className="size-4" />
+            Connect Viber
+          </Button>
         </div>
       </div>
+
+      <ViberConnectDialog open={viberDialogOpen} onOpenChange={setViberDialogOpen} />
 
       {isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">

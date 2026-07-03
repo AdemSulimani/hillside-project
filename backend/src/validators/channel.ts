@@ -10,3 +10,12 @@ export const whatsappEmbeddedSignupSchema = z.object({
 });
 
 export type WhatsAppEmbeddedSignupInput = z.infer<typeof whatsappEmbeddedSignupSchema>;
+
+export const viberConnectSchema = z.object({
+  auth_token: z
+    .string()
+    .min(10, 'auth_token is required')
+    .max(512, 'auth_token is too long'),
+});
+
+export type ViberConnectInput = z.infer<typeof viberConnectSchema>;

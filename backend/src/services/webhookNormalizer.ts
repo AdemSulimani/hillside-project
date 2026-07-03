@@ -1135,6 +1135,9 @@ export class WebhookNormalizerService {
       if (edit) return edit;
       return this.normalizeFromInstagram(payload);
     }
+    if (channelType === 'viber') {
+      return this.normalizeFromViber(payload);
+    }
     const waEdit = extractWhatsAppEdit(payload);
     if (waEdit) return waEdit;
     return this.normalizeFromWhatsApp(payload);
@@ -1241,6 +1244,92 @@ export class WebhookNormalizerService {
       // For WhatsApp Cloud API we store channel.external_id as phone_number_id.
       // Incoming webhook entry.id is usually WABA id, which does not match our channel lookup.
       channelExternalId: phoneNumberId ?? normalized.channelExternalId,
+    };
+  }
+
+  /**
+   * Normalizes a Viber `message` event payload into a standard InboundMessageDTO.
+   *
+   * Viber webhook shape (message event):
+   * {
+   *   event: 'message',
+   *   timestamp: <epoch ms>,
+   *   message_token: <number>,
+   *   sender: { id, name, avatar, country, language, api_version },
+   *   message: { type, text, media, location, tracking_data, file_name, file_size, sticker_id }
+   * }
+   *
+   * The webhook controller embeds `_viber_channel_external_id` into the payload so the
+   * normalizer can resolve the channel without needing an extra DB call.
+   */
+  normalizeFromViber(payload: Record<string, unknown>): InboundMessageDTO {
+    const sender = asRecord(payload.sender);
+    const message = asRecord(payload.message);
+
+    // The webhook controller embeds the bot's external_id into the payload.
+    const channelExternalId =
+      typeof payload._viber_channel_external_id === 'string'
+        ? payload._viber_channel_external_id
+        : '';
+
+    const contactExternalId =
+      typeof sender?.id === 'string' && sender.id.trim() ? sender.id.trim() : null;
+    const contactName =
+      typeof sender?.name === 'string' && sender.name.trim()
+        ? sender.name.trim()
+        : contactExternalId
+          ? `Viber user ${contactExternalId}`
+          : 'Unknown';
+    const contactAvatarUrl =
+      typeof sender?.avatar === 'string' && sender.avatar.trim() ? sender.avatar.trim() : null;
+
+    const messageToken = payload.message_token;
+    const externalMessageId =
+      messageToken != null ? String(messageToken) : '';
+
+    if (!channelExternalId || !externalMessageId || !contactExternalId) {
+      throw new Error(
+        'Invalid Viber webhook payload: required message identifiers are missing',
+      );
+    }
+
+    const viberType =
+      message && typeof message.type === 'string' ? message.type.toLowerCase() : 'text';
+
+    let messageType: MessageType = 'text';
+    if (viberType === 'picture') messageType = 'image';
+    else if (viberType === 'video') messageType = 'video';
+    else if (viberType === 'file') messageType = 'document';
+    else if (viberType === 'sticker') messageType = 'image';
+
+    const content =
+      message && typeof message.text === 'string' && message.text.trim()
+        ? message.text.trim()
+        : null;
+
+    // Viber delivers media as a direct URL (1-hour TTL); store it for downstream download.
+    const mediaUrl =
+      message && typeof message.media === 'string' && message.media.trim()
+        ? message.media.trim()
+        : null;
+
+    const attachmentUrls: string[] = mediaUrl ? [mediaUrl] : [];
+
+    // Stickers don't warrant an AI reply.
+    const skipAiReply = viberType === 'sticker' ? true : undefined;
+
+    return {
+      channelType: 'viber',
+      channelExternalId,
+      externalMessageId,
+      contactExternalId,
+      contactName,
+      contactAvatarUrl,
+      messageType,
+      content,
+      attachmentUrls,
+      skipAiReply,
+      rawPayload: payload,
     };
   }
 }

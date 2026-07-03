@@ -71,3 +71,15 @@ export async function connectWhatsAppEmbeddedSignup(body: {
   }
   return normalizeChannel(raw as Record<string, unknown>);
 }
+
+export async function connectViber(authToken: string): Promise<Channel> {
+  const { data } = await api.post<ApiResponse<{ channel: Record<string, unknown> }>>(
+    '/channels/viber/connect',
+    { auth_token: authToken },
+  );
+  const raw = data.data?.channel;
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Channel was not returned by the server.');
+  }
+  return normalizeChannel(raw as Record<string, unknown>);
+}

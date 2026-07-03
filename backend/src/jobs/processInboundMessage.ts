@@ -32,6 +32,7 @@ import {
   setHumanOverrideHold,
   type MessageReplyToPayload,
 } from '../services/conversationService';
+import { wasSelfSentMessageEcho } from '../services/outboundEchoRegistry';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { uploadImage } from '../services/cloudinaryService';
@@ -703,6 +704,49 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     normalized.isEcho === true;
 
   if (isNativeEcho) {
+    // First, recognise echoes of messages OUR platform sent through the Send API using the ids
+    // we recorded at send time. This is essential on Instagram, whose echoes carry NO `app_id`
+    // (so the `isHumanAgentEcho` heuristic below would classify every AI reply as a human
+    // handoff) and whose reply-with-image turns echo back BEFORE the AI reply job has persisted
+    // its outbound row (so the `external_message_id` dedup upstream can't catch them yet). A
+    // self-sent echo must NEVER set a human-override hold or flip the conversation to human-owned.
+    if (await wasSelfSentMessageEcho(normalized.externalMessageId)) {
+      const isImageEcho =
+        permanentAttachmentUrls.length > 0 || resolvedInboundMessageType !== 'text';
+      if (isImageEcho) {
+        // Auto-sent product images are not persisted anywhere else, so store this one exactly
+        // once — attributed to the AI — so it still appears in the conversation thread.
+        const aiImageEcho = await createMessage({
+          tenant_id: channel.tenant_id,
+          conversation_id: conversation.id,
+          external_message_id: normalized.externalMessageId,
+          direction: 'outbound',
+          type: resolvedInboundMessageType,
+          content: normalized.content,
+          attachment_urls: permanentAttachmentUrls,
+          sent_by: 'ai',
+        });
+        await touchConversationLastMessageAt(conversation.id);
+        void logEvent(channel.tenant_id, 'ai_reply_echo', {
+          conversation_id: conversation.id,
+          channel_id: channel.id,
+          channel_type: channel.type,
+          message_id: aiImageEcho.id,
+          source: 'self_send_image',
+        });
+        socketService.emitNewMessage(channel.tenant_id, aiImageEcho);
+        socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
+      } else {
+        // Text replies are persisted by the AI reply job itself; skip the echo to avoid a
+        // duplicate-key clash on external_message_id.
+        console.info('[inbound] Skipping self-sent text echo (persisted by AI reply job)', {
+          conversation_id: conversation.id,
+          external_message_id: normalized.externalMessageId,
+        });
+      }
+      return;
+    }
+
     // Meta echoes EVERY message the Page sends — including the AI's own Send-API replies and
     // replies we sent from our inbox UI (both call the Send API and carry an `app_id`). Only
     // echoes WITHOUT an `app_id` originate from a human agent typing in Meta's native surfaces
