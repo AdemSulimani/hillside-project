@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { ExternalLink, Globe, Image, Loader2, MessageCircleMore, type LucideIcon } from 'lucide-react';
+import { ExternalLink, Globe, Image, Loader2, MessageCircleMore, Phone, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { z } from 'zod';
 import {
@@ -44,6 +44,7 @@ const ORDER_CHANNEL_ICONS: Record<ChannelType, LucideIcon> = {
   facebook: Globe,
   instagram: Image,
   whatsapp: MessageCircleMore,
+  viber: Phone,
 };
 
 function extractMessage(err: unknown, fallback: string): string {
