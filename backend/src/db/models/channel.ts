@@ -1,11 +1,12 @@
 import pool from '../pool';
 
-export type ChannelType = 'facebook' | 'instagram' | 'whatsapp';
+export type ChannelType = 'facebook' | 'instagram' | 'whatsapp' | 'viber';
 export type ChannelConnectionMethod =
   | 'oauth_meta'
   | 'oauth_instagram'
   | 'manual'
-  | 'embedded_signup';
+  | 'embedded_signup'
+  | 'viber_bot';
 
 export interface Channel {
   id: string;

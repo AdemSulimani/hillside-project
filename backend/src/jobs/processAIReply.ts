@@ -26,7 +26,7 @@ import {
   updateOrderCustomerInfoForAI,
   type UpdateOrderCustomerInfoInput,
 } from '../db/models/order';
-import { findActiveProductNamesForTenant } from '../db/models/product';
+import { findActiveProductNamesForTenant, type Product } from '../db/models/product';
 import { resolveOrderProduct } from '../services/orderProductResolutionService';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
@@ -38,6 +38,7 @@ import {
   classifyOrderConfirmationReplyIntent,
   classifySpeculativeHealthAdvice,
   classifyUsageQuestionIntent,
+  classifyProductImageRequest,
   containsSpeculativeHealthAdvice,
   detectCancellationOrRefundIntent,
   detectOrderAffirmationIntent,
@@ -49,9 +50,15 @@ import {
   generateReply,
   isOutOfStockProductReply,
   isUsageQuestionUnanswered,
+  resolveProductsFromPersistedContext,
   HISTORY_FETCH_LIMIT,
   type ReplyLocale,
 } from '../services/aiService';
+import {
+  resolveProductsForImageRequest,
+  augmentImageTargetsFromCatalog,
+} from '../services/productImageRequestService';
+import { markSelfSentMessageEcho } from '../services/outboundEchoRegistry';
 import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
 import {
   buildOrderConfirmationDeliveryLine,
@@ -95,7 +102,7 @@ import {
 } from '../services/aiQualityService';
 import { createFeedbackLog } from '../db/models/feedbackLog';
 import { detect } from '../services/intentDetectionService';
-import { sendMessage } from '../services/channelSenderService';
+import { sendMessage, sendImageMessage } from '../services/channelSenderService';
 import { socketService } from '../services/socketService';
 import { logEvent } from '../services/analyticsService';
 import { getHumanHoldMinutes } from '../services/conversationService';
@@ -1941,6 +1948,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
+  // Start product image request classification in parallel with AI text generation
+  // so we pay no extra latency on the happy (non-image-request) path.
+  const imageRequestClassificationPromise = classifyProductImageRequest(inboundText).catch(
+    () => null,
+  );
+
   const {
     reply: replyText,
     productCatalogContext,
@@ -1957,6 +1970,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       undefined,
       replyLanguage,
     );
+
+  // Await the image classification result — it should already be resolved since
+  // generateReply took much longer than a single fast JSON classifier call.
+  const imageClassification = await imageRequestClassificationPromise;
+
+  // Resolved at end of image-request handling block (below); declared here so
+  // they stay in scope for the image-send step and the alert-creation step.
+  let productsToSendImages: Product[] = [];
+  let productsWithMissingImages: Product[] = [];
 
   if (replyText.trim() === '[NO_REPLY]') {
     return;
@@ -2928,6 +2950,105 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // formatting only, never the wording or any decision made above.
   finalReplyText = sanitizeOutboundMessageText(finalReplyText);
 
+  // ---- Product image request handling ------------------------------------
+  // Detect when the customer explicitly asked to see a product photo and, if so,
+  // resolve which product(s) they want, override the AI's text reply with a clean
+  // canned confirmation, and queue up image messages to send after the text.
+  //
+  // This block runs AFTER all guards (usage, knowledge-gap, price, name, uncertain)
+  // so image sending is always skipped when an escalation already fired.
+  const anyEscalationFired =
+    usageEscalated ||
+    knowledgeGapEscalated ||
+    priceHallucinationEscalated ||
+    productNameHallucinationEscalated ||
+    uncertainAnswerEscalated;
+
+  if (imageClassification?.is_image_request && !anyEscalationFired) {
+    try {
+      // Load products discussed in recent AI messages so positional references
+      // like "the second one" resolve against the full set the customer has seen.
+      const recentHistoryProducts = await resolveProductsFromPersistedContext(
+        tenantId,
+        recentMessages,
+        10,
+      );
+      const contextTargets = resolveProductsForImageRequest(
+        imageClassification.product_refs,
+        matchedProducts,
+        recentHistoryProducts,
+      );
+
+      // Recover named products whose image lives on a catalog row that wasn't in this
+      // turn's context (or resolved to an imageless sibling variant). This is what turns
+      // a spurious "we'll send the photo shortly" back into an actual image send when the
+      // business HAS uploaded a photo for the product the customer asked about.
+      const targetProducts = await augmentImageTargetsFromCatalog(
+        tenantId,
+        imageClassification.product_refs,
+        contextTargets,
+      );
+
+      if (targetProducts.length > 0) {
+        productsToSendImages = targetProducts.filter((p) => p.image_urls.length > 0);
+        productsWithMissingImages = targetProducts.filter((p) => p.image_urls.length === 0);
+
+        const imgLocale = replyLocale;
+
+        if (productsToSendImages.length > 0) {
+          // Replace AI-generated text with a clean confirmation that pairs naturally
+          // with the image message(s) that follow immediately after.
+          if (productsToSendImages.length === 1) {
+            finalReplyText =
+              imgLocale === 'sq'
+                ? `Ja foto e ${productsToSendImages[0].name}:`
+                : `Here is a photo of ${productsToSendImages[0].name}:`;
+          } else {
+            finalReplyText =
+              imgLocale === 'sq'
+                ? 'Ja fotot e produkteve të kërkuara:'
+                : 'Here are the photos of the products you asked about:';
+          }
+          // Append a per-product notice for any products that had no image stored.
+          if (productsWithMissingImages.length > 0) {
+            const missingNames = productsWithMissingImages.map((p) => p.name).join(', ');
+            finalReplyText +=
+              imgLocale === 'sq'
+                ? `\nFoto e ${missingNames} do të ju dërgohet së shpejti.`
+                : `\nWe'll send you the photo of ${missingNames} shortly.`;
+          }
+        } else {
+          // No images at all — send the holding message so the customer knows
+          // a human will follow up with the photo.
+          finalReplyText =
+            imgLocale === 'sq'
+              ? 'Foto e produktit do të ju dërgohet së shpejti.'
+              : "We'll send you the product photo shortly.";
+        }
+
+        console.info('[ai.reply] Product image request handled', {
+          conversationId,
+          tenantId,
+          productsWithImages: productsToSendImages.map((p) => p.id),
+          productsWithoutImages: productsWithMissingImages.map((p) => p.id),
+        });
+      }
+    } catch (imageResolutionErr) {
+      console.warn(
+        '[ai.reply] Product image request resolution failed — sending original AI reply',
+        {
+          conversationId,
+          tenantId,
+          error:
+            imageResolutionErr instanceof Error
+              ? imageResolutionErr.message
+              : String(imageResolutionErr),
+        },
+      );
+    }
+  }
+  // ---- End product image request handling --------------------------------
+
   const contact = await findContactById(conversation.contact_id);
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
@@ -2982,11 +3103,81 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       await redisConnection
         .set(sendIdemKey, sendResult.graphMessageId ?? '1', 'EX', 3600)
         .catch(() => undefined);
+      // Remember this send id so Meta's echo of it (which arrives before this reply's row is
+      // persisted below) is recognised as our own and never mistaken for a human-agent handoff.
+      await markSelfSentMessageEcho(sendResult.graphMessageId);
     }
   } else {
     console.error('[ai.reply] Contact not found for conversation', {
       contactId: conversation.contact_id,
     });
+  }
+
+  // Send product image messages immediately after the confirming text.
+  // Each image is sent as a separate attachment message so the customer sees
+  // the text ("Here is a photo of…") followed by the image — standard chat UX.
+  // Image sends run independently of the text send result: if the text failed
+  // (e.g. transient network error) the image may still succeed.
+  //
+  // Idempotency: the most common retry trigger is a failure AFTER the sends
+  // succeeded (e.g. persisting the outbound row throws), which re-runs the whole
+  // job. Without a guard the customer would receive the product image(s) again on
+  // every retry. We record a marker only once ALL images for this inbound message
+  // have been delivered, so a retry skips the re-send in that case while a genuine
+  // partial/failed send still re-attempts delivery.
+  const imgIdemKey = `ai_img_sent:${conversationId}:${data.messageExternalId}`;
+  const imagesAlreadySent =
+    productsToSendImages.length > 0
+      ? !!(await redisConnection.get(imgIdemKey).catch(() => null))
+      : false;
+
+  if (imagesAlreadySent) {
+    console.warn('[ai.reply] Product image(s) already delivered on a prior attempt — skipping duplicate image send', {
+      conversationId,
+      scheduledFor: data.messageExternalId,
+    });
+  } else if (productsToSendImages.length > 0 && contact) {
+    let allImagesSent = true;
+    for (const imageProduct of productsToSendImages) {
+      const imageUrl = imageProduct.image_urls[0];
+      if (!imageUrl) continue;
+      try {
+        const imageResult = await sendImageMessage(channel, contact.external_id, imageUrl);
+        if (imageResult.success) {
+          // Register the image send id so its Meta echo is recognised as ours (auto-sent
+          // images are not persisted as an outbound row here, so the inbound handler has no
+          // DB row to match the echo against and would otherwise treat it as a human reply).
+          await markSelfSentMessageEcho(imageResult.graphMessageId);
+          console.info('[ai.reply] Product image sent', {
+            conversationId,
+            tenantId,
+            productId: imageProduct.id,
+            productName: imageProduct.name,
+          });
+        } else {
+          allImagesSent = false;
+          console.error('[ai.reply] Product image send failed', {
+            conversationId,
+            tenantId,
+            productId: imageProduct.id,
+            error: imageResult.error,
+          });
+        }
+      } catch (imgErr) {
+        allImagesSent = false;
+        console.error('[ai.reply] Product image send threw unexpectedly', {
+          conversationId,
+          tenantId,
+          productId: imageProduct.id,
+          error: imgErr instanceof Error ? imgErr.message : String(imgErr),
+        });
+      }
+    }
+    // Only mark as delivered when every image went out, so a retry after a partial
+    // failure still re-attempts the images that did not make it.
+    if (allImagesSent) {
+      await redisConnection.set(imgIdemKey, '1', 'EX', 3600).catch(() => undefined);
+    }
   }
 
   // When the turn was replaced by a generic holding/escalation message (knowledge gap,
@@ -3019,6 +3210,43 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     // the products are not in the catalog.
     product_ids: replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id),
   });
+
+  // Product image unavailable alert: fires when the customer explicitly asked for a
+  // product photo but the catalog entry has no image_urls. Does NOT pause the AI —
+  // the business should manually send the photo while the conversation continues.
+  // One alert per turn covers all missing-image products in a single notification.
+  if (productsWithMissingImages.length > 0) {
+    try {
+      const missingImageAlert = await createAIAlert({
+        tenant_id: tenantId,
+        conversation_id: conversationId,
+        message_id: outboundMessage.id,
+        reason: 'product_image_unavailable',
+        details: {
+          product_ids: productsWithMissingImages.map((p) => p.id),
+          product_names: productsWithMissingImages.map((p) => p.name),
+        },
+      });
+      const contactForMissingAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...missingImageAlert,
+        message_content: inboundText || null,
+        contact_name: contactForMissingAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    } catch (missingImageAlertErr) {
+      console.error('[ai.reply] Product image unavailable alert creation failed', {
+        conversationId,
+        tenantId,
+        error:
+          missingImageAlertErr instanceof Error
+            ? missingImageAlertErr.message
+            : String(missingImageAlertErr),
+      });
+    }
+  }
 
   // Price-hallucination alert: created after the holding message is persisted so the
   // alert can link to the outbound message ID. Pauses AI so a human agent can provide

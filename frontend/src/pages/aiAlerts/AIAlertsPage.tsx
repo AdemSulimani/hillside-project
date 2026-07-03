@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AxiosError } from 'axios';
-import { Bell, Globe, Image, Loader2, MessageCircleMore, MoreHorizontal, type LucideIcon } from 'lucide-react';
+import { Bell, Globe, Image, Loader2, MessageCircleMore, MoreHorizontal, Phone, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   fetchAIAlerts,
@@ -44,6 +44,7 @@ const ALERT_CHANNEL_ICONS: Record<ChannelType, LucideIcon> = {
   facebook: Globe,
   instagram: Image,
   whatsapp: MessageCircleMore,
+  viber: Phone,
 };
 
 type AlertsTab = 'open' | 'resolved';

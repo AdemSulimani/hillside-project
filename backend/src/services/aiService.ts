@@ -1,4 +1,6 @@
 import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL, OPENAI_EMBEDDING_MODEL } from './openaiClient';
+import type { ProductImageRef } from './productImageRequestService';
+export type { ProductImageRef };
 import { findTenantById } from '../db/models/tenant';
 import {
   collectRecentlyDiscussedProductIds,
@@ -4140,4 +4142,155 @@ Using packaging-derived details (IMPORTANT — source precedence):
     productNotInCatalog,
     customerAskedPrice,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Product image request classifier
+// ---------------------------------------------------------------------------
+
+export interface ProductImageRequestClassification {
+  is_image_request: boolean;
+  /**
+   * Which product(s) the customer wants images of.
+   * Empty when is_image_request is false.
+   * When is_image_request is true and the customer gave no specific reference,
+   * defaults to [{ type: 'current', value: null }] so the resolver picks the
+   * most recently discussed product.
+   */
+  product_refs: ProductImageRef[];
+}
+
+/**
+ * Fast synchronous pre-screen: returns true only when the message could plausibly
+ * be an image request, allowing us to skip the LLM call for the vast majority of
+ * messages (price queries, order placements, greetings, etc.).
+ */
+function mightBeImageRequest(message: string): boolean {
+  const t = message
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '');
+
+  if (!t || t.length < 4) return false;
+
+  // English and Albanian image / send keywords.
+  return (
+    /\b(photo|foto|image|picture|pic|imazh|fotografi|pamje)\b/.test(t) ||
+    // Albanian: "dërgomë/dërgoji/dërgoni foto" — "send me the photo"
+    /\bdergom[eë]?\b/.test(t) ||
+    /\bdergoj[ei]?\b/.test(t) ||
+    /\bdergon[i]?\b/.test(t) ||
+    // Albanian: "shfaq" (show), "shiko" (look/view) combined with a known photo word
+    (/\b(shfaq|shiko)\b/.test(t) && /\b(foto|imazh|pamje)\b/.test(t))
+  );
+}
+
+/**
+ * Classifies whether a customer message is explicitly asking to see a product
+ * image/photo, and identifies which product(s) they are asking about.
+ *
+ * Uses a fast pre-screen heuristic to skip the LLM for non-image messages, then
+ * falls back to an LLM JSON classifier (temperature=0) for uncertain cases.
+ *
+ * Returns a safe false result on any error so it never disrupts the main AI pipeline.
+ */
+export async function classifyProductImageRequest(
+  message: string,
+): Promise<ProductImageRequestClassification> {
+  const falseResult: ProductImageRequestClassification = {
+    is_image_request: false,
+    product_refs: [],
+  };
+
+  const inbound = message.trim();
+  if (!inbound) return falseResult;
+
+  // Skip the LLM entirely when the message cannot possibly be an image request.
+  if (!mightBeImageRequest(inbound)) return falseResult;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You classify whether a customer explicitly asks to see a product photo/image/picture. ' +
+            'Return JSON:\n' +
+            '{\n' +
+            '  "is_image_request": boolean,\n' +
+            '  "product_refs": [\n' +
+            '    { "type": "position"|"name"|"all"|"current", "value": string|null }\n' +
+            '  ]\n' +
+            '}\n\n' +
+            'Rules:\n' +
+            '• is_image_request=true ONLY when the customer explicitly asks to see/receive a product photo, image, or picture.\n' +
+            '• product_refs describes WHICH product(s) they want:\n' +
+            '  – type="position": customer said "the first/second/third one" etc. value="1"/"2"/"3"\n' +
+            '  – type="name": customer named a product. value=exact name as written by the customer.\n' +
+            '  – type="all": customer wants images of all discussed products ("all of them", "both", "të gjithë"). value=null.\n' +
+            '  – type="current": customer used a vague pronoun ("it", "this one", "ky/ajo/atë"). value=null.\n' +
+            '• List each product separately when the customer asks for more than one.\n' +
+            '• When no product is specified, use [{"type":"current","value":null}].\n' +
+            '• is_image_request=false when the customer is NOT asking for a product image ' +
+            '(e.g. asking about price, ordering, availability, descriptions, complaints).\n' +
+            '• Handle Albanian, English, dialect, slang, abbreviations, and misspellings.',
+        },
+        {
+          role: 'user',
+          content: `Customer message: ${inbound}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 96,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw?.trim()) return falseResult;
+
+    const parsed = JSON.parse(raw) as {
+      is_image_request?: unknown;
+      product_refs?: unknown;
+    };
+
+    if (typeof parsed.is_image_request !== 'boolean') return falseResult;
+    if (!parsed.is_image_request) return falseResult;
+
+    const refs: ProductImageRef[] = [];
+    if (Array.isArray(parsed.product_refs)) {
+      for (const item of parsed.product_refs) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        const r = item as Record<string, unknown>;
+        const type = r.type;
+        if (
+          type !== 'position' &&
+          type !== 'name' &&
+          type !== 'all' &&
+          type !== 'current'
+        ) continue;
+        refs.push({
+          type: type as ProductImageRef['type'],
+          value: typeof r.value === 'string' ? r.value : null,
+        });
+      }
+    }
+
+    console.info('[image_request_classifier] is_image_request=true', {
+      product_refs: refs,
+      message_preview: inbound.slice(0, 80),
+    });
+
+    return {
+      is_image_request: true,
+      product_refs: refs.length > 0 ? refs : [{ type: 'current', value: null }],
+    };
+  } catch (err) {
+    console.warn('[image_request_classifier] Classifier failed — returning false', {
+      error: err instanceof Error ? err.message : String(err),
+      message_preview: inbound.slice(0, 80),
+    });
+    return falseResult;
+  }
 }
