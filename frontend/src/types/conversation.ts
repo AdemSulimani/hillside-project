@@ -1,4 +1,4 @@
-export type ChannelType = 'facebook' | 'instagram' | 'whatsapp';
+export type ChannelType = 'facebook' | 'instagram' | 'whatsapp' | 'viber';
 
 /** Latest non-resolved AI quality alert on a conversation (from API). */
 export interface OpenAIAlertSummary {
