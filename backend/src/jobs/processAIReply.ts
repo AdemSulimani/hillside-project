@@ -77,7 +77,13 @@ import { assessProductInformationRequest } from '../services/productInformationG
 import {
   buildCatalogPriceSet,
   filterHallucinatedPrices,
+  type CatalogPriceSet,
 } from '../services/priceConsistencyGuard';
+import {
+  getFullCatalogNameIndex,
+  getFullCatalogPriceSet,
+  verifySuspectedNamesAgainstCatalog,
+} from '../services/catalogGuardReferenceService';
 import { detectCrossMessagePriceInconsistency } from '../services/conversationFactConsistencyGuard';
 import {
   GET_BACK_TO_YOU_MESSAGES,
@@ -610,6 +616,28 @@ const HOLDING_MESSAGES: Record<
  */
 const UNCERTAIN_ANSWER_FALLBACK_ENABLED =
   (process.env.UNCERTAIN_ANSWER_FALLBACK_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+
+/**
+ * P0-2 (RC-02): when ON, the price and product-name hallucination guards validate the
+ * reply against the tenant's FULL active catalog (plus AI-config ground-truth prices)
+ * instead of this turn's volatile `matchedProducts` retrieval window, and they run
+ * even when that window is empty. Defaults OFF: flag-off preserves the legacy
+ * matchedProducts-scoped behaviour byte-for-byte. Flip per environment (staging
+ * first, EV-011/013/015 replay as the gate) per the remediation plan.
+ */
+const GUARD_VALIDATE_AGAINST_FULL_CATALOG =
+  (process.env.GUARD_VALIDATE_AGAINST_FULL_CATALOG ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * Cap on how many full-catalog names are handed to the name-guard LLM classifier when
+ * the retrieval window is empty. The deterministic full-catalog verification that
+ * follows is uncapped, so a name outside this sample is still rescued — the cap only
+ * bounds prompt size for very large catalogs.
+ */
+const NAME_GUARD_LLM_CATALOG_CAP = (() => {
+  const n = parseInt(process.env.NAME_GUARD_LLM_CATALOG_CAP || '150', 10);
+  return Number.isFinite(n) && n > 0 ? n : 150;
+})();
 
 const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
   '24h': 24,
@@ -2782,27 +2810,64 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   // Price-consistency guard (per-reply): hard gate — if the reply states a concrete
-  // price that is NOT present in the catalog for any matched product, replace the reply
-  // with a specialist holding message and schedule a post-send alert + AI pause.
-  // Fail-open: skipped when no products were matched, when another escalation already
-  // fired, or when the catalog carries no prices (can't validate nothing).
+  // price that is NOT present in the reference price set, replace the reply with a
+  // specialist holding message and schedule a post-send alert + AI pause.
+  // Fail-open: skipped when another escalation already fired or when the reference set
+  // carries no prices (can't validate nothing).
+  //
+  // With GUARD_VALIDATE_AGAINST_FULL_CATALOG on (P0-2, RC-02) the reference set is the
+  // tenant's FULL active catalog plus AI-config ground-truth prices — never this turn's
+  // volatile retrieval window — so a correct price for a real active product cannot be
+  // flagged just because retrieval missed that product. The guard then also runs when
+  // the window is empty, but skips order-confirmation replies: their totals
+  // (quantity × unit price) are legitimate arithmetic present in no fact set.
+  // Flag off preserves the legacy matchedProducts-scoped behaviour unchanged.
   let priceHallucinationEscalated = false;
   let priceHallucinationDetails: Record<string, unknown> | null = null;
 
-  if (!knowledgeGapEscalated && matchedProducts.length > 0 && !isOosCannedReply) {
-    const catalogPriceSet = buildCatalogPriceSet(matchedProducts);
+  const priceGuardEligible =
+    !knowledgeGapEscalated &&
+    !isOosCannedReply &&
+    (GUARD_VALIDATE_AGAINST_FULL_CATALOG
+      ? !isOrderConfirmationReply
+      : matchedProducts.length > 0);
+
+  if (priceGuardEligible) {
+    let catalogPriceSet: CatalogPriceSet;
+    let priceGuardScope: 'full_catalog' | 'matched_products' = 'matched_products';
+    if (GUARD_VALIDATE_AGAINST_FULL_CATALOG) {
+      try {
+        catalogPriceSet = await getFullCatalogPriceSet(tenantId);
+        priceGuardScope = 'full_catalog';
+      } catch (err) {
+        // Reference fetch failure must never widen escalation: fall back to the legacy
+        // matched-products set (empty window ⇒ empty set ⇒ guard fails open).
+        console.warn('[PRICE GUARD] Full-catalog price set unavailable — falling back to matched products', {
+          tenantId,
+          conversationId,
+          err,
+        });
+        catalogPriceSet = buildCatalogPriceSet(matchedProducts);
+      }
+    } else {
+      catalogPriceSet = buildCatalogPriceSet(matchedProducts);
+    }
     const hallucinatedPrices = filterHallucinatedPrices(finalReplyText, catalogPriceSet);
     if (hallucinatedPrices.length > 0) {
       console.warn('[PRICE GUARD] Reply states price(s) not in catalog — escalating to holding message', {
         tenantId,
         conversationId,
+        validationScope: priceGuardScope,
         statedPrices: hallucinatedPrices.map((p) => p.raw),
-        catalogPrices: catalogPriceSet.prices,
+        catalogPrices: catalogPriceSet.prices.slice(0, 100),
+        catalogPriceCount: catalogPriceSet.prices.length,
         replyPreview: finalReplyText.slice(0, 120),
       });
       priceHallucinationDetails = {
+        validationScope: priceGuardScope,
         statedPrices: hallucinatedPrices.map((p) => p.raw),
-        catalogPrices: catalogPriceSet.prices,
+        catalogPrices: catalogPriceSet.prices.slice(0, 100),
+        catalogPriceCount: catalogPriceSet.prices.length,
         originalReplyPreview: finalReplyText.slice(0, 200),
       };
       priceHallucinationEscalated = true;
@@ -2837,13 +2902,23 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   // Product-name hallucination guard: block any reply that names a specific product
-  // not present in the matched catalog products. Architecturally mirrors the price
+  // not present in the reference catalog. Architecturally mirrors the price
   // hallucination guard: when fired it replaces the reply with a safe holding message,
   // creates an alert, and pauses AI so a human specialist can follow up.
   //
-  // Skipped when: no products were matched (nothing to validate against), another
-  // escalation already fired, the reply is a canned OOS message, or the guard itself
-  // errors out (fail-open — the guard must never silently suppress a valid reply).
+  // With GUARD_VALIDATE_AGAINST_FULL_CATALOG on (P0-2, RC-02) the LLM classifier's
+  // output is treated as SUSPECTS only: each suspected name is deterministically
+  // re-verified against the FULL active catalog (normalized name index, then a
+  // pg_trgm similarity lookup) and only names with no catalog match escalate. This
+  // stops the guard from flagging a real product the AI itself named earlier just
+  // because this turn's retrieval window rotated away from it. The guard then also
+  // runs when the window is empty, using a capped catalog sample as the LLM reference
+  // (the deterministic verification stays uncapped). Flag off preserves the legacy
+  // matchedProducts-scoped behaviour unchanged.
+  //
+  // Skipped when: nothing to validate against, another escalation already fired, the
+  // reply is a canned OOS message, or the guard itself errors out (fail-open — the
+  // guard must never silently suppress a valid reply).
   let productNameHallucinationEscalated = false;
   let productNameHallucinationDetails: Record<string, unknown> | null = null;
 
@@ -2851,21 +2926,56 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     !knowledgeGapEscalated &&
     !priceHallucinationEscalated &&
     !isOosCannedReply &&
-    matchedProducts.length > 0
+    (GUARD_VALIDATE_AGAINST_FULL_CATALOG || matchedProducts.length > 0)
   ) {
     try {
-      const nameGuardResult = await filterHallucinatedProductNames(finalReplyText, matchedProducts);
-      if (nameGuardResult.hasHallucination) {
-        console.warn('[PRODUCT NAME GUARD] Reply names product(s) not in matched catalog — escalating to holding message', {
+      let referenceNames = matchedProducts
+        .map((p) => p.name?.trim())
+        .filter((n): n is string => Boolean(n));
+      let fullCatalogNameIndex: string[] | null = null;
+      if (GUARD_VALIDATE_AGAINST_FULL_CATALOG) {
+        // Any failure here lands in the outer catch → fail-open, same as an LLM error.
+        fullCatalogNameIndex = await getFullCatalogNameIndex(tenantId);
+        if (referenceNames.length === 0) {
+          referenceNames = fullCatalogNameIndex.slice(0, NAME_GUARD_LLM_CATALOG_CAP);
+        }
+      }
+
+      const nameGuardResult = await filterHallucinatedProductNames(finalReplyText, referenceNames);
+      let confirmedNames = nameGuardResult.suspectedNames;
+      if (
+        nameGuardResult.hasHallucination &&
+        GUARD_VALIDATE_AGAINST_FULL_CATALOG &&
+        fullCatalogNameIndex
+      ) {
+        const verification = await verifySuspectedNamesAgainstCatalog(
+          tenantId,
+          nameGuardResult.suspectedNames,
+          fullCatalogNameIndex,
+        );
+        confirmedNames = verification.confirmed;
+        if (verification.rescued.length > 0) {
+          console.info('[PRODUCT NAME GUARD] Suspect(s) matched the full active catalog — not hallucinations', {
+            tenantId,
+            conversationId,
+            rescued: verification.rescued,
+          });
+        }
+      }
+
+      if (confirmedNames.length > 0) {
+        console.warn('[PRODUCT NAME GUARD] Reply names product(s) not in catalog — escalating to holding message', {
           tenantId,
           conversationId,
-          suspectedNames: nameGuardResult.suspectedNames,
-          catalogNames: matchedProducts.map((p) => p.name),
+          validationScope: GUARD_VALIDATE_AGAINST_FULL_CATALOG ? 'full_catalog' : 'matched_products',
+          suspectedNames: confirmedNames,
+          catalogNames: referenceNames.slice(0, 50),
           replyPreview: finalReplyText.slice(0, 120),
         });
         productNameHallucinationDetails = {
-          suspectedNames: nameGuardResult.suspectedNames,
-          catalogNames: matchedProducts.map((p) => p.name),
+          validationScope: GUARD_VALIDATE_AGAINST_FULL_CATALOG ? 'full_catalog' : 'matched_products',
+          suspectedNames: confirmedNames,
+          catalogNames: referenceNames.slice(0, 50),
           originalReplyPreview: finalReplyText.slice(0, 200),
         };
         productNameHallucinationEscalated = true;
