@@ -305,6 +305,87 @@ export function deriveAnswerabilityStatus(
   return (answeredText ?? '').trim().length > 0 ? 'partial' : 'none';
 }
 
+/**
+ * Narrow vocabulary of FREE-FORM product information concepts a customer can ask about
+ * that live outside the structured attribute columns (P0-3, RC-01). Stems are matched
+ * word-prefix-wise against `normalizeLabel` output, so inflections match ("përbërësit"
+ * → "perberesit" matches stem "perberes"; "dozat" matches "doz"). Multi-word stems
+ * match as substrings.
+ *
+ * Purpose: under the deterministic-first gap gate, an LLM "missing" label may trigger
+ * an escalation ONLY when it names one of these known free-form concepts. Labels that
+ * map to a STRUCTURED attribute are owned by the deterministic net (which adds its own
+ * localized labels when a requested attribute is genuinely absent), and labels naming
+ * neither — question echoes such as "ma shum" or "cila eshte me e mire", the measured
+ * IN1/IN3/EV-010 false-escalation drivers — are suppressed.
+ */
+const FREE_FORM_INFO_STEMS: string[] = [
+  // ingredients / composition
+  'ingredient', 'perberes', 'perberj', 'composition',
+  // usage / instructions / dosage
+  'usage', 'perdorim', 'udhezim', 'instruction', 'doz', 'serving',
+  // expiry / shelf life
+  'expir', 'afat', 'skadenc', 'shelf life',
+  // origin / provenance
+  'origin', 'origjin', 'prejardhj',
+  // nutrition
+  'nutrition', 'nutritional', 'vlera ushqyese', 'vlerat ushqyese', 'kalori', 'calorie', 'protein',
+  // allergens / dietary
+  'allergen', 'alergjen', 'gluten', 'laktoz', 'lactose', 'sheqer', 'sugar', 'vegan', 'vegetarian',
+  // certifications / warranty / authenticity
+  'certif', 'garanci', 'warranty', 'authentic',
+  // material (non-supplement niches)
+  'material',
+];
+
+/** Whether a normalized label word-matches a free-form info stem. */
+function matchesFreeFormStem(norm: string): boolean {
+  if (!norm) return false;
+  const words = norm.split(' ');
+  return FREE_FORM_INFO_STEMS.some((stem) =>
+    stem.includes(' ') ? norm.includes(stem) : words.some((w) => w.startsWith(stem)),
+  );
+}
+
+/**
+ * Deterministic-first filter (P0-3, RC-01) for the LLM assessor's `missing` labels:
+ * keep only labels naming a known FREE-FORM info concept. Structured-attribute
+ * synonyms are dropped — when such an attribute is genuinely absent the deterministic
+ * net (computeMissingStructuredAttributes / the per-product pass) contributes its own
+ * localized label, so the LLM's opinion on structured attributes never decides an
+ * escalation on its own. Everything else (stochastic question echoes) is suppressed.
+ */
+export function filterFreeFormInfoLabels(labels: string[]): string[] {
+  return labels.filter((label) => {
+    if (typeof label !== 'string') return false;
+    const norm = normalizeLabel(label);
+    if (!norm) return false;
+    if (SYNONYM_GROUP_BY_LABEL.has(norm)) return false;
+    return matchesFreeFormStem(norm);
+  });
+}
+
+/**
+ * The gap gate's escalation decision (P0-3, RC-01). Pure so both policies are
+ * unit-testable:
+ *  - Legacy (deterministicFirst=false): escalate when the assessment failed closed
+ *    (`!ok` — including transport/parse errors) OR anything is missing.
+ *  - Deterministic-first (deterministicFirst=true): escalate ONLY on the missing-info
+ *    status, which by construction is backed by deterministic structured evidence or
+ *    an allowlisted free-form gap (see filterFreeFormInfoLabels). An errored assessor
+ *    yields empty answer/missing → status 'complete' when the deterministic net is
+ *    clear → the original AI reply is sent as-is (fail OPEN on the degradation path),
+ *    while a genuinely absent structured attribute still escalates.
+ */
+export function decideGapEscalation(
+  assessment: { ok: boolean },
+  status: AnswerabilityStatus,
+  deterministicFirst: boolean,
+): boolean {
+  if (deterministicFirst) return status !== 'complete';
+  return !assessment.ok || status !== 'complete';
+}
+
 /** A product's structured attribute view (subset of getProductStructuredAttributes output). */
 export type StructuredAttributeMap = Partial<Record<StructuredAttributeKey, string | null>>;
 

@@ -43,12 +43,28 @@ const CACHE_TTL_SECONDS = (() => {
 
 /**
  * Minimum pg_trgm word_similarity for a suspected name to be considered a real
- * catalog item. Kept moderate: the normalized-containment check upstream already
- * covers exact/partial mentions, so this threshold only decides typo-level variants.
+ * catalog item. The normalized-containment check upstream already covers
+ * exact/partial mentions, so this threshold only decides typo-level variants.
+ *
+ * Default 0.48 was calibrated empirically (2026-07-12) against the largest dev
+ * catalog (257 products) with a 29-item labeled corpus:
+ *   - 16 realistic typo/phonetic mentions of real products (Albanian + English:
+ *     "Serioz Mass qokolad", "Kreatine monohidrate 120 kapsula", "Karbo One 1kg",
+ *     "Ashwaganda 60 kapsula", …) scored 0.500–0.870 → all rescued at 0.48.
+ *   - 10 pure fabrications ("ZMA Pro 90caps", "Carnivor Beef Protein 2kg", …)
+ *     scored 0.143–0.467 → all correctly stay flagged at 0.48.
+ *   - The empirical gap between the classes is (0.467, 0.500]; 0.48 is its midpoint,
+ *     and avoids the knife edge at 0.50 where the hardest real-typo case sits exactly.
+ *   - Variant fabrications (real family, nonexistent variant: "Gold Standard Casein"
+ *     0.667, "Serious Mass 5.4kg Vanil" 0.520) fall INSIDE the rescue band — no
+ *     threshold separates them; that class is the plan's accepted residual and the
+ *     attribute-availability gate's job, not this guard's.
+ * Raise toward ~0.7 only if invented near-variants must be caught at the cost of
+ * escalating heavier typos; lower toward ~0.4 only if real typo'd names still escalate.
  */
 const NAME_SIMILARITY_THRESHOLD = (() => {
-  const n = parseFloat(process.env.NAME_GUARD_SIMILARITY_THRESHOLD || '0.5');
-  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.5;
+  const n = parseFloat(process.env.NAME_GUARD_SIMILARITY_THRESHOLD || '0.48');
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.48;
 })();
 
 export function catalogGuardPricesKey(tenantId: string): string {
