@@ -94,8 +94,10 @@ import {
   buildMissingInfoHoldingMessage,
   composePartialAnswer,
   computeMissingStructuredAttributes,
+  decideGapEscalation,
   dedupeInfoLabels,
   deriveAnswerabilityStatus,
+  filterFreeFormInfoLabels,
   localizedAttributeLabels,
   reconcileMissingAgainstAnswer,
   stripContradictoryMissingInfoNotice,
@@ -627,6 +629,20 @@ const UNCERTAIN_ANSWER_FALLBACK_ENABLED =
  */
 const GUARD_VALIDATE_AGAINST_FULL_CATALOG =
   (process.env.GUARD_VALIDATE_AGAINST_FULL_CATALOG ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P0-3 (RC-01): when ON, the product-information gap gate escalates only on
+ * deterministic evidence — a requested structured attribute genuinely absent from
+ * every signal (catalog fields, packaging reads, the availability classifier) or an
+ * allowlisted free-form info gap (ingredients, usage, …). The LLM assessor's
+ * stochastic `missing` labels alone never escalate, and an assessor that ERRORED
+ * (transport/parse/empty) fails OPEN — the grounded AI reply is sent as-is instead of
+ * being replaced with a holding message. Defaults OFF: flag-off preserves the legacy
+ * fail-closed, LLM-driven behaviour byte-for-byte. Flip per environment (staging
+ * first, IN1/IN3 golden-set replay as the gate) per the remediation plan.
+ */
+const GAP_GATE_DETERMINISTIC_FIRST =
+  (process.env.GAP_GATE_DETERMINISTIC_FIRST ?? 'false').trim().toLowerCase() === 'true';
 
 /**
  * Cap on how many full-catalog names are handed to the name-guard LLM classifier when
@@ -2381,6 +2397,22 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         failClosed: true,
       });
 
+      // Deterministic-first (P0-3, RC-01): the LLM's stochastic `missing` labels may
+      // only contribute allowlisted FREE-FORM info gaps (ingredients, usage, …).
+      // Structured attributes are decided solely by the deterministic net below, and
+      // question echoes ("ma shum", "cila eshte me e mire") are suppressed. Legacy
+      // mode passes the labels through untouched.
+      const llmMissingLabels = GAP_GATE_DETERMINISTIC_FIRST
+        ? filterFreeFormInfoLabels(assessment.missing)
+        : assessment.missing;
+      if (GAP_GATE_DETERMINISTIC_FIRST && assessment.errored) {
+        console.warn('[ai.reply] gap assessor errored — deterministic-first gate failing OPEN to deterministic evidence only', {
+          conversationId,
+          tenantId,
+          deterministicMissingKeys,
+        });
+      }
+
       // Merge missing info: the LLM labels (customer language; covers free-form info
       // such as ingredients) unioned with the deterministic structured labels (a
       // guarantee we never silently drop a known-missing attribute), de-duplicated.
@@ -2388,7 +2420,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // answer already states (final guard against self-contradicting partial replies).
       const mergedMissing = reconcileMissingAgainstAnswer(
         dedupeInfoLabels([
-          ...assessment.missing,
+          ...llmMissingLabels,
           ...localizedAttributeLabels(deterministicMissingKeys, replyLocale),
         ]),
         assessment.answer,
@@ -2438,10 +2470,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
       const status = deriveAnswerabilityStatus(assessment.answer, finalMergedMissing);
 
-      // Escalate whenever the request is not fully answerable OR the assessment could
-      // not be performed (fail-closed). A fully-answerable request keeps the original,
-      // well-tuned AI reply untouched.
-      const shouldEscalate = !assessment.ok || status !== 'complete';
+      // Legacy: escalate whenever the request is not fully answerable OR the
+      // assessment could not be performed (fail-closed). Deterministic-first (P0-3):
+      // escalate only on deterministically-backed missing info — an errored assessor
+      // with a clean deterministic net sends the AI reply as-is (fail-open). A
+      // fully-answerable request keeps the original, well-tuned AI reply untouched.
+      const shouldEscalate = decideGapEscalation(assessment, status, GAP_GATE_DETERMINISTIC_FIRST);
 
       if (!shouldEscalate) {
         console.info('[ai.reply] Product information fully answerable — sending AI reply as-is', {

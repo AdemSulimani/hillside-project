@@ -28,6 +28,14 @@ export interface ProductInfoAssessment {
    * even if `missing` is empty, using a generic "we'll notify you shortly" notice.
    */
   ok: boolean;
+  /**
+   * True when the assessment could not actually be performed (empty context, empty
+   * model response, or transport/parse error) — as opposed to a successful assessment
+   * that found information missing. `ok` conflates the two ("errored" and "missing"
+   * both fail closed); `errored` lets deterministic-first callers (P0-3, RC-01) fail
+   * OPEN on the degradation path while still honouring real assessments.
+   */
+  errored: boolean;
 }
 
 const SYSTEM_PROMPT = `You are a customer-support assistant for an online store.
@@ -69,7 +77,7 @@ export async function assessProductInformationRequest(
   options?: { failClosed?: boolean },
 ): Promise<ProductInfoAssessment> {
   const failClosed = options?.failClosed !== false;
-  const failed: ProductInfoAssessment = { answer: '', missing: [], ok: !failClosed };
+  const failed: ProductInfoAssessment = { answer: '', missing: [], ok: !failClosed, errored: true };
 
   if (!catalogKnowledgeContext.trim() || !inboundMessage.trim()) {
     return failed;
@@ -101,7 +109,7 @@ export async function assessProductInformationRequest(
           .map((m) => m.trim())
       : [];
 
-    return { answer, missing, ok: true };
+    return { answer, missing, ok: true, errored: false };
   } catch (err) {
     console.warn('[productInformationGap] assessment failed — failing closed', { err });
     return failed;
