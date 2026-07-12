@@ -103,6 +103,10 @@ import {
   stripContradictoryMissingInfoNotice,
 } from '../services/productInformationGapHelpers';
 import {
+  decideSensitivePathAction,
+  SensitivePathEscalatedError,
+} from '../services/sensitivePathFailClosed';
+import {
   evaluateReply,
   evaluationTriggersAlert,
   getQualityThreshold,
@@ -643,6 +647,21 @@ const GUARD_VALIDATE_AGAINST_FULL_CATALOG =
  */
 const GAP_GATE_DETERMINISTIC_FIRST =
   (process.env.GAP_GATE_DETERMINISTIC_FIRST ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P0-4 (RC-19, RC-22): when ON, the pre-reply sensitive-escalation subsystem fails
+ * CLOSED instead of open. A SENSITIVE detector throw (cancellation/refund,
+ * wrong-product, post-purchase, order-info) routes to the safe escalation path
+ * (pause + human_replied=false + alert + neutral holding message) instead of silently
+ * downgrading to a normal sales reply; any other pre-send throw in the block re-throws
+ * so BullMQ retries; and the post-send intent/draft-order swallow surfaces as a durable
+ * `order_detection_failed` alert. A re-throw is scoped to the pre-send window so a retry
+ * can never double-send a delivered reply/ack (RC-20). Defaults OFF: flag-off preserves
+ * the legacy fail-OPEN umbrella (warn + continue) byte-for-byte. Flip per environment
+ * (staging first, fault-injection replay as the gate) per the remediation plan.
+ */
+const SENSITIVE_PATH_FAIL_CLOSED =
+  (process.env.SENSITIVE_PATH_FAIL_CLOSED ?? 'false').trim().toLowerCase() === 'true';
 
 /**
  * Cap on how many full-catalog names are handed to the name-guard LLM classifier when
@@ -1419,11 +1438,151 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     `[REPLY_LANGUAGE] tenantId: ${tenantId} conversationId: ${conversationId} language: ${replyLanguage} traceId: ${traceId ?? 'n/a'}`,
   );
 
+  // P0-4 (RC-19): tracks whether the sensitive special-path block has already put an
+  // outbound message on the wire. A fail-closed re-throw for a BullMQ retry must never
+  // fire once a send/ack has gone out, or the retry would re-run the whole job and
+  // double-send it (RC-20). Set to true immediately after every send in the block.
+  let sensitivePathOutboundSent = false;
+
+  // P0-4 (RC-19): the safe escalation path invoked when a SENSITIVE pre-reply detector
+  // (cancellation/refund, wrong-product, post-purchase, order-info) throws. Instead of
+  // silently downgrading to a normal sales reply, pause the AI, keep human_replied=false,
+  // raise an alert, and send the neutral holding message — the same fail-closed outcome
+  // a positive classification would have produced. The pause+alert commit runs BEFORE the
+  // send, so if it fails nothing is on the wire and the umbrella can safely re-throw.
+  const escalateSensitivePathOnDetectorError = async (): Promise<void> => {
+    const precheck = await shouldStillSendAutomatedReply({
+      tenantId,
+      channelId,
+      conversationId,
+      scheduledInboundExternalId: data.messageExternalId,
+    });
+
+    const locale = inferHoldingMessageLocale(inboundText, replyLanguage);
+    const holdingMessage = HOLDING_MESSAGES[locale].postPurchaseSupport;
+
+    const client = await pool.connect();
+    let alert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationHumanReplied(conversationId, tenantId, false, client);
+      alert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: lastInbound?.id ?? null,
+          reason: 'uncertain_answer_escalated',
+        },
+        client,
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err; // nothing sent yet → let the umbrella re-throw for a BullMQ retry
+    } finally {
+      client.release();
+    }
+
+    // The pause + alert are durably committed above — the fail-closed guarantee (AI
+    // paused, human notified, human_replied=false) is already met. Everything below
+    // (send, persist, emit) is BEST-EFFORT: a throw here must NOT propagate, or the
+    // umbrella catch would treat it as a plain error and fall through to generateReply,
+    // sending a normal sales reply on top of (or instead of) the escalation. Swallow +
+    // log instead so runSensitiveDetector still reaches the sentinel and the caller returns.
+    try {
+      if (!precheck.ok) {
+        // A newer inbound or an already-sent reply raced us: skip the holding send to
+        // avoid a duplicate/racing message. The conversation is already paused with an
+        // alert, so a human still reviews it. Emit the alert so the UI reflects the pause.
+        console.info('[ai.reply] sensitive-path escalation skipping holding send', {
+          conversationId,
+          tenantId,
+          reason: precheck.reason,
+          ...precheck.logPayload,
+        });
+        if (alert) {
+          const contactForAlert = await findContactById(conversation.contact_id);
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForAlert?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+          socketService.emitConversationUpdated(tenantId, conversationId);
+        }
+        return;
+      }
+
+      const contactForSend = await findContactById(conversation.contact_id);
+      let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
+      if (contactForSend) {
+        sendResult = await sendMessage(channel, contactForSend.external_id, holdingMessage);
+        sensitivePathOutboundSent = true;
+      }
+
+      const outboundAck = await createMessage({
+        tenant_id: tenantId,
+        conversation_id: conversationId,
+        external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+        direction: 'outbound',
+        type: 'text',
+        content: holdingMessage,
+        sent_by: 'ai',
+      });
+
+      if (alert) {
+        socketService.emitAIAlert(tenantId, {
+          ...alert,
+          message_content: inboundText || null,
+          contact_name: contactForSend?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+      }
+      socketService.emitNewMessage(tenantId, outboundAck);
+      socketService.emitConversationUpdated(tenantId, conversationId);
+
+      if (sendResult && !sendResult.success) {
+        const errReason = sendResult.error ?? 'Failed to send escalation holding message';
+        await updateMessageSendFailure(outboundAck.id, tenantId, 'failed', errReason);
+        socketService.emitMessageSendFailed(tenantId, {
+          messageId: outboundAck.id,
+          conversationId,
+          error: errReason,
+        });
+      }
+    } catch (bestEffortErr) {
+      console.error('[ai.reply] sensitive-path escalation post-commit step failed', {
+        conversationId,
+        tenantId,
+        err: bestEffortErr,
+      });
+    }
+  };
+
+  // P0-4 (RC-19): wraps a SENSITIVE detector call so a transport/parse throw fails CLOSED.
+  // Flag off → rethrow to the umbrella (legacy warn + continue → normal reply). Flag on →
+  // escalate to a human (holding message + alert + pause) and throw the sentinel, which the
+  // umbrella catch turns into a clean return — never a sales reply. If the escalation itself
+  // throws before sending, that error propagates (pre-send) so the umbrella re-throws/retries.
+  const runSensitiveDetector = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (decideSensitivePathAction('detector', SENSITIVE_PATH_FAIL_CLOSED) !== 'escalate') {
+        throw err;
+      }
+      await escalateSensitivePathOnDetectorError();
+      throw new SensitivePathEscalatedError();
+    }
+  };
+
   if (inboundText) {
     try {
-      const cancellationRefundIntent = await detectCancellationOrRefundIntent(
-        inboundText,
-        recentMessages,
+      const cancellationRefundIntent = await runSensitiveDetector(() =>
+        detectCancellationOrRefundIntent(inboundText, recentMessages),
       );
       console.info(
         `[CANCEL/REFUND] tenantId: ${tenantId} conversationId: ${conversationId} is_cancel: ${cancellationRefundIntent.is_cancellation} is_refund: ${cancellationRefundIntent.is_refund} confidence: ${cancellationRefundIntent.confidence} reasoning: ${logJsonStringOrNull(cancellationRefundIntent.reason)}`,
@@ -1461,6 +1620,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         }
         if (contactForSend) {
           sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
+          sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
         }
 
         const outboundAck = await createMessage({
@@ -1544,7 +1704,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         return;
       }
 
-      const wrongProductIntent = await detectWrongProductIntent(inboundText, recentMessages);
+      const wrongProductIntent = await runSensitiveDetector(() =>
+        detectWrongProductIntent(inboundText, recentMessages),
+      );
       console.info(
         `[WRONG_PRODUCT] tenantId: ${tenantId} conversationId: ${conversationId} is_wrong_product: ${wrongProductIntent.is_wrong_product} confidence: ${wrongProductIntent.confidence} reasoning: ${logJsonStringOrNull(wrongProductIntent.reason)}`,
       );
@@ -1598,6 +1760,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
         if (contactForSend) {
           sendResult = await sendMessage(channel, contactForSend.external_id, wrongProductHoldingMessage);
+          sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
         }
 
         const outboundAck = await createMessage({
@@ -1661,7 +1824,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
       const postPurchaseSupportIntent =
         shouldCheckPostPurchaseSupport && !isLikelyNewOrderSignal
-          ? await detectPostPurchaseSupportIntent(inboundText, recentMessages)
+          ? await runSensitiveDetector(() =>
+              detectPostPurchaseSupportIntent(inboundText, recentMessages),
+            )
           : {
               is_delivery_eta_query: false,
               is_not_delivered_complaint: false,
@@ -1722,6 +1887,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
               contactForEtaSend.external_id,
               deliveryEtaReply,
             );
+            sensitivePathOutboundSent = true; // P0-4: a reply is on the wire — no fail-closed re-throw past here (RC-20)
           }
 
           const outboundEta = await createMessage({
@@ -1815,6 +1981,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             contactForSend.external_id,
             postPurchaseHoldingMessage,
           );
+          sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
         }
 
         const outboundAck = await createMessage({
@@ -1855,7 +2022,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // must continue to generateReply so the data-confirmation message is sent and the order
       // creation logic at the tail of this function can fire.
       if (!isLikelyNewOrderSignal && !isLikelyOrderAffirmation) {
-      const orderInfoUpdateIntent = await detectOrderInfoUpdateIntent(inboundText, recentMessages);
+      const orderInfoUpdateIntent = await runSensitiveDetector(() =>
+        detectOrderInfoUpdateIntent(inboundText, recentMessages),
+      );
       console.info(
         `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
       );
@@ -1920,6 +2089,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
             if (contactForSend) {
               sendResult = await sendMessage(channel, contactForSend.external_id, confirmationText);
+              sensitivePathOutboundSent = true; // P0-4: a confirmation is on the wire — no fail-closed re-throw past here (RC-20)
             }
 
             const outboundConfirm = await createMessage({
@@ -1984,6 +2154,24 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
       } // end !isLikelyNewOrderSignal && !isLikelyOrderAffirmation guard
     } catch (err) {
+      if (err instanceof SensitivePathEscalatedError) {
+        // P0-4 (RC-19): a sensitive detector threw and we already escalated (holding
+        // message + alert + pause). Return WITHOUT falling through to generateReply —
+        // that fall-through is the exact fail-open this fixes — and without re-throwing
+        // (the escalation already happened; a retry would double-send the holding message).
+        return;
+      }
+      const action = decideSensitivePathAction(
+        sensitivePathOutboundSent ? 'post_send' : 'pre_send',
+        SENSITIVE_PATH_FAIL_CLOSED,
+      );
+      if (action === 'retry') {
+        // P0-4 (RC-19): fail closed. Surface the error so BullMQ retries instead of
+        // silently downgrading a sensitive escalation into a normal sales reply. Scoped
+        // to the pre-send window (sensitivePathOutboundSent === false) so a retry can
+        // never double-send an ack that already went out (RC-20).
+        throw err;
+      }
       console.warn('[ai.reply] escalation detection path failed, continuing normal flow', {
         conversationId,
         tenantId,
@@ -3978,6 +4166,36 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       tenantId,
       err,
     });
+    if (SENSITIVE_PATH_FAIL_CLOSED) {
+      // P0-4 (RC-22): this block runs AFTER the reply has been sent, so re-throwing would
+      // re-run the whole job and double-send the delivered reply (RC-20). Instead of the
+      // silent green job that forfeits a potential AI-order commission with no trace,
+      // surface the failure as a durable alert so the merchant can review whether an order
+      // was missed. (Retry becomes safe fleet-wide once P1-1 makes the pipeline idempotent.)
+      try {
+        const alert = await createAIAlert({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: lastInbound?.id ?? null,
+          reason: 'order_detection_failed',
+        });
+        const contactForAlert = await findContactById(conversation.contact_id);
+        socketService.emitAIAlert(tenantId, {
+          ...alert,
+          message_content: inboundText || null,
+          contact_name: contactForAlert?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+        socketService.emitConversationUpdated(tenantId, conversationId);
+      } catch (alertErr) {
+        console.error('[ai.reply] Failed to raise order_detection_failed alert', {
+          conversationId,
+          tenantId,
+          err: alertErr,
+        });
+      }
+    }
   }
 
   } finally {

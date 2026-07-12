@@ -14,6 +14,7 @@ const LABELS: Record<string, string> = {
   cancellation_request: 'Cancellation request',
   refund_request: 'Refund request',
   post_purchase_support_request: 'Delivery or product issue',
+  order_detection_failed: 'Order detection failed — possible missed order',
   rate_limit_exceeded: 'AI rate limit exceeded',
   message_send_failed: 'Message sending failed',
   token_refresh_failed: 'Token refresh failed',
