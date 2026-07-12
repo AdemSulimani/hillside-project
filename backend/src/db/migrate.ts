@@ -2,11 +2,25 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import pool from './pool';
+import { runMigrationChecks } from './migrationChecks';
+
+// Arbitrary constant identifying "the Hillside migration run" cluster-wide.
+// Session-level advisory lock: concurrent runners (deploy pre-up, container
+// boots, replicas) serialize instead of racing; the session releases it on
+// disconnect even if the process dies. Would not survive a move to PgBouncer
+// transaction pooling.
+const MIGRATION_LOCK_KEY = '815051262';
 
 async function migrate() {
   const client = await pool.connect();
+  let locked = false;
 
   try {
+    // Take the lock before touching _migrations so even two fresh boots
+    // racing the CREATE TABLE serialize.
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+    locked = true;
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS _migrations (
         id      SERIAL PRIMARY KEY,
@@ -21,13 +35,30 @@ async function migrate() {
       .filter((f) => f.endsWith('.sql'))
       .sort();
 
-    for (const file of files) {
-      const { rows } = await client.query(
-        'SELECT id FROM _migrations WHERE name = $1',
-        [file],
-      );
+    const applied = new Set<string>(
+      (await client.query('SELECT name FROM _migrations')).rows.map(
+        (row: { name: string }) => row.name,
+      ),
+    );
 
-      if (rows.length > 0) {
+    // Fail fast on duplicate ordinals / out-of-order pending files before
+    // anything is applied. Hard failure only under MIGRATE_STRICT=1 (CI and
+    // the pre-deploy run) so an anomaly that slips through can never brick
+    // the boot loop in production, where this also runs on every start.
+    const violations = runMigrationChecks(files, applied);
+    if (violations.length > 0) {
+      if (process.env.MIGRATE_STRICT === '1') {
+        throw new Error(
+          `[migrate] Preflight checks failed:\n${violations.join('\n')}`,
+        );
+      }
+      for (const violation of violations) {
+        console.warn('[migrate] WARNING (non-strict mode):', violation);
+      }
+    }
+
+    for (const file of files) {
+      if (applied.has(file)) {
         console.log(`[migrate] Skipping ${file} (already applied)`);
         continue;
       }
@@ -48,6 +79,13 @@ async function migrate() {
 
     console.log('[migrate] All migrations complete');
   } finally {
+    if (locked) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY]);
+      } catch {
+        // Session teardown releases the lock; never mask the original error.
+      }
+    }
     client.release();
     await pool.end();
   }

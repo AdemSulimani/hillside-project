@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main]
+    # Tag pushes run CI too so the production deploy gate always has a CI run
+    # for the tagged commit to wait on (see deploy.yml "Require green CI").
+    tags: ["v*"]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -36,6 +39,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
 
   backend-smoke:
     name: Backend Migration + Health Smoke
@@ -99,6 +105,10 @@ jobs:
 
       - name: Run migrations
         run: npm run migrate
+        env:
+          # Fail fast on duplicate/out-of-order migration ordinals in CI;
+          # plain container boots only warn (see db/migrate.ts).
+          MIGRATE_STRICT: "1"
 
       - name: Start API
         run: node dist/server.js > /tmp/backend.log 2>&1 &

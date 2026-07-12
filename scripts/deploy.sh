@@ -67,11 +67,14 @@ docker compose "${COMPOSE_FILES[@]}" \
 #
 # IMPORTANT: migrations must be idempotent (all use IF NOT EXISTS / ON CONFLICT)
 # so re-running on a failed deploy is always safe.
+#
+# MIGRATE_STRICT=1 makes duplicate/out-of-order migration ordinals abort the
+# deploy here; plain container boots only warn (see backend/src/db/migrate.ts).
 echo "[deploy] Running database migrations"
 docker compose "${COMPOSE_FILES[@]}" \
   --env-file backend/.env \
   --env-file frontend/.env \
-  run --rm backend node dist/db/migrate.js
+  run --rm -e MIGRATE_STRICT=1 backend node dist/db/migrate.js
 
 echo "[deploy] Starting containers"
 docker compose "${COMPOSE_FILES[@]}" \
