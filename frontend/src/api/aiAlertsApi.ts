@@ -146,9 +146,14 @@ export async function resolveAIAlert(
   alertId: string,
   params: ResolveAIAlertParams = {},
 ): Promise<{ resume_ai: boolean }> {
+  // P0-5: OMIT resume_ai when the caller did not specify it, rather than coercing to
+  // false. Omission lets the backend apply its reason-based default (AI_AUTO_RESUME
+  // resumes a non-sensitive alert); sending an explicit false would suppress that. The
+  // server echoes back the decision it actually applied.
+  const payload = params.resume_ai === undefined ? {} : { resume_ai: params.resume_ai };
   const { data } = await api.patch<ApiResponse<{ resume_ai?: boolean }>>(
     `/ai-alerts/${alertId}/resolve`,
-    { resume_ai: params.resume_ai === true },
+    payload,
   );
   return { resume_ai: toBool(data.data?.resume_ai) };
 }

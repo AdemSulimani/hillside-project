@@ -9,7 +9,17 @@ import {
 import { findConversationByIdForTenant, setConversationAiPaused } from '../db/models/conversation';
 import { socketService } from '../services/socketService';
 import { sendError, sendPaginated, sendSuccess } from '../utils/response';
+import { shouldResumeOnResolve } from '../services/aiResumePolicy';
 import type { AIAlertListQuery, ResolveAIAlertBody } from '../validators/aiAlert';
+
+/**
+ * P0-5 (RC-14): when ON, resolving a NON-sensitive alert without an explicit `resume_ai`
+ * resumes the AI (ending the permanent-silence dead-end); sensitive reasons and legacy
+ * NULL-reason pauses still require an explicit resume. Defaults OFF: flag-off preserves
+ * the legacy resume-only-via-`resume_ai:true` behaviour byte-for-byte.
+ */
+const AI_AUTO_RESUME =
+  (process.env.AI_AUTO_RESUME ?? 'false').trim().toLowerCase() === 'true';
 
 export async function index(req: Request, res: Response): Promise<void> {
   try {
@@ -90,12 +100,23 @@ export async function resolve(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    if (body.resume_ai === true) {
-      if (!existing.conversation_id) {
-        sendError(res, 'This alert is not tied to a conversation', 400);
-        return;
-      }
-      const convo = await findConversationByIdForTenant(existing.conversation_id, tenantId);
+    // P0-5 (RC-14): decide whether to resume the AI. Explicit resume_ai always wins; when
+    // omitted, AI_AUTO_RESUME default-resumes a NON-sensitive alert (sensitive reasons and
+    // legacy NULL-reason pauses require an explicit resume). Flag off → resume only on
+    // explicit resume_ai:true (legacy).
+    const resume = shouldResumeOnResolve(existing.reason, body.resume_ai, AI_AUTO_RESUME);
+
+    // An EXPLICIT resume of a system alert with no conversation is a user error (preserve
+    // the legacy 400). A default (omitted) resume of such an alert simply resolves it
+    // without resuming — there is no conversation to resume.
+    if (body.resume_ai === true && !existing.conversation_id) {
+      sendError(res, 'This alert is not tied to a conversation', 400);
+      return;
+    }
+
+    const willResume = resume && existing.conversation_id != null;
+    if (willResume) {
+      const convo = await findConversationByIdForTenant(existing.conversation_id!, tenantId);
       if (!convo) {
         sendError(res, 'Conversation not found', 404);
         return;
@@ -112,7 +133,7 @@ export async function resolve(req: Request, res: Response): Promise<void> {
       alert = updated;
     }
 
-    if (body.resume_ai === true && existing.conversation_id) {
+    if (willResume && existing.conversation_id) {
       await setConversationAiPaused(existing.conversation_id, tenantId, false);
     }
 
@@ -120,7 +141,7 @@ export async function resolve(req: Request, res: Response): Promise<void> {
       socketService.emitConversationUpdated(tenantId, existing.conversation_id);
     }
 
-    sendSuccess(res, { alert, resume_ai: body.resume_ai === true }, 'Alert resolved');
+    sendSuccess(res, { alert, resume_ai: willResume }, 'Alert resolved');
   } catch (err) {
     sendError(res, 'Failed to resolve alert', 500, err);
   }

@@ -74,6 +74,17 @@ function isCancellationOrRefundReason(reason: string): boolean {
   return reason === 'cancellation_request' || reason === 'refund_request';
 }
 
+// P0-5: mirrors the backend SENSITIVE_ALERT_REASONS. Sensitive alerts never default-resume
+// on a plain Close — a human must explicitly resume the AI. Non-sensitive alerts omit
+// resume_ai on Close so the backend applies its AI_AUTO_RESUME default.
+function isSensitiveAlertReason(reason: string): boolean {
+  return (
+    reason === 'cancellation_request' ||
+    reason === 'refund_request' ||
+    reason === 'post_purchase_support_request'
+  );
+}
+
 function isUsageEscalationReason(reason: string): boolean {
   return reason === 'usage_question_unanswered' || reason === 'product_question_unanswered';
 }
@@ -133,11 +144,13 @@ export default function AIAlertsPage() {
   });
 
   const resolveMutation = useMutation({
-    mutationFn: ({ id, resume_ai }: { id: string; resume_ai: boolean }) =>
+    mutationFn: ({ id, resume_ai }: { id: string; resume_ai?: boolean }) =>
       resolveAIAlert(id, { resume_ai }),
-    onSuccess: (_, variables) => {
+    // Key the toast off the decision the SERVER actually applied (data.resume_ai), not the
+    // request: a non-sensitive default Close omits resume_ai yet the backend may resume.
+    onSuccess: (data) => {
       toast.success(
-        variables.resume_ai
+        data.resume_ai
           ? 'Alert closed and AI resumed for this conversation.'
           : 'Alert closed.',
       );
@@ -328,7 +341,14 @@ export default function AIAlertsPage() {
                               className="w-full sm:w-auto"
                               disabled={resolveMutation.isPending}
                               onClick={() =>
-                                resolveMutation.mutate({ id: alert.id, resume_ai: false })
+                                // P0-5: sensitive alerts stay paused on a plain Close
+                                // (explicit false); non-sensitive alerts omit resume_ai so
+                                // the backend's AI_AUTO_RESUME default resumes the AI.
+                                resolveMutation.mutate(
+                                  isSensitiveAlertReason(alert.reason)
+                                    ? { id: alert.id, resume_ai: false }
+                                    : { id: alert.id },
+                                )
                               }
                             >
                               {resolvingId === alert.id ? (

@@ -16,7 +16,11 @@ import {
   type Message,
   updateMessageSendFailure,
 } from '../db/models/message';
-import { createAIAlert, type AIAlert } from '../db/models/aiAlert';
+import {
+  createAIAlert,
+  hasOpenSensitiveAlertForConversation,
+  type AIAlert,
+} from '../db/models/aiAlert';
 import {
   createOrder,
   findLatestActiveOrderForConversation,
@@ -106,6 +110,12 @@ import {
   decideSensitivePathAction,
   SensitivePathEscalatedError,
 } from '../services/sensitivePathFailClosed';
+import {
+  shouldCountDeliveredReply,
+  isOverDeliveredRateLimit,
+  rateCountedMarkerKey,
+} from '../services/rateLimitDeliveredCount';
+import { shouldAutoResumeRateLimitPause } from '../services/aiResumePolicy';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -664,6 +674,32 @@ const SENSITIVE_PATH_FAIL_CLOSED =
   (process.env.SENSITIVE_PATH_FAIL_CLOSED ?? 'false').trim().toLowerCase() === 'true';
 
 /**
+ * P0-6 (RC-18): when ON, the per-conversation 25/h budget counts only real DELIVERED
+ * replies. The pre-gate INCR (which charged every job attempt — retries, stale-skipped,
+ * disabled-AI, and fairness/lock/human-hold reschedules — and so tripped the cap on
+ * phantom increments → permanent silence) is replaced by (a) a read-only pre-send cap
+ * check and (b) an atomic count-once increment AFTER a reply is actually delivered, keyed
+ * idempotently on the inbound message id so a BullMQ retry can never double-count. The
+ * rolling-1h EXPIRE is set on the first real increment. Defaults OFF: flag-off preserves
+ * the legacy pre-gate INCR path byte-for-byte. Flip per environment (staging first) per
+ * the remediation plan.
+ */
+const RATE_LIMIT_COUNT_DELIVERED_ONLY =
+  (process.env.RATE_LIMIT_COUNT_DELIVERED_ONLY ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P0-5 (RC-14, RC-06): when ON, a `rate_limit_exceeded` pause auto-expires — a new inbound
+ * whose delivered-only (P0-6) rate counter has rolled over, with no open sensitive alert
+ * and no active human hold, clears the pause and answers instead of leaving the
+ * conversation permanently silent. (The alert-resolution default-resume half of P0-5 lives
+ * in `aiAlertController`.) Defaults OFF: flag-off leaves every pause exiting only via an
+ * explicit human resume, byte-for-byte. Flip per environment (staging first) per the
+ * remediation plan.
+ */
+const AI_AUTO_RESUME =
+  (process.env.AI_AUTO_RESUME ?? 'false').trim().toLowerCase() === 'true';
+
+/**
  * Cap on how many full-catalog names are handed to the name-guard LLM classifier when
  * the retrieval window is empty. The deterministic full-catalog verification that
  * follows is uncapped, so a name outside this sample is still rescued — the cap only
@@ -1181,6 +1217,49 @@ return count
 `;
 
 // ---------------------------------------------------------------------------
+// Atomic "count this delivered reply once" script (P0-6, RC-18)
+//
+// KEYS[1] = counter (`ai_rate_limit:{conversationId}`)
+// KEYS[2] = per-inbound marker (`ai_rate_counted:{conversationId}:{inboundExternalId}`)
+// ARGV[1] = ttl seconds (3600)
+//
+// Sets the marker with NX so a retry of the SAME inbound (or a second send within one
+// job) finds it already set and no-ops — the budget is charged exactly once per delivered
+// inbound. The rolling-1h EXPIRE is applied only on the first real increment, preserving
+// the same window semantics as RATE_LIMIT_INCR_SCRIPT. Returns the resulting counter
+// value (or the current value on a no-op).
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_DELIVERED_INCR_SCRIPT = `
+local counterKey = KEYS[1]
+local markerKey  = KEYS[2]
+local ttl        = tonumber(ARGV[1])
+if redis.call('SET', markerKey, '1', 'NX', 'EX', ttl) == false then
+  return tonumber(redis.call('GET', counterKey) or '0')
+end
+local count = redis.call('INCR', counterKey)
+if count == 1 then
+  redis.call('EXPIRE', counterKey, ttl)
+end
+return count
+`;
+
+/**
+ * Charge the 25/h budget for a delivered reply exactly once (P0-6). Idempotent by the
+ * per-inbound marker, so a BullMQ retry that re-reaches the persist step (self-heal path)
+ * does not double-count. Best-effort: a Redis error must never break an already-delivered
+ * reply, so failures are swallowed.
+ */
+async function countDeliveredReplyOnce(
+  counterKey: string,
+  markerKey: string,
+  ttlSeconds = 3600,
+): Promise<void> {
+  await redisConnection
+    .eval(RATE_LIMIT_DELIVERED_INCR_SCRIPT, 2, counterKey, markerKey, String(ttlSeconds))
+    .catch(() => undefined);
+}
+
+// ---------------------------------------------------------------------------
 // Per-conversation processing lock
 //
 // The worker runs multiple AI jobs concurrently, and there is no other
@@ -1291,13 +1370,35 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const aiMaxRepliesPerHour =
     Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 25;
   const rateLimitKey = `ai_rate_limit:${conversationId}`;
-  const rateCount = await redisConnection.eval(
-    RATE_LIMIT_INCR_SCRIPT,
-    1,
-    rateLimitKey,
-    '3600',
-  ) as number;
-  if (rateCount > aiMaxRepliesPerHour) {
+  let overLimit = false;
+  if (RATE_LIMIT_COUNT_DELIVERED_ONLY) {
+    // P0-6 (RC-18): count only DELIVERED replies. Enforce the cap here with a READ-ONLY
+    // check (the increment happens post-send), so retries / stale-skipped / disabled-AI /
+    // rescheduled jobs never burn budget. Skip the cap entirely for an inbound we've
+    // ALREADY counted — that is a retry of a delivered reply that should self-heal, not
+    // re-pause (a naive GET >= max would read the boundary count and spuriously re-pause
+    // the very reply that hit the cap). Fail OPEN on a Redis error: let the reply through
+    // rather than silence the customer on a blip.
+    const rateMarkerKey = rateCountedMarkerKey(conversationId, data.messageExternalId);
+    const alreadyCounted =
+      (await redisConnection.exists(rateMarkerKey).catch(() => 0)) === 1;
+    if (!alreadyCounted) {
+      const currentCount =
+        parseInt((await redisConnection.get(rateLimitKey).catch(() => '0')) ?? '0', 10) || 0;
+      overLimit = isOverDeliveredRateLimit(currentCount, aiMaxRepliesPerHour);
+    }
+  } else {
+    // Legacy: charge every job attempt before the gates (the RC-18 behaviour, preserved
+    // byte-for-byte when the flag is off).
+    const rateCount = (await redisConnection.eval(
+      RATE_LIMIT_INCR_SCRIPT,
+      1,
+      rateLimitKey,
+      '3600',
+    )) as number;
+    overLimit = rateCount > aiMaxRepliesPerHour;
+  }
+  if (overLimit) {
     const client = await pool.connect();
     let alert: AIAlert | undefined;
     let messageContentForSocket: string | null = null;
@@ -1311,7 +1412,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       );
       const latestMessage = msgRows[0];
       await client.query('BEGIN');
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      // P0-5: record the pause reason so the rate-limit auto-expiry (part 3) can identify
+      // and clear this pause once the (delivered-only, P0-6) counter has rolled over.
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'rate_limit_exceeded');
       if (latestMessage) {
         messageContentForSocket = latestMessage.content;
         alert = await createAIAlert(
@@ -1383,8 +1486,50 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   if (conversation.ai_paused) {
-    console.info('[ai.reply] AI paused for conversation, skipping', { conversationId });
-    return;
+    // P0-5 (RC-14) part 3: a rate_limit_exceeded pause auto-expires once the delivered-only
+    // (P0-6) counter has rolled over. Runs inside the per-conversation lock (acquired
+    // above), so the resume write cannot race another job for this conversation. All
+    // Redis/DB probes fail SAFE (treat as "do not resume") so a blip never spuriously
+    // resumes a paused conversation.
+    let autoResumed = false;
+    if (AI_AUTO_RESUME && conversation.ai_paused_reason === 'rate_limit_exceeded') {
+      const rateKeyExists =
+        (await redisConnection.exists(`ai_rate_limit:${conversationId}`).catch(() => 1)) === 1;
+      const humanOverrideActive =
+        !!conversation.human_override_until &&
+        new Date(conversation.human_override_until) > new Date();
+      const hasOpenSensitiveAlert = await hasOpenSensitiveAlertForConversation(
+        conversationId,
+        tenantId,
+      ).catch(() => true);
+      if (
+        shouldAutoResumeRateLimitPause({
+          autoResumeEnabled: AI_AUTO_RESUME,
+          aiPaused: true,
+          reason: conversation.ai_paused_reason,
+          rateKeyExists,
+          hasOpenSensitiveAlert,
+          humanOverrideActive,
+        })
+      ) {
+        await setConversationAiPaused(conversationId, tenantId, false);
+        // Keep the in-memory object consistent for the rest of the job (the resume also
+        // cleared the pause metadata and any human hold in the DB).
+        conversation.ai_paused = false;
+        conversation.ai_paused_reason = null;
+        conversation.ai_paused_at = null;
+        conversation.human_override_until = null;
+        autoResumed = true;
+        console.info('[ai.reply] Auto-resumed rate-limit pause — counter rolled over', {
+          conversationId,
+          tenantId,
+        });
+      }
+    }
+    if (!autoResumed) {
+      console.info('[ai.reply] AI paused for conversation, skipping', { conversationId });
+      return;
+    }
   }
 
   if (conversation.human_override_until && new Date(conversation.human_override_until) > new Date()) {
@@ -3542,6 +3687,27 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     // the products are not in the catalog.
     product_ids: replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id),
   });
+
+  // P0-6 (RC-18): charge the 25/h budget only now that a reply has actually been
+  // delivered AND persisted. This is the single point every delivered path converges on:
+  // the fresh-send branch (sendResult.success) and the crash-after-send self-heal branch
+  // (alreadySent — which skips the re-send but still reaches this createMessage) both pass
+  // through here, so counting with `sendResult?.success || alreadySent` and keying on the
+  // stable inbound id yields exactly one budget unit across retries (the marker no-ops the
+  // rest). Flag off → shouldCountDeliveredReply() is false and the legacy pre-gate INCR
+  // owns counting instead.
+  const wasDelivered = sendResult?.success === true || alreadySent;
+  if (
+    shouldCountDeliveredReply({
+      countDeliveredOnly: RATE_LIMIT_COUNT_DELIVERED_ONLY,
+      sendSucceeded: wasDelivered,
+    })
+  ) {
+    await countDeliveredReplyOnce(
+      rateLimitKey,
+      rateCountedMarkerKey(conversationId, data.messageExternalId),
+    );
+  }
 
   // Product image unavailable alert: fires when the customer explicitly asked for a
   // product photo but the catalog entry has no image_urls. Does NOT pause the AI —
