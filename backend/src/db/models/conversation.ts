@@ -11,6 +11,8 @@ export interface Conversation {
   last_message_at: Date;
   human_override_until: Date | null;
   ai_paused: boolean;
+  ai_paused_reason: string | null;
+  ai_paused_at: Date | null;
   fully_ai_handled: boolean;
   human_replied: boolean;
   created_at: Date;
@@ -95,16 +97,23 @@ export async function setConversationAiPaused(
   tenantId: string,
   aiPaused: boolean,
   client: PoolClient | typeof pool = pool,
+  reason: string | null = null,
 ): Promise<Conversation | null> {
+  // P0-5: on pause, stamp ai_paused_at (so the invariant monitor can spot a conversation
+  // left paused past a newer inbound) and record ai_paused_reason (part 3 keys the
+  // rate-limit auto-expiry on 'rate_limit_exceeded'). On resume, clear both — and, as
+  // before, clear any human hold.
   const { rows } = await client.query<Conversation>(
     `UPDATE conversations
      SET
        ai_paused = $3,
+       ai_paused_reason = CASE WHEN $3 = TRUE THEN $4 ELSE NULL END,
+       ai_paused_at = CASE WHEN $3 = TRUE THEN now() ELSE NULL END,
        human_override_until = CASE WHEN $3 = FALSE THEN NULL ELSE human_override_until END,
        updated_at = now()
      WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
-    [id, tenantId, aiPaused],
+    [id, tenantId, aiPaused, reason],
   );
   return rows[0] ?? null;
 }
@@ -157,6 +166,10 @@ export async function toggleAiPaused(
     `UPDATE conversations
      SET
        ai_paused = NOT ai_paused,
+       -- Manual toggle: leave ai_paused_at/reason NULL so a deliberately human-owned pause
+       -- is excluded from the automated-pause invariant monitor (and never auto-resumed).
+       ai_paused_reason = NULL,
+       ai_paused_at = NULL,
        human_override_until = CASE
          WHEN ai_paused THEN NULL
          ELSE human_override_until
@@ -188,6 +201,8 @@ export async function findPausedConversationsByTenant(
        c.last_message_at,
        c.human_override_until,
        c.ai_paused,
+       c.ai_paused_reason,
+       c.ai_paused_at,
        c.fully_ai_handled,
        c.human_replied,
        c.created_at,
@@ -236,6 +251,8 @@ export async function listConversationsForContactForTenant(
        c.last_message_at,
        c.human_override_until,
        c.ai_paused,
+       c.ai_paused_reason,
+       c.ai_paused_at,
        c.fully_ai_handled,
        c.human_replied,
        c.created_at,
@@ -251,4 +268,51 @@ export async function listConversationsForContactForTenant(
   );
 
   return { rows, total };
+}
+
+export interface PauseInvariantViolation {
+  id: string;
+  tenant_id: string;
+  ai_paused_at: Date;
+  ai_paused_reason: string | null;
+}
+
+/**
+ * P0-5 (RC-14) part 4 — the auto-resume invariant, as a query. Returns conversations that
+ * are still AI-paused (via an AUTOMATED pause, i.e. ai_paused_at is stamped — manual
+ * toggles leave it NULL) with an inbound message NEWER than the pause and no OPEN sensitive
+ * alert: exactly the permanent-silence dead-ends auto-resume is meant to eliminate. Read
+ * only — the monitor logs these; it never resumes.
+ */
+export async function findPauseInvariantViolations(
+  limit = 500,
+): Promise<PauseInvariantViolation[]> {
+  const { rows } = await pool.query<PauseInvariantViolation>(
+    `SELECT c.id, c.tenant_id, c.ai_paused_at, c.ai_paused_reason
+       FROM conversations c
+      WHERE c.ai_paused = true
+        AND c.ai_paused_at IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM messages m
+           WHERE m.conversation_id = c.id
+             AND m.tenant_id = c.tenant_id
+             AND m.direction = 'inbound'
+             AND m.created_at > c.ai_paused_at
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM ai_alerts a
+           WHERE a.conversation_id = c.id
+             AND a.tenant_id = c.tenant_id
+             AND a.status IN ('unread', 'read')
+             AND a.reason IN (
+               'cancellation_request',
+               'refund_request',
+               'post_purchase_support_request'
+             )
+        )
+      ORDER BY c.ai_paused_at ASC
+      LIMIT $1`,
+    [limit],
+  );
+  return rows;
 }

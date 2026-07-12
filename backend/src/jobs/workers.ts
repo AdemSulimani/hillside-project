@@ -35,6 +35,10 @@ import {
   processMonthlyUseCaseSnapshot,
   initMonthlyUseCaseSnapshotScheduler,
 } from './monthlyUseCaseSnapshot';
+import {
+  runPauseInvariantMonitor,
+  initPauseInvariantMonitorScheduler,
+} from './pauseInvariantMonitor';
 import { attachWorkerFailureHandler } from './failureHandler';
 
 /** Shared BullMQ worker tuning to reduce idle / polling Redis traffic. */
@@ -145,6 +149,10 @@ export const defaultWorker = new Worker<
       await processMonthlyUseCaseSnapshot();
       return;
     }
+    if (job.name === 'pauseInvariantMonitor') {
+      await runPauseInvariantMonitor();
+      return;
+    }
     if (job.name === 'embeddingReconcile') {
       await processReconcileProductEmbeddings();
       return;
@@ -198,6 +206,10 @@ void initPrepareFinetuningScheduler().catch((err) => {
 
 void initEmbeddingReconcileScheduler().catch((err) => {
   console.error('[jobs] Failed to register embedding reconciliation scheduler', err);
+});
+
+void initPauseInvariantMonitorScheduler().catch((err) => {
+  console.error('[jobs] Failed to register pause invariant monitor scheduler', err);
 });
 
 void initFastEmbeddingReconcileScheduler().catch((err) => {

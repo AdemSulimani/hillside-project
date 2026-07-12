@@ -37,6 +37,35 @@ export async function createAIAlert(
   return rows[0];
 }
 
+/**
+ * P0-5 (RC-14): does this conversation have an OPEN (unread/read) SENSITIVE alert —
+ * cancellation, refund, or post-purchase support? Used by the rate-limit auto-expiry
+ * (part 3) and the invariant monitor (part 4) to avoid resuming/flagging a conversation a
+ * human may be actively handling. Reasons are inlined in SQL to match the existing
+ * escalation-tab query style (see `listEscalationAlertsForOrdersActionTab`).
+ */
+export async function hasOpenSensitiveAlertForConversation(
+  conversationId: string,
+  tenantId: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<boolean> {
+  const { rows } = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM ai_alerts
+       WHERE conversation_id = $1
+         AND tenant_id = $2
+         AND status IN ('unread', 'read')
+         AND reason IN (
+           'cancellation_request',
+           'refund_request',
+           'post_purchase_support_request'
+         )
+     ) AS exists`,
+    [conversationId, tenantId],
+  );
+  return rows[0]?.exists === true;
+}
+
 export interface AIAlertWithContext extends AIAlert {
   contact_name: string;
   channel_type: ChannelType;
