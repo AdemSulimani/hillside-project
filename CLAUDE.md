@@ -320,7 +320,7 @@ Scheduled cron jobs: embedding reconciliation (6h), image fingerprint reconcilia
 
 ## 6. Data Model
 
-The database schema is defined across **68 numbered SQL migration files** in `backend/src/db/migrations/`. There is no Prisma, TypeORM, or single consolidated schema file. TypeScript interfaces and query functions live in `backend/src/db/models/*.ts`.
+The database schema is defined across **69 SQL migration files** in `backend/src/db/migrations/` (ordinals `001`–`068`; ordinal `062` is used by two files — `062_message_product_context.sql` and `062_compact_edge_case_guidelines.sql`). The runner (`db/migrate.ts`) applies files in **lexicographic filename order** with a per-file `BEGIN/COMMIT`, so the numeric prefix is not a strict apply-order contract and is not unique. There is no Prisma, TypeORM, or single consolidated schema file. TypeScript interfaces and query functions live in `backend/src/db/models/*.ts`.
 
 Extensions: `pgcrypto`, `pgvector` (1536-dim vectors on `products` and `product_image_fingerprints`).
 
@@ -372,7 +372,7 @@ Unique: `(tenant_id, block_key)`
 
 **`ai_alerts`** — escalation and quality alerts  
 Key fields: `tenant_id`, `conversation_id` (nullable for system alerts), `message_id`, `reason`, `status` (`'unread'`/`'read'`/`'resolved'`)  
-Alert reasons include: `cancellation_request`, `refund_request`, `post_purchase_support_request`, `product_question_unanswered`, `usage_question_unanswered`, `hallucinated_price`, `hallucinated_product_name`, `order_info_updated`, `message_send_failed`, `rate_limit_exceeded`, `token_refresh_failed`
+Alert reasons include: `cancellation_request`, `refund_request`, `post_purchase_support_request`, `product_question_unanswered`, `usage_question_unanswered`, `product_image_unavailable`, `hallucinated_price`, `hallucinated_product_name`, `uncertain_answer_escalated`, `order_info_updated`, `message_send_failed`, `rate_limit_exceeded`, `token_refresh_failed`. Low-quality replies are additionally flagged under the quality-eval reasons `off_topic`, `irrelevant`, `misleading`, `unclear`, and `low_confidence`.
 
 **`ai_use_cases`** — billable support conversations fully resolved by AI  
 Key fields: `conversation_id` (UNIQUE — one use case per conversation), `status` (`'completed'`/`'voided'`), `billing_status` (`'unbilled'`/`'billed'`/`'paid'`), `fee_amount` (stamped at month-end), `billing_period` (`'YYYY-MM'`)
@@ -584,7 +584,7 @@ Products use soft delete (`deleted_at` timestamp). A partial unique index enforc
 |----------|---------|
 | `OPENAI_CHAT_MODEL` | Main chat model (e.g. `gpt-4o`) |
 | `OPENAI_VISION_MODEL` | Vision/image analysis model |
-| `OPENAI_EMBEDDING_MODEL` | Embedding model (default: `text-embedding-3-large`) |
+| `OPENAI_EMBEDDING_MODEL` | Embedding model. Deployed value is `text-embedding-3-small` (1536-dim), which matches the `vector(1536)` column. ⚠️ The code fallback default in `openaiClient.ts` is `text-embedding-3-large` (3072-dim) — incompatible with the column, so this env var must stay set to a 1536-dim model. |
 | `OPENAI_INTENT_MODEL` | Purchase intent detection model |
 | `OPENAI_EVAL_MODEL` | Reply quality evaluation model |
 | `OPENAI_FINETUNING_BASE_MODEL` | Base model for fine-tuning jobs |
