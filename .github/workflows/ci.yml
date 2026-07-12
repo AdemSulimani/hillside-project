@@ -105,6 +105,10 @@ jobs:
 
       - name: Run migrations
         run: npm run migrate
+        env:
+          # Fail fast on duplicate/out-of-order migration ordinals in CI;
+          # plain container boots only warn (see db/migrate.ts).
+          MIGRATE_STRICT: "1"
 
       - name: Start API
         run: node dist/server.js > /tmp/backend.log 2>&1 &
