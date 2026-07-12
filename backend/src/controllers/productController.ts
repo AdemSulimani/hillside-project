@@ -17,7 +17,7 @@ import { AIProductProcessingService } from '../services/AIProductProcessingServi
 import { defaultQueue } from '../jobs/queues';
 import type { CreateProductInput, UpdateProductInput } from '../validators/product';
 import type { ProductQuery } from '../validators/product';
-import { redisConnection } from '../jobs/redisConnection';
+import { invalidateProductCatalogCaches } from '../services/catalogGuardReferenceService';
 import { deleteImage, getPublicIdFromUrl } from '../services/cloudinaryService';
 import {
   deleteFingerprintsForImageUrls,
@@ -104,7 +104,7 @@ async function invalidateProductCaches(tenantId: string, productId: string, fiel
     if (touchesEmbedding) {
       await defaultQueue.add('product.embedding', { productId, tenantId }, { priority: 1 });
     }
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCatalogCaches(tenantId);
   } catch (err) {
     console.warn('[products] Post-update cache/queue work failed; product row was saved', {
       tenantId,
@@ -351,7 +351,7 @@ export async function destroyAll(req: Request, res: Response): Promise<void> {
     } catch (err) {
       console.warn('[products.destroyAll] Failed to delete image fingerprints', { tenantId, err });
     }
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCatalogCaches(tenantId);
 
     sendSuccess(
       res,
@@ -389,7 +389,7 @@ export async function destroy(req: Request, res: Response): Promise<void> {
     } catch (err) {
       console.warn('[products.destroy] Failed to delete image fingerprints', { productId: id, err });
     }
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCatalogCaches(tenantId);
 
     sendSuccess(res, null, 'Product deleted successfully');
   } catch (err) {
@@ -450,7 +450,7 @@ export async function uploadDocument(req: Request, res: Response): Promise<void>
         ),
       ),
     );
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCatalogCaches(tenantId);
 
     sendSuccess(
       res,
@@ -502,7 +502,7 @@ export async function uploadOcrImage(req: Request, res: Response): Promise<void>
     if (Array.isArray(product.image_urls) && product.image_urls.length > 0) {
       await queueProductImageFingerprintJobs(defaultQueue, product.id, tenantId, product.image_urls, 2);
     }
-    await redisConnection.del(`products:${tenantId}`);
+    await invalidateProductCatalogCaches(tenantId);
 
     sendSuccess(res, { product }, 'Product imported from image', 201);
   } catch (err) {

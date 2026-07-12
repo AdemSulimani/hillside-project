@@ -3368,26 +3368,31 @@ export interface ProductNameHallucinationResult {
 
 /**
  * Post-generation product-name hallucination guard. Checks whether the AI reply names
- * any specific products that are NOT present in the matched catalog products.
+ * any specific products that are NOT present in the provided catalog name list.
  *
  * Architecture mirrors filterHallucinatedPrices but uses an LLM classifier because
  * product names cannot be reliably extracted with regex across languages, abbreviations,
  * and brand variants. The LLM performs fuzzy matching so "MyBrand Protein" is not
  * flagged when "MyBrand Protein Powder 1kg" is in the catalog.
  *
+ * The caller chooses the reference list: the per-turn matched products (legacy) or a
+ * sample of the full active catalog. With the full-catalog guard flag on, this
+ * classifier's output is treated as SUSPECTS only — each name is deterministically
+ * re-verified against the entire catalog before it may escalate (processAIReply).
+ *
  * Fail-open: returns { hasHallucination: false } on any error so the reply is never
- * blocked due to a guard failure. Only fires when matchedProducts is non-empty.
+ * blocked due to a guard failure. Only fires when catalogNames is non-empty.
  */
 export async function filterHallucinatedProductNames(
   replyText: string,
-  matchedProducts: Product[],
+  referenceCatalogNames: string[],
 ): Promise<ProductNameHallucinationResult> {
   const empty: ProductNameHallucinationResult = { hasHallucination: false, suspectedNames: [] };
 
-  if (!replyText.trim() || matchedProducts.length === 0) return empty;
+  if (!replyText.trim()) return empty;
 
-  const catalogNames = matchedProducts
-    .map((p) => p.name?.trim())
+  const catalogNames = referenceCatalogNames
+    .map((n) => n?.trim())
     .filter((n): n is string => Boolean(n));
 
   if (catalogNames.length === 0) return empty;

@@ -6,7 +6,7 @@ import { deleteFingerprintsForImageUrls } from '../db/models/productImageFingerp
 import { sendSuccess, sendError } from '../utils/response';
 import { uploadImage } from '../services/cloudinaryService';
 import { defaultQueue } from '../jobs/queues';
-import { redisConnection } from '../jobs/redisConnection';
+import { invalidateProductCatalogCaches } from '../services/catalogGuardReferenceService';
 import { queueProductImageFingerprintJobs } from '../services/productImageFingerprintService';
 
 export async function upload(req: Request, res: Response): Promise<void> {
@@ -47,7 +47,7 @@ export async function upload(req: Request, res: Response): Promise<void> {
     // Keep the tenant's fallback product cache consistent so the new images are
     // reflected immediately (mirrors productController.invalidateProductCaches).
     try {
-      await redisConnection.del(`products:${tenantId}`);
+      await invalidateProductCatalogCaches(tenantId);
     } catch (err) {
       console.warn('[productImages.upload] Failed to invalidate product cache', { tenantId, err });
     }

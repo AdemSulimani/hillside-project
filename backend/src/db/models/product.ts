@@ -814,6 +814,64 @@ export async function searchProductsBySimilarity(
   return firstPass;
 }
 
+/**
+ * Full active-catalog price rows for guard validation. Returned raw: `NUMERIC`
+ * columns arrive from pg as strings (no global type parser is registered), so the
+ * caller must coerce before numeric comparison — see buildPriceSetFromCatalogRows
+ * in catalogGuardReferenceService.
+ */
+export async function listActiveCatalogPriceRowsForTenant(
+  tenantId: string,
+): Promise<Array<{ price: unknown; discounted_price: unknown }>> {
+  const { rows } = await pool.query<{ price: unknown; discounted_price: unknown }>(
+    `SELECT price, discounted_price FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true`,
+    [tenantId],
+  );
+  return rows;
+}
+
+/** All active, non-deleted product names for a tenant (guard name index). */
+export async function listActiveCatalogNamesForTenant(tenantId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ name: string }>(
+    `SELECT name FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+     ORDER BY name ASC`,
+    [tenantId],
+  );
+  return rows.map((r) => r.name).filter((n): n is string => Boolean(n?.trim()));
+}
+
+export interface SimilarProductName {
+  name: string;
+  similarity: number;
+}
+
+/**
+ * Deterministic pg_trgm lookup: the single active catalog name most similar to the
+ * candidate, or null when nothing clears `minSimilarity`. Uses word_similarity() so a
+ * partial reply mention ("Carbo One") scores high against the full catalog title
+ * ("Carbo One 1kg Orange"). The tenant filter bounds the scan to the tenant's rows.
+ */
+export async function findMostSimilarActiveProductName(
+  tenantId: string,
+  candidate: string,
+  minSimilarity: number,
+): Promise<SimilarProductName | null> {
+  const trimmed = candidate.trim();
+  if (!trimmed) return null;
+  const { rows } = await pool.query<{ name: string; similarity: number }>(
+    `SELECT name, word_similarity($2, name) AS similarity
+     FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND word_similarity($2, name) >= $3
+     ORDER BY similarity DESC
+     LIMIT 1`,
+    [tenantId, trimmed, minSimilarity],
+  );
+  return rows[0] ?? null;
+}
+
 /** Returns the number of active, non-deleted products for a tenant. */
 export async function countActiveProducts(tenantId: string): Promise<number> {
   const { rows } = await pool.query<{ count: string }>(
