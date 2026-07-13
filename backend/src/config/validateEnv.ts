@@ -21,6 +21,20 @@ const RECOMMENDED = [
 const STRENGTH_CHECKED = ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'ADMIN_JWT_SECRET', 'ADMIN_KEY'] as const;
 const MIN_SECRET_LENGTH = 32;
 
+/**
+ * Known OpenAI embedding-model output dimensions. The `products.embedding` column is
+ * `vector(1536)` (migration 029), so the active model MUST be 1536-dim — otherwise every
+ * similarity query errors and semantic retrieval is silently disabled (the P1-4/RC-04 dimension
+ * landmine, made worse by `openaiClient`'s `text-embedding-3-large` (3072-dim) code default).
+ * We fail fast at boot so the misconfiguration is loud instead of a silent fleet-wide degradation.
+ */
+const EMBEDDING_MODEL_DIMS: Record<string, number> = {
+  'text-embedding-3-small': 1536,
+  'text-embedding-ada-002': 1536,
+  'text-embedding-3-large': 3072,
+};
+const REQUIRED_EMBEDDING_DIM = 1536;
+
 function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
 }
@@ -62,6 +76,31 @@ export function validateRequiredEnv(): void {
       } else {
         warnings.push(msg);
       }
+    }
+  }
+
+  // Embedding-model dimension must match the vector(1536) column, in EVERY environment — a
+  // wrong/unset model is a functional break (silent semantic-disabled), not just a prod posture.
+  const embeddingModel = process.env.OPENAI_EMBEDDING_MODEL?.trim();
+  if (!embeddingModel) {
+    fatal.push(
+      '  - OPENAI_EMBEDDING_MODEL is not set; the code default (text-embedding-3-large, 3072-dim) ' +
+        'is incompatible with the products.embedding vector(1536) column and disables semantic ' +
+        'retrieval. Set it to a 1536-dim model (e.g. text-embedding-3-small).',
+    );
+  } else {
+    const dim = EMBEDDING_MODEL_DIMS[embeddingModel];
+    if (dim !== undefined && dim !== REQUIRED_EMBEDDING_DIM) {
+      fatal.push(
+        `  - OPENAI_EMBEDDING_MODEL=${embeddingModel} produces ${dim}-dim vectors, but ` +
+          `products.embedding is vector(${REQUIRED_EMBEDDING_DIM}); every similarity query would ` +
+          'error. Use a 1536-dim model (e.g. text-embedding-3-small), or run a reindex migration first.',
+      );
+    } else if (dim === undefined) {
+      warnings.push(
+        `  - OPENAI_EMBEDDING_MODEL=${embeddingModel} has an unknown output dimension; ensure it ` +
+          `matches the products.embedding vector(${REQUIRED_EMBEDDING_DIM}) column.`,
+      );
     }
   }
 

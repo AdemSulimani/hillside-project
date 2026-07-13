@@ -1,4 +1,4 @@
-import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL, OPENAI_EMBEDDING_MODEL } from './openaiClient';
+import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import type { ProductImageRef } from './productImageRequestService';
 export type { ProductImageRef };
 import { findTenantById } from '../db/models/tenant';
@@ -26,7 +26,15 @@ import {
 } from '../db/models/promptBlock';
 import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
-import { generateEmbedding } from './embeddingService';
+import {
+  activeEmbeddingModel,
+  getOrComputeQueryEmbedding,
+  logSemanticSkipped,
+  partitionBySimilarityBand,
+  SEMANTIC_BAND_EXTRA_DEPTH,
+  SEMANTIC_BAND_WEIGHT,
+  SIMILARITY_HYSTERESIS_BAND,
+} from './retrievalReliability';
 import { matchProductsFromCustomerImages } from './productImageMatchingService';
 import { getProductImageDerivedContext } from './productImageAttributeService';
 import { redisConnection } from '../jobs/redisConnection';
@@ -613,69 +621,11 @@ export function isPriceOnlyFollowUp(message: string): boolean {
   return hasPriceCue && words.length <= 6;
 }
 
-/**
- * Timeout for OpenAI query-embedding calls (ms). When OpenAI is slow or rate-limited,
- * the semantic path is skipped and keyword/phrase search still runs — which is correct
- * fail-open behaviour — but only if the hung request is actually cancelled. Without a
- * timeout the whole reply job blocks for up to 60 s and the semantic failure is silent.
- */
-const EMBEDDING_QUERY_TIMEOUT_MS = (() => {
-  const raw = process.env.EMBEDDING_QUERY_TIMEOUT_MS;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 5000;
-})();
-
-/** In-process LRU-style cache for query embeddings (maps model+trimmed text → vector). */
-const QUERY_EMBEDDING_CACHE_MAX = 256;
-const queryEmbeddingCache = new Map<string, number[]>();
-
-/** Active embedding model — mirrors embeddingService.generateEmbedding's resolution. */
-function activeEmbeddingModel(): string {
-  return process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL;
-}
-
-/**
- * Cache key includes the active embedding model so that changing OPENAI_EMBEDDING_MODEL at
- * runtime (or across a deploy that reuses a warm process) can never serve a vector produced
- * by a DIFFERENT model. Mixing vectors from two models yields meaningless cosine distances
- * and effectively-random nearest neighbours → wrong/irrelevant product retrieval.
- */
-function queryEmbeddingCacheKey(text: string): string {
-  return `${activeEmbeddingModel()}\u0000${text}`;
-}
-
-function getCachedQueryEmbedding(text: string): number[] | undefined {
-  return queryEmbeddingCache.get(queryEmbeddingCacheKey(text));
-}
-
-function setCachedQueryEmbedding(text: string, vector: number[]): void {
-  if (queryEmbeddingCache.size >= QUERY_EMBEDDING_CACHE_MAX) {
-    // Evict the oldest entry (Map iteration is insertion-ordered).
-    const oldest = queryEmbeddingCache.keys().next().value;
-    if (oldest !== undefined) queryEmbeddingCache.delete(oldest);
-  }
-  queryEmbeddingCache.set(queryEmbeddingCacheKey(text), vector);
-}
-
-/**
- * Generates a query embedding with a hard timeout. Resolves with null when
- * OpenAI is unavailable/slow — callers fall back to keyword-only retrieval.
- */
-async function generateQueryEmbeddingWithTimeout(text: string): Promise<number[] | null> {
-  const cached = getCachedQueryEmbedding(text);
-  if (cached) return cached;
-
-  try {
-    const result = await Promise.race([
-      generateEmbedding(text),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), EMBEDDING_QUERY_TIMEOUT_MS)),
-    ]);
-    if (result) setCachedQueryEmbedding(text, result);
-    return result;
-  } catch {
-    return null;
-  }
-}
+// P1-4 (RC-04): the aborting-timeout + shared/negative query-embedding cache + dimension guard
+// + `activeEmbeddingModel` now live in `retrievalReliability.ts` (a pure/injectable module so
+// the abort/timeout/fail-open branches are unit-testable without a live OpenAI/Redis). The old
+// non-cancelling `Promise.race` + per-process Map this replaced re-raced every timed-out query
+// and diverged across workers. Callers use `getOrComputeQueryEmbedding` (imported above).
 
 /**
  * Unified product retrieval: all sources (category/tag phrases, semantic vector search,
@@ -701,28 +651,44 @@ export async function matchProductsForCustomerMessage(
   const keywords = extractKeywords(trimmed);
   const categoryIntent = hasCategoryShoppingIntent(trimmed);
 
-  // Run all retrieval paths in parallel — semantic + both lexical paths.
+  // Run all retrieval paths in parallel — semantic + both lexical paths. The query embedding
+  // now aborts at the deadline, negative-caches a skip, and is dimension-guarded (P1-4/RC-04).
   const [categoryTagMatches, embeddingVector, keywordMatches] = await Promise.all([
     searchProductsByCatalogPhrases(tenantId, phrases, limit),
-    generateQueryEmbeddingWithTimeout(trimmed),
+    getOrComputeQueryEmbedding(trimmed, { tenantId }),
     keywords.length > 0
       ? searchProductsByDisjunctiveTerms(tenantId, keywords, limit)
       : Promise.resolve([] as Product[]),
   ]);
 
   let semanticCandidates: Product[] = [];
+  // Hysteresis band (P1-4): candidates in [threshold - band, threshold) join a SEPARATE
+  // low-weight `semantic_band` RRF source. With SIMILARITY_HYSTERESIS_BAND=0 (default) this is
+  // always empty → retrieved sets identical to the legacy `>= threshold` filter.
+  let semanticBandCandidates: Product[] = [];
   let semanticSkipped = false;
   if (embeddingVector) {
     try {
       const similar = await searchProductsBySimilarity(
         tenantId,
         embeddingVector,
-        limit,
+        // Fetch a little extra depth when the band is active so band candidates (which rank
+        // just below the top-N core matches) are not starved by the SQL LIMIT.
+        SIMILARITY_HYSTERESIS_BAND > 0 ? limit + SEMANTIC_BAND_EXTRA_DEPTH : limit,
         activeEmbeddingModel(),
       );
-      semanticCandidates = similar.filter((p) => p.similarity >= SIMILARITY_THRESHOLD);
+      const partitioned = partitionBySimilarityBand(
+        similar,
+        SIMILARITY_THRESHOLD,
+        SIMILARITY_HYSTERESIS_BAND,
+      );
+      semanticCandidates = partitioned.core;
+      semanticBandCandidates = partitioned.band;
     } catch {
       semanticSkipped = true;
+      // The embedding path skip (timeout/error/dim-mismatch) is already logged+counted inside
+      // getOrComputeQueryEmbedding; this counts the distinct similarity-query (DB) failure.
+      logSemanticSkipped('similarity_query_error', tenantId);
     }
   } else {
     semanticSkipped = true;
@@ -744,6 +710,12 @@ export async function matchProductsForCustomerMessage(
       ]
     : [
         { name: 'semantic', products: semanticCandidates, weight: 2.0 },
+        // Hysteresis-band source (P1-4): empty unless SIMILARITY_HYSTERESIS_BAND > 0. A lone
+        // band hit scores weight/(RRF_K+rank) below any core/category #1, so it never
+        // dominates — it only ranks with corroboration (the intended boundary stabiliser).
+        ...(semanticBandCandidates.length > 0
+          ? [{ name: 'semantic_band', products: semanticBandCandidates, weight: SEMANTIC_BAND_WEIGHT }]
+          : []),
         { name: 'category_tag', products: categoryTagMatches, weight: 1.5 },
         { name: 'phrase_direct', products: phraseDirect, weight: 1.2 },
         { name: 'keyword', products: keywordMatches, weight: 1.0 },
