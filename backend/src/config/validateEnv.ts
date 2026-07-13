@@ -1,3 +1,5 @@
+import { REDACT_PII } from '../utils/redact';
+
 const REQUIRED = [
   { key: 'DATABASE_URL', description: 'PostgreSQL connection string' },
   { key: 'JWT_SECRET', description: 'Signing secret for access tokens' },
@@ -114,6 +116,17 @@ export function validateRequiredEnv(): void {
     } else {
       warnings.push(msg);
     }
+  }
+
+  // P1-6 (SEC-5): redaction is ON by default and is the compliance boundary for customer PII in
+  // logs and durable telemetry. Disabling it re-exposes cleartext PII and must be a deliberate,
+  // compliance-owned decision — so surface it loudly at boot rather than silently.
+  if (!REDACT_PII) {
+    console.warn(
+      '[REDACT_PII] DISABLED — customer PII (names/phones/addresses/health context) will be ' +
+        'logged and stored in cleartext. This must be a deliberate, compliance-gated choice. ' +
+        'Unset REDACT_PII (or set it to true) to re-enable redaction.',
+    );
   }
 
   if (warnings.length > 0) {

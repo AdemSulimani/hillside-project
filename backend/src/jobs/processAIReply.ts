@@ -1,5 +1,6 @@
 ﻿import crypto from 'crypto';
 import pool from '../db/pool';
+import { logSafe, logSafeStructured } from '../utils/redact';
 import { redisConnection } from './redisConnection';
 import { findChannelById } from '../db/models/channel';
 import {
@@ -255,7 +256,7 @@ function resolveCustomerNameForOrder(args: {
   if (firstName && looksLikeAddressWord(firstName)) {
     console.info(
       '[resolveCustomerNameForOrder] Discarding intent-extracted name that looks like an address word',
-      { candidate: firstName },
+      { candidate: logSafe(firstName) },
     );
     firstName = null;
   }
@@ -3292,7 +3293,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         ? 'null'
         : JSON.stringify(qualityEval.flagging_rule_triggered);
     console.info(
-      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} score: ${qualityEval.quality_score} flagged: ${qualityFailing} rule: ${ruleDisplay} reasoning: ${logJsonStringOrNull(qualityEval.reason)}`,
+      `[QUALITY EVAL] tenantId: ${tenantId} conversationId: ${conversationId} score: ${qualityEval.quality_score} flagged: ${qualityFailing} rule: ${ruleDisplay} reasoning: ${logSafeStructured(logJsonStringOrNull(qualityEval.reason))}`,
     );
   }
 

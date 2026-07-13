@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import pool from '../pool';
 import type { ChannelType } from './channel';
+import { redactAlertDetails } from '../../utils/redact';
 
 export type AIAlertStatus = 'unread' | 'read' | 'resolved';
 
@@ -28,11 +29,15 @@ export async function createAIAlert(
   input: CreateAIAlertInput,
   client: PoolClient | typeof pool = pool,
 ): Promise<AIAlert> {
+  // P1-6 (SEC-5): `details` is durable telemetry — the sole choke point for the ~23 alert
+  // producers — so redact customer PII (order name/phone/address, raw questions, reply
+  // previews) before it is persisted. `redactAlertDetails` is a no-op when REDACT_PII is off.
+  const details = redactAlertDetails(input.details ?? null);
   const { rows } = await client.query<AIAlert>(
     `INSERT INTO ai_alerts (tenant_id, conversation_id, message_id, reason, details)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
-    [input.tenant_id, input.conversation_id, input.message_id, input.reason, input.details ?? null],
+    [input.tenant_id, input.conversation_id, input.message_id, input.reason, details],
   );
   return rows[0];
 }

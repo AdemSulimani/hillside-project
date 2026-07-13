@@ -84,6 +84,10 @@ jobs:
       JWT_SECRET: ${{ secrets.CI_JWT_SECRET || 'ci-jwt-secret' }}
       JWT_REFRESH_SECRET: ${{ secrets.CI_JWT_REFRESH_SECRET || 'ci-refresh-secret' }}
       OPENAI_API_KEY: ${{ secrets.CI_OPENAI_API_KEY || 'ci-placeholder-key' }}
+      # Required since P1-4: validateEnv fail-fasts at boot unless the embedding model is set
+      # to a 1536-dim model matching the products.embedding vector(1536) column. Without this
+      # the API exits(1) on startup and the health smoke never connects.
+      OPENAI_EMBEDDING_MODEL: text-embedding-3-small
       ENCRYPTION_KEY: ${{ secrets.CI_ENCRYPTION_KEY }}
       ADMIN_JWT_SECRET: ${{ secrets.CI_ADMIN_JWT_SECRET || 'ci-admin-secret' }}
     steps:
