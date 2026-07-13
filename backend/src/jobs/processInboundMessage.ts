@@ -32,7 +32,8 @@ import {
   setHumanOverrideHold,
   type MessageReplyToPayload,
 } from '../services/conversationService';
-import { wasSelfSentMessageEcho } from '../services/outboundEchoRegistry';
+import { lookupSelfSentMessageEcho } from '../services/outboundEchoRegistry';
+import { shouldClassifyEchoAsHuman } from '../services/echoDurableCorroboration';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { uploadImage } from '../services/cloudinaryService';
@@ -56,6 +57,26 @@ const PROFILE_LAST_ATTEMPT_METADATA_KEY = 'profile_last_attempt_at';
  * normally arrive within seconds; a few minutes is a safe upper bound.
  */
 const ECHO_DEDUP_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * P0-7 (RC-24): when true, a native IG/FB echo with no `app_id` (which the `isHumanAgentEcho`
+ * heuristic would treat as a human handoff) is corroborated against a recently-persisted
+ * outbound we sent before being classified as a human reply, and a self-send registry READ
+ * ERROR is logged distinctly. This stops the AI's own Instagram reply — on a self-send registry
+ * miss — from setting the sticky `human_replied` flag (which disqualifies the use-case fee), a
+ * 10-minute human hold, and a phantom `sent_by:'human'` row. Fails toward "not human".
+ * Defaults OFF: flag-off preserves the legacy app_id-only classification byte-for-byte. Flip
+ * per environment (staging first) per the remediation plan.
+ */
+const ECHO_DURABLE_CORROBORATION =
+  (process.env.ECHO_DURABLE_CORROBORATION ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * How far back the P0-7 human-branch corroboration looks for a matching outbound we sent.
+ * Deliberately tighter than `ECHO_DEDUP_WINDOW_MS` (5 min): echoes arrive within seconds, so a
+ * tight window shrinks the chance a genuine human reply coincidentally equals a recent outbound.
+ */
+const ECHO_HUMAN_CORROBORATION_WINDOW_MS = 60 * 1000;
 
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -710,7 +731,16 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     // handoff) and whose reply-with-image turns echo back BEFORE the AI reply job has persisted
     // its outbound row (so the `external_message_id` dedup upstream can't catch them yet). A
     // self-sent echo must NEVER set a human-override hold or flip the conversation to human-owned.
-    if (await wasSelfSentMessageEcho(normalized.externalMessageId)) {
+    const selfEchoLookup = await lookupSelfSentMessageEcho(normalized.externalMessageId);
+    if (ECHO_DURABLE_CORROBORATION && selfEchoLookup === 'error') {
+      // Surface the Redis failure that would otherwise silently let this echo fall through to
+      // the human-agent branch below; content corroboration there still guards the outcome.
+      console.warn('[inbound] self-send echo registry read errored; will corroborate by content', {
+        conversation_id: conversation.id,
+        external_message_id: normalized.externalMessageId,
+      });
+    }
+    if (selfEchoLookup === 'self') {
       const isImageEcho =
         permanentAttachmentUrls.length > 0 || resolvedInboundMessageType !== 'text';
       if (isImageEcho) {
@@ -800,6 +830,34 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
 
       socketService.emitNewMessage(channel.tenant_id, aiEcho);
       socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
+      return;
+    }
+
+    // P0-7 (RC-24): before recording a human handoff, corroborate this no-`app_id` echo against
+    // durable state. On Instagram the AI's own reply echoes back with no `app_id`, so the
+    // `isHumanAgentEcho` heuristic above always lands here; a content match against a recent
+    // outbound we sent proves the echo is ours and must NOT set `human_replied` / a hold / a
+    // phantom `sent_by:'human'` row. Flag OFF skips the query and always proceeds (byte-for-byte).
+    const contentMatchesRecentOutbound = ECHO_DURABLE_CORROBORATION
+      ? (await findRecentOutboundMessageByContent(
+          conversation.id,
+          channel.tenant_id,
+          normalized.content,
+          ECHO_HUMAN_CORROBORATION_WINDOW_MS,
+        )) != null
+      : false;
+
+    if (
+      !shouldClassifyEchoAsHuman({
+        durableCorroborationEnabled: ECHO_DURABLE_CORROBORATION,
+        contentMatchesRecentOutbound,
+      })
+    ) {
+      console.info('[inbound] Native echo corroborated as self-sent by content; not a human reply', {
+        conversation_id: conversation.id,
+        external_message_id: normalized.externalMessageId,
+        echo_app_id: normalized.echoAppId,
+      });
       return;
     }
 

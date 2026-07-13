@@ -43,15 +43,29 @@ export async function markSelfSentMessageEcho(
   }
 }
 
-/** True when the given echoed message id was sent by us (AI reply / auto-sent product image). */
-export async function wasSelfSentMessageEcho(
+/** Outcome of a self-send registry read, distinguishing a genuine miss from a Redis error. */
+export type SelfEchoLookup = 'self' | 'miss' | 'error';
+
+/**
+ * Read the self-send registry for an echoed message id.
+ *
+ * Unlike a bare boolean check, this distinguishes a genuine registry MISS (`'miss'`) from a
+ * Redis READ ERROR (`'error'`) so callers can surface the currently-invisible Redis failures
+ * that let the AI's own Instagram echo (which carries no `app_id`) be misclassified as a human
+ * agent reply (RC-24 / P0-7). Behaviour never branches on error-vs-miss — both mean "not a
+ * confirmed self-send" — but observability does.
+ *
+ * `'self'` means the id was one WE sent (AI reply / auto-sent product image) — a truthy Redis
+ * GET; `'miss'` covers an empty id or a falsy GET; `'error'` covers a Redis read failure.
+ */
+export async function lookupSelfSentMessageEcho(
   externalMessageId: string | null | undefined,
-): Promise<boolean> {
+): Promise<SelfEchoLookup> {
   const id = externalMessageId?.trim();
-  if (!id) return false;
+  if (!id) return 'miss';
   try {
-    return !!(await redisConnection.get(selfEchoKey(id)));
+    return (await redisConnection.get(selfEchoKey(id))) ? 'self' : 'miss';
   } catch {
-    return false;
+    return 'error';
   }
 }
