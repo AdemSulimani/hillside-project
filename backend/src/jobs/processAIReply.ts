@@ -114,6 +114,7 @@ import {
   shouldCountDeliveredReply,
   isOverDeliveredRateLimit,
   rateCountedMarkerKey,
+  RATE_LIMIT_DELIVERED_INCR_SCRIPT,
 } from '../services/rateLimitDeliveredCount';
 import { shouldAutoResumeRateLimitPause } from '../services/aiResumePolicy';
 import {
@@ -674,6 +675,25 @@ const SENSITIVE_PATH_FAIL_CLOSED =
   (process.env.SENSITIVE_PATH_FAIL_CLOSED ?? 'false').trim().toLowerCase() === 'true';
 
 /**
+ * TEST-ONLY fault injection for the P0-4 staging validation ("refund demand during an
+ * OpenAI blip"). Set to a sensitive-detector label — 'cancellation_refund' |
+ * 'wrong_product' | 'post_purchase' | 'order_info' | 'any' — and that detector throws
+ * before running, inside runSensitiveDetector's try, so the forced failure takes exactly
+ * the production error path (escalate under SENSITIVE_PATH_FAIL_CLOSED, warn+continue
+ * legacy otherwise). NEVER set in production; it is logged loudly at boot when armed and
+ * inert when unset.
+ */
+const TEST_FORCE_DETECTOR_ERROR = (process.env.TEST_FORCE_DETECTOR_ERROR ?? '')
+  .trim()
+  .toLowerCase();
+if (TEST_FORCE_DETECTOR_ERROR) {
+  console.warn(
+    '[ai.reply] TEST_FORCE_DETECTOR_ERROR is ARMED — sensitive detector(s) will deliberately throw',
+    { target: TEST_FORCE_DETECTOR_ERROR },
+  );
+}
+
+/**
  * P0-6 (RC-18): when ON, the per-conversation 25/h budget counts only real DELIVERED
  * replies. The pre-gate INCR (which charged every job attempt — retries, stale-skipped,
  * disabled-AI, and fairness/lock/human-hold reschedules — and so tripped the cap on
@@ -1216,32 +1236,10 @@ end
 return count
 `;
 
-// ---------------------------------------------------------------------------
-// Atomic "count this delivered reply once" script (P0-6, RC-18)
-//
-// KEYS[1] = counter (`ai_rate_limit:{conversationId}`)
-// KEYS[2] = per-inbound marker (`ai_rate_counted:{conversationId}:{inboundExternalId}`)
-// ARGV[1] = ttl seconds (3600)
-//
-// Sets the marker with NX so a retry of the SAME inbound (or a second send within one
-// job) finds it already set and no-ops — the budget is charged exactly once per delivered
-// inbound. The rolling-1h EXPIRE is applied only on the first real increment, preserving
-// the same window semantics as RATE_LIMIT_INCR_SCRIPT. Returns the resulting counter
-// value (or the current value on a no-op).
-// ---------------------------------------------------------------------------
-const RATE_LIMIT_DELIVERED_INCR_SCRIPT = `
-local counterKey = KEYS[1]
-local markerKey  = KEYS[2]
-local ttl        = tonumber(ARGV[1])
-if redis.call('SET', markerKey, '1', 'NX', 'EX', ttl) == false then
-  return tonumber(redis.call('GET', counterKey) or '0')
-end
-local count = redis.call('INCR', counterKey)
-if count == 1 then
-  redis.call('EXPIRE', counterKey, ttl)
-end
-return count
-`;
+// The atomic "count this delivered reply once" script (P0-6, RC-18) lives in
+// services/rateLimitDeliveredCount.ts alongside the other pure pieces, so the
+// integration suite can exercise it against a real Redis without importing this
+// module; countDeliveredReplyOnce below is its only production caller.
 
 /**
  * Charge the 25/h budget for a delivered reply exactly once (P0-6). Idempotent by the
@@ -1610,7 +1608,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     let alert: AIAlert | undefined;
     try {
       await client.query('BEGIN');
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'uncertain_answer_escalated');
       await setConversationHumanReplied(conversationId, tenantId, false, client);
       alert = await createAIAlert(
         {
@@ -1712,8 +1710,22 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // escalate to a human (holding message + alert + pause) and throw the sentinel, which the
   // umbrella catch turns into a clean return — never a sales reply. If the escalation itself
   // throws before sending, that error propagates (pre-send) so the umbrella re-throws/retries.
-  const runSensitiveDetector = async <T>(fn: () => Promise<T>): Promise<T> => {
+  //
+  // The `label` exists for the TEST_FORCE_DETECTOR_ERROR fault-injection hook: the staging
+  // validation for this fix ("refund demand during an OpenAI blip") needs a reproducible way
+  // to make a specific detector throw. The forced throw happens INSIDE the try so it takes
+  // exactly the production error path.
+  const runSensitiveDetector = async <T>(
+    label: 'cancellation_refund' | 'wrong_product' | 'post_purchase' | 'order_info',
+    fn: () => Promise<T>,
+  ): Promise<T> => {
     try {
+      if (
+        TEST_FORCE_DETECTOR_ERROR &&
+        (TEST_FORCE_DETECTOR_ERROR === label || TEST_FORCE_DETECTOR_ERROR === 'any')
+      ) {
+        throw new Error(`TEST_FORCE_DETECTOR_ERROR: forced ${label} detector failure`);
+      }
       return await fn();
     } catch (err) {
       if (decideSensitivePathAction('detector', SENSITIVE_PATH_FAIL_CLOSED) !== 'escalate') {
@@ -1726,7 +1738,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   if (inboundText) {
     try {
-      const cancellationRefundIntent = await runSensitiveDetector(() =>
+      const cancellationRefundIntent = await runSensitiveDetector('cancellation_refund', () =>
         detectCancellationOrRefundIntent(inboundText, recentMessages),
       );
       console.info(
@@ -1817,7 +1829,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           );
         }
 
-        await setConversationAiPaused(conversationId, tenantId, true);
+        await setConversationAiPaused(conversationId, tenantId, true, pool, cancellationRefundIntent.is_cancellation ? 'cancellation_request' : 'refund_request');
 
         for (const alert of alerts) {
           socketService.emitAIAlert(tenantId, {
@@ -1849,7 +1861,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         return;
       }
 
-      const wrongProductIntent = await runSensitiveDetector(() =>
+      const wrongProductIntent = await runSensitiveDetector('wrong_product', () =>
         detectWrongProductIntent(inboundText, recentMessages),
       );
       console.info(
@@ -1878,7 +1890,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let alert: AIAlert | undefined;
         try {
           await client.query('BEGIN');
-          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'post_purchase_support_request');
           await setConversationHumanReplied(conversationId, tenantId, false, client);
           alert = await createAIAlert(
             {
@@ -1969,7 +1981,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
       const postPurchaseSupportIntent =
         shouldCheckPostPurchaseSupport && !isLikelyNewOrderSignal
-          ? await runSensitiveDetector(() =>
+          ? await runSensitiveDetector('post_purchase', () =>
               detectPostPurchaseSupportIntent(inboundText, recentMessages),
             )
           : {
@@ -2058,6 +2070,22 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             });
           }
 
+          // P0-6 (RC-18): an ETA auto-reply is a delivered reply — charge the budget.
+          // This path does not pause the conversation, so without counting it a customer
+          // looping on "when will it arrive?" would get unlimited canned replies per hour
+          // (legacy attempt-counting capped them at 25).
+          if (
+            shouldCountDeliveredReply({
+              countDeliveredOnly: RATE_LIMIT_COUNT_DELIVERED_ONLY,
+              sendSucceeded: etaSendResult?.success === true,
+            })
+          ) {
+            await countDeliveredReplyOnce(
+              rateLimitKey,
+              rateCountedMarkerKey(conversationId, data.messageExternalId),
+            );
+          }
+
           await touchConversationLastMessageAt(conversationId);
           console.info(
             `[DELIVERY_ETA_AUTO_REPLY] tenantId: ${tenantId} conversationId: ${conversationId} delivery_time: ${configuredDeliveryTime}`,
@@ -2093,7 +2121,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let alert: AIAlert | undefined;
         try {
           await client.query('BEGIN');
-          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'post_purchase_support_request');
           await setConversationHumanReplied(conversationId, tenantId, false, client);
           alert = await createAIAlert(
             {
@@ -2167,7 +2195,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // must continue to generateReply so the data-confirmation message is sent and the order
       // creation logic at the tail of this function can fire.
       if (!isLikelyNewOrderSignal && !isLikelyOrderAffirmation) {
-      const orderInfoUpdateIntent = await runSensitiveDetector(() =>
+      const orderInfoUpdateIntent = await runSensitiveDetector('order_info', () =>
         detectOrderInfoUpdateIntent(inboundText, recentMessages),
       );
       console.info(
@@ -2283,6 +2311,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
               });
             }
 
+            // P0-6 (RC-18): the confirmation is a delivered reply and this path does not
+            // pause — count it so repeated order-info updates stay bounded by the 25/h cap.
+            if (
+              shouldCountDeliveredReply({
+                countDeliveredOnly: RATE_LIMIT_COUNT_DELIVERED_ONLY,
+                sendSucceeded: sendResult?.success === true,
+              })
+            ) {
+              await countDeliveredReplyOnce(
+                rateLimitKey,
+                rateCountedMarkerKey(conversationId, data.messageExternalId),
+              );
+            }
+
             console.info(`[ORDER_INFO_UPDATE] Updated order ${candidateOrder.id}`, {
               changedFields: Object.keys(fieldsToUpdate),
               tenantId,
@@ -2316,6 +2358,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         // to the pre-send window (sensitivePathOutboundSent === false) so a retry can
         // never double-send an ack that already went out (RC-20).
         throw err;
+      }
+      if (action === 'stop') {
+        // P0-4 (RC-19): an ack/holding reply for this inbound is already on the wire.
+        // Re-throwing would double-send it on retry (RC-20), and falling through would
+        // follow the sensitive ack with a normal sales reply — the exact fail-open this
+        // subsystem exists to prevent. End the job here; committed side effects stand.
+        console.error('[ai.reply] escalation path failed after an ack was sent — stopping (fail-closed)', {
+          conversationId,
+          tenantId,
+          err,
+        });
+        return;
       }
       console.warn('[ai.reply] escalation detection path failed, continuing normal flow', {
         conversationId,
@@ -2399,7 +2453,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let alert: AIAlert | undefined;
         try {
           await client.query('BEGIN');
-          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'usage_question_unanswered');
           await setConversationHumanReplied(conversationId, tenantId, false, client);
           alert = await createAIAlert(
             {
@@ -2453,7 +2507,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     let alert: AIAlert | undefined;
     try {
       await client.query('BEGIN');
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'usage_question_unanswered');
       await setConversationHumanReplied(conversationId, tenantId, false, client);
       alert = await createAIAlert(
         {
@@ -2521,7 +2575,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let alert: AIAlert | undefined;
         try {
           await client.query('BEGIN');
-          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'usage_question_unanswered');
           await setConversationHumanReplied(conversationId, tenantId, false, client);
           alert = await createAIAlert(
             {
@@ -2562,7 +2616,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     let alert: AIAlert | undefined;
     try {
       await client.query('BEGIN');
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'usage_question_unanswered');
       await setConversationHumanReplied(conversationId, tenantId, false, client);
       alert = await createAIAlert(
         {
@@ -2827,7 +2881,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let alert: AIAlert | undefined;
         try {
           await client.query('BEGIN');
-          await setConversationAiPaused(conversationId, tenantId, true, client);
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'product_question_unanswered');
           await setConversationHumanReplied(conversationId, tenantId, false, client);
           alert = await createAIAlert(
             {
@@ -2926,7 +2980,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       let alert: AIAlert | undefined;
       try {
         await client.query('BEGIN');
-        await setConversationAiPaused(conversationId, tenantId, true, client);
+        await setConversationAiPaused(conversationId, tenantId, true, client, 'usage_question_unanswered');
         await setConversationHumanReplied(conversationId, tenantId, false, client);
         alert = await createAIAlert(
           {
@@ -3765,7 +3819,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         },
         client,
       );
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'hallucinated_price');
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -3808,7 +3862,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         },
         client,
       );
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'hallucinated_product_name');
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -3852,7 +3906,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         },
         client,
       );
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, 'uncertain_answer_escalated');
       await setConversationHumanReplied(conversationId, tenantId, false, client);
       await client.query('COMMIT');
     } catch (err) {
@@ -3892,7 +3946,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         },
         client,
       );
-      await setConversationAiPaused(conversationId, tenantId, true, client);
+      await setConversationAiPaused(conversationId, tenantId, true, client, flagReason);
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -4205,6 +4259,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         await touchConversationLastMessageAt(conversationId);
         socketService.emitNewMessage(tenantId, clarifyMessage);
         socketService.emitConversationUpdated(tenantId, conversationId);
+        // P0-6 (RC-18): normally a no-op — the main reply already set this inbound's
+        // count-once marker — but when the main send failed and only this clarification
+        // was delivered, it charges the one budget unit the inbound is due.
+        if (
+          shouldCountDeliveredReply({
+            countDeliveredOnly: RATE_LIMIT_COUNT_DELIVERED_ONLY,
+            sendSucceeded: clarifySendResult?.success === true,
+          })
+        ) {
+          await countDeliveredReplyOnce(
+            rateLimitKey,
+            rateCountedMarkerKey(conversationId, data.messageExternalId),
+          );
+        }
         console.info('[ORDER_PRODUCT_CLARIFICATION_SENT]', {
           conversationId,
           tenantId,

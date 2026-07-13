@@ -36,6 +36,11 @@
  *     equals a recent (tight-window) outbound is suppressed. Mitigated by the tight
  *     corroboration window in the caller and full-message equality (not substring). Rated
  *     "vanishingly rare, low-harm"; the harm ordering favours shipping.
+ *  3. Echo-before-persist — corroboration is a single read of durable state; an echo
+ *     processed in the gap between the Send API returning and the outbound row being
+ *     persisted finds nothing to match. This only bites when the synchronous self-send
+ *     registry mark ALSO failed (a concurrent Redis failure), so it is a double-failure
+ *     residual, not a covered case. P1's `external_message_id` registry closes it.
  */
 
 /**
@@ -53,4 +58,17 @@ export function shouldClassifyEchoAsHuman(args: {
 }): boolean {
   if (!args.durableCorroborationEnabled) return true;
   return !args.contentMatchesRecentOutbound;
+}
+
+/**
+ * Whether an echo's content is usable for corroboration at all. The content lookup is
+ * NULL-safe (`IS NOT DISTINCT FROM`), so a NULL/empty-content echo (a pure image) would
+ * "match" any recent NULL-content outbound — e.g. an AI image echo persisted by the
+ * self-send path — and a GENUINE human image reply from the native app would then be
+ * suppressed (not classified human) AND dropped (the corroborated early-return persists
+ * nothing). Only a non-empty text body may corroborate; content-less echoes skip
+ * corroboration and classify by the legacy heuristic (human), which persists the row.
+ */
+export function canCorroborateEchoContent(content: string | null | undefined): boolean {
+  return typeof content === 'string' && content.trim().length > 0;
 }

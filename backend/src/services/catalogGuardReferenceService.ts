@@ -146,15 +146,24 @@ export function extractConfigGroundTruthPrices(
  */
 export async function getFullCatalogPriceSet(tenantId: string): Promise<CatalogPriceSet> {
   const cacheKey = catalogGuardPricesKey(tenantId);
-  const cached = await redisConnection.get(cacheKey);
-  if (cached) {
-    try {
-      const parsed = JSON.parse(cached) as CatalogPriceSet;
-      if (Array.isArray(parsed?.prices)) return parsed;
-    } catch {
-      // fall through to rebuild
+  // The cache is an optimization, not a dependency: a Redis outage must degrade to a
+  // direct DB read (guards stay armed), never disable full-catalog validation.
+  try {
+    const cached = await redisConnection.get(cacheKey);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as CatalogPriceSet;
+        if (Array.isArray(parsed?.prices)) return parsed;
+      } catch {
+        // fall through to rebuild
+      }
+      await redisConnection.del(cacheKey);
     }
-    await redisConnection.del(cacheKey);
+  } catch (err) {
+    console.warn('[catalogGuardReference] Redis price-set cache read failed — reading DB directly', {
+      tenantId,
+      err,
+    });
   }
 
   const [rows, config, blocks] = await Promise.all([
@@ -170,26 +179,38 @@ export async function getFullCatalogPriceSet(tenantId: string): Promise<CatalogP
   const merged = new Set<number>([...set.prices, ...configPrices]);
   const result: CatalogPriceSet = { prices: [...merged] };
 
-  await redisConnection.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL_SECONDS);
+  await redisConnection
+    .set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL_SECONDS)
+    .catch(() => undefined);
   return result;
 }
 
 /** Every active product name for the tenant, Redis-cached. */
 export async function getFullCatalogNameIndex(tenantId: string): Promise<string[]> {
   const cacheKey = catalogGuardNamesKey(tenantId);
-  const cached = await redisConnection.get(cacheKey);
-  if (cached) {
-    try {
-      const parsed = JSON.parse(cached) as string[];
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      // fall through to rebuild
+  // Same degradation contract as getFullCatalogPriceSet: Redis down → direct DB read.
+  try {
+    const cached = await redisConnection.get(cacheKey);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as string[];
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        // fall through to rebuild
+      }
+      await redisConnection.del(cacheKey);
     }
-    await redisConnection.del(cacheKey);
+  } catch (err) {
+    console.warn('[catalogGuardReference] Redis name-index cache read failed — reading DB directly', {
+      tenantId,
+      err,
+    });
   }
 
   const names = await listActiveCatalogNamesForTenant(tenantId);
-  await redisConnection.set(cacheKey, JSON.stringify(names), 'EX', CACHE_TTL_SECONDS);
+  await redisConnection
+    .set(cacheKey, JSON.stringify(names), 'EX', CACHE_TTL_SECONDS)
+    .catch(() => undefined);
   return names;
 }
 

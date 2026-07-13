@@ -297,6 +297,41 @@ describe('EV corpus replay — the three dev hallucination alerts stay green', (
 });
 
 // ---------------------------------------------------------------------------
+// Multi-currency pin — the full-catalog set is currency-BLIND by design
+// ---------------------------------------------------------------------------
+
+describe('multi-currency (LEK/ALL) — pinned behaviour of the currency-blind set', () => {
+  // Catalogs are EUR-denominated and the AI is prompted with EUR catalog facts, so
+  // replies quote EUR. The guard matches NUMERIC values only (no cross-currency
+  // conversion — documented in filterHallucinatedPrices). These tests pin both sides
+  // of that contract so a future currency feature can't silently change it.
+  const fullCatalogSet = buildPriceSetFromCatalogRows([
+    { price: '18.00', discounted_price: null },
+    { price: '1800.00', discounted_price: null }, // a genuinely 1800-valued catalog row
+  ]);
+
+  it('a LEK-stated price is matched by numeric value, not currency', () => {
+    // 1800 LEK passes ONLY because some catalog value equals 1800 — the guard does not
+    // know 1800 LEK ≈ €18.
+    assert.deepEqual(filterHallucinatedPrices('Çmimi është 1800 LEK.', fullCatalogSet), []);
+  });
+
+  it('a converted-currency restatement of a EUR price flags (no cross-currency tolerance)', () => {
+    // €18.00 exists, but "1750 LEK" (a plausible conversion) matches no numeric catalog
+    // value → flags. This is the known false-positive class if a tenant's AI ever quotes
+    // LEK conversions; catalogs/replies must stay EUR-denominated until the guard learns
+    // currency conversion.
+    const flagged = filterHallucinatedPrices('Çmimi është 1750 LEK.', fullCatalogSet);
+    assert.equal(flagged.length, 1);
+    assert.equal(flagged[0].value, 1750);
+  });
+
+  it('ALL prefix notation is extracted and matched the same way', () => {
+    assert.deepEqual(filterHallucinatedPrices('Kushton ALL 1800.', fullCatalogSet), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PROPERTY: catalog facts never flag, regardless of the retrieval window
 // ---------------------------------------------------------------------------
 

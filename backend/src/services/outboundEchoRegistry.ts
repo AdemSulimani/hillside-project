@@ -24,20 +24,31 @@ import { redisConnection } from '../jobs/redisConnection';
 
 // Meta echoes arrive within seconds; a few minutes is a safe upper bound that also matches the
 // inbound handler's content-based echo dedup window.
-const SELF_ECHO_TTL_SECONDS = 10 * 60;
+export const SELF_ECHO_TTL_SECONDS = 10 * 60;
 
-function selfEchoKey(externalMessageId: string): string {
+export function selfEchoKey(externalMessageId: string): string {
   return `self_send_echo:${externalMessageId}`;
+}
+
+/**
+ * The minimal Redis surface the registry uses. Injectable (defaulting to the shared
+ * connection) so unit tests can stub the three outcomes — hit, miss, throw — without a
+ * live Redis, and the integration suite can run against its own client.
+ */
+export interface SelfEchoRedisClient {
+  set(key: string, value: string, expiryMode: 'EX', ttlSeconds: number): Promise<unknown>;
+  get(key: string): Promise<string | null>;
 }
 
 /** Record a message id our Send API call just returned, so its later echo is recognised as ours. */
 export async function markSelfSentMessageEcho(
   externalMessageId: string | null | undefined,
+  client: SelfEchoRedisClient = redisConnection,
 ): Promise<void> {
   const id = externalMessageId?.trim();
   if (!id) return;
   try {
-    await redisConnection.set(selfEchoKey(id), '1', 'EX', SELF_ECHO_TTL_SECONDS);
+    await client.set(selfEchoKey(id), '1', 'EX', SELF_ECHO_TTL_SECONDS);
   } catch {
     // Best-effort only: on a Redis hiccup we fall back to the existing DB-based echo dedup.
   }
@@ -60,11 +71,12 @@ export type SelfEchoLookup = 'self' | 'miss' | 'error';
  */
 export async function lookupSelfSentMessageEcho(
   externalMessageId: string | null | undefined,
+  client: SelfEchoRedisClient = redisConnection,
 ): Promise<SelfEchoLookup> {
   const id = externalMessageId?.trim();
   if (!id) return 'miss';
   try {
-    return (await redisConnection.get(selfEchoKey(id))) ? 'self' : 'miss';
+    return (await client.get(selfEchoKey(id))) ? 'self' : 'miss';
   } catch {
     return 'error';
   }

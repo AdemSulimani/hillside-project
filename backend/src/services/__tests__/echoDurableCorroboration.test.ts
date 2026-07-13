@@ -20,7 +20,10 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldClassifyEchoAsHuman } from '../echoDurableCorroboration';
+import {
+  canCorroborateEchoContent,
+  shouldClassifyEchoAsHuman,
+} from '../echoDurableCorroboration';
 
 // ---------------------------------------------------------------------------
 // flag OFF — legacy byte-for-byte: an app_id-less native echo is always human
@@ -99,4 +102,30 @@ describe('shouldClassifyEchoAsHuman — full truth table', () => {
       );
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// canCorroborateEchoContent — content-less echoes must never corroborate.
+// The lookup is NULL-safe (IS NOT DISTINCT FROM), so a NULL-content echo (a pure
+// image) would "match" any recent NULL-content outbound (e.g. an AI image echo
+// row) and a GENUINE human image reply would be suppressed AND dropped.
+// ---------------------------------------------------------------------------
+
+describe('canCorroborateEchoContent', () => {
+  it('allows corroboration for a non-empty text body', () => {
+    assert.equal(canCorroborateEchoContent('Faleminderit! Porosia u konfirmua.'), true);
+  });
+
+  it('rejects NULL content (pure image echo — would match any NULL-content outbound)', () => {
+    assert.equal(canCorroborateEchoContent(null), false);
+  });
+
+  it('rejects undefined content', () => {
+    assert.equal(canCorroborateEchoContent(undefined), false);
+  });
+
+  it('rejects empty and whitespace-only content', () => {
+    assert.equal(canCorroborateEchoContent(''), false);
+    assert.equal(canCorroborateEchoContent('   \n\t '), false);
+  });
 });

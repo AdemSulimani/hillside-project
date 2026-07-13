@@ -280,9 +280,12 @@ export interface PauseInvariantViolation {
 /**
  * P0-5 (RC-14) part 4 — the auto-resume invariant, as a query. Returns conversations that
  * are still AI-paused (via an AUTOMATED pause, i.e. ai_paused_at is stamped — manual
- * toggles leave it NULL) with an inbound message NEWER than the pause and no OPEN sensitive
- * alert: exactly the permanent-silence dead-ends auto-resume is meant to eliminate. Read
- * only — the monitor logs these; it never resumes.
+ * toggles leave it NULL) with an inbound message NEWER than the pause and no OPEN alert
+ * of ANY kind: exactly the permanent-silence dead-ends auto-resume is meant to eliminate.
+ * A pause with an open NON-sensitive alert awaiting normal human resolution is a
+ * by-design pending state (part 2 resumes it at resolve time), not a violation —
+ * excluding only sensitive alerts would flood the monitor with pending escalations and
+ * bury the real dead-ends. Read only — the monitor logs these; it never resumes.
  */
 export async function findPauseInvariantViolations(
   limit = 500,
@@ -304,11 +307,6 @@ export async function findPauseInvariantViolations(
            WHERE a.conversation_id = c.id
              AND a.tenant_id = c.tenant_id
              AND a.status IN ('unread', 'read')
-             AND a.reason IN (
-               'cancellation_request',
-               'refund_request',
-               'post_purchase_support_request'
-             )
         )
       ORDER BY c.ai_paused_at ASC
       LIMIT $1`,

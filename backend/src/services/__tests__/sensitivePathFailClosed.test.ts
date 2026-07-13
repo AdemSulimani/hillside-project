@@ -12,8 +12,9 @@
  *  - a SENSITIVE detector throw → ESCALATE (holding message + alert + pause), never a
  *    sales reply;
  *  - any other PRE-SEND throw → RETRY (re-throw so BullMQ retries);
- *  - a POST-SEND throw → CONTINUE (never re-throw — a retry would double-send the
- *    already-delivered reply, RC-20).
+ *  - a POST-SEND throw → STOP (never re-throw — a retry would double-send the
+ *    already-delivered ack, RC-20 — and never fall through to generateReply, or the
+ *    sensitive ack would be followed by a normal sales reply, RC-19 by another door).
  *
  * Flag OFF must be byte-for-byte legacy: every failure kind returns CONTINUE (the
  * umbrella warn + fall-through to a normal reply).
@@ -58,8 +59,8 @@ describe('decideSensitivePathAction — flag on (fail closed)', () => {
     assert.equal(decideSensitivePathAction('pre_send', true), 'retry');
   });
 
-  it('does NOT retry a POST-SEND error — a retry would double-send the reply (RC-20)', () => {
-    assert.equal(decideSensitivePathAction('post_send', true), 'continue');
+  it('STOPS on a POST-SEND error — no retry (double-send, RC-20) and no fall-through (sales reply after a sensitive ack, RC-19)', () => {
+    assert.equal(decideSensitivePathAction('post_send', true), 'stop');
   });
 });
 
@@ -74,7 +75,7 @@ describe('decideSensitivePathAction — full truth table', () => {
     ['post_send', false, 'continue'],
     ['detector', true, 'escalate'],
     ['pre_send', true, 'retry'],
-    ['post_send', true, 'continue'],
+    ['post_send', true, 'stop'],
   ];
 
   for (const [kind, failClosed, expected] of cases) {
@@ -88,6 +89,12 @@ describe('decideSensitivePathAction — full truth table', () => {
     // post-send failure must never map to a retry regardless of the flag.
     assert.notEqual(decideSensitivePathAction('post_send', true), 'retry');
     assert.notEqual(decideSensitivePathAction('post_send', false), 'retry');
+  });
+
+  it('never falls through to a sales reply after a delivered sensitive ack when the flag is on', () => {
+    // The H2 fix: post_send under fail-closed must STOP the job, not continue into
+    // generateReply — a refund ack followed by a sales pitch is the exact RC-19 outcome.
+    assert.notEqual(decideSensitivePathAction('post_send', true), 'continue');
   });
 });
 

@@ -61,6 +61,31 @@ export function shouldResumeOnResolve(
 }
 
 /**
+ * Part 2b — conversation-state guard for a DEFAULT (omitted `resume_ai`) resume.
+ *
+ * `shouldResumeOnResolve` only sees the resolved ALERT's reason; this predicate guards
+ * the decision with the CONVERSATION's own pause state so a default Close can never:
+ *  - un-pause a MANUAL pause (`toggleAiPaused` deliberately leaves `ai_paused_at` NULL
+ *    so a human-owned pause is distinguishable — it must only resume explicitly);
+ *  - un-pause a legacy pre-metadata pause (also `ai_paused_at` NULL — require explicit);
+ *  - resume past a still-OPEN sensitive alert on the same conversation (a human may be
+ *    mid-refund/cancellation even though the alert being closed is non-sensitive) —
+ *    mirroring the `hasOpenSensitiveAlert` conjunct of the rate-limit auto-expiry.
+ *
+ * An EXPLICIT `resume_ai:true` bypasses this guard entirely (legacy behaviour: the
+ * human's explicit decision always wins). Not-paused conversations return false so a
+ * default resolve never issues a no-op resume write (which would clear an active
+ * `human_override_until` as a side effect).
+ */
+export function canDefaultResumeConversation(args: {
+  aiPaused: boolean;
+  aiPausedAt: Date | null;
+  hasOpenSensitiveAlert: boolean;
+}): boolean {
+  return args.aiPaused && args.aiPausedAt != null && !args.hasOpenSensitiveAlert;
+}
+
+/**
  * Part 3 — should a new inbound clear a `rate_limit_exceeded` pause?
  *
  * All conjuncts must hold:

@@ -61,3 +61,34 @@ export function isOverDeliveredRateLimit(currentCount: number, maxPerHour: numbe
 export function rateCountedMarkerKey(conversationId: string, inboundExternalId: string): string {
   return `ai_rate_counted:${conversationId}:${inboundExternalId}`;
 }
+
+/**
+ * Atomic "count this delivered reply once" script.
+ *
+ * KEYS[1] = counter (`ai_rate_limit:{conversationId}`)
+ * KEYS[2] = per-inbound marker (`ai_rate_counted:{conversationId}:{inboundExternalId}`)
+ * ARGV[1] = ttl seconds (3600)
+ *
+ * Sets the marker with NX so a retry of the SAME inbound (or a second send within one
+ * job) finds it already set and no-ops — the budget is charged exactly once per delivered
+ * inbound. The rolling-1h EXPIRE is applied only on the first real increment, preserving
+ * the same window semantics as the legacy pre-gate INCR script. Returns the resulting
+ * counter value (or the current value on a no-op).
+ *
+ * Lives here (not in processAIReply.ts, whose `countDeliveredReplyOnce` evals it) so the
+ * integration suite can exercise the script against a real Redis without importing the
+ * whole pipeline — see `src/__integration__/rateLimitDeliveredCountLua.integration.test.ts`.
+ */
+export const RATE_LIMIT_DELIVERED_INCR_SCRIPT = `
+local counterKey = KEYS[1]
+local markerKey  = KEYS[2]
+local ttl        = tonumber(ARGV[1])
+if redis.call('SET', markerKey, '1', 'NX', 'EX', ttl) == false then
+  return tonumber(redis.call('GET', counterKey) or '0')
+end
+local count = redis.call('INCR', counterKey)
+if count == 1 then
+  redis.call('EXPIRE', counterKey, ttl)
+end
+return count
+`;
