@@ -68,6 +68,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Give the graceful shutdown (server.ts) time to drain in-flight BullMQ jobs before Docker
+    # SIGKILLs the container. Must exceed SHUTDOWN_TIMEOUT_MS (default 25s) — otherwise Docker's
+    # default 10s grace kills mid-job, stalling AI replies on every deploy (P1-2 / audit C-88).
+    stop_grace_period: 30s
     ports:
       - "8000:8000"
     environment:

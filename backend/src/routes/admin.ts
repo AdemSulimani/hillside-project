@@ -18,6 +18,8 @@ import {
   adminUseCaseIdParamsSchema,
   adminUseCaseBillingStatusPatchBodySchema,
   adminMarkUseCasePeriodBodySchema,
+  adminDeadLetterListQuerySchema,
+  adminDeadLetterIdParamsSchema,
 } from '../validators/admin';
 import {
   adminAiTestBodySchema,
@@ -35,6 +37,7 @@ import * as adminTenantController from '../controllers/adminTenantController';
 import * as adminAuthController from '../controllers/adminAuthController';
 import * as adminCommissionController from '../controllers/adminCommissionController';
 import * as adminAiController from '../controllers/adminAiController';
+import * as adminDeadLetterController from '../controllers/adminDeadLetterController';
 
 const router = Router();
 
@@ -258,6 +261,18 @@ ownerRoutes.patch(
   validateParams(adminCatalogBlockIdParamsSchema),
   validateBody(adminUpdateCatalogBlockSchema),
   adminAiController.updateCatalogBlock,
+);
+
+// P1-2: dead-letter operator dashboard + guarded replay.
+ownerRoutes.get(
+  '/dead-letter',
+  validateQuery(adminDeadLetterListQuerySchema),
+  adminDeadLetterController.list,
+);
+ownerRoutes.post(
+  '/dead-letter/:id/replay',
+  validateParams(adminDeadLetterIdParamsSchema),
+  adminDeadLetterController.replay,
 );
 
 router.use(ownerRoutes);

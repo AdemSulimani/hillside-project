@@ -108,3 +108,17 @@ export const adminMarkUseCasePeriodBodySchema = z.object({
 });
 
 export type AdminMarkUseCasePeriodBody = z.infer<typeof adminMarkUseCasePeriodBodySchema>;
+
+// P1-2: dead-letter operator dashboard + replay.
+export const adminDeadLetterListQuerySchema = z.object({
+  status: z.enum(['new', 'replayed', 'ignored']).optional(),
+  queue: z.enum(['webhook', 'ai', 'notifications', 'finetuning', 'default']).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
+export type AdminDeadLetterListQuery = z.infer<typeof adminDeadLetterListQuerySchema>;
+
+export const adminDeadLetterIdParamsSchema = z.object({
+  id: z.string().regex(/^\d+$/, 'Invalid dead-letter ID'),
+});
