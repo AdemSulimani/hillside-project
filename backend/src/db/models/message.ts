@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import pool from '../pool';
 
 export type MessageDirection = 'inbound' | 'outbound';
@@ -298,6 +299,24 @@ export async function findMessageIdByExternalMessageId(
 }
 
 /**
+ * Tenant-scoped id-only lookup for inbound deduplication (P1-1 / RC-20). Reads against the
+ * scoped `idx_messages_tenant_external` index rather than the global one, so two tenants can
+ * legitimately carry the same channel `external_message_id` (closes the C-114 cross-tenant
+ * dedupe leak). Used when `MESSAGES_SCOPED_UNIQUE_READ` is on; the global variant above is the
+ * legacy default.
+ */
+export async function findMessageIdByTenantAndExternalMessageId(
+  tenantId: string,
+  externalMessageId: string,
+): Promise<string | null> {
+  const { rows } = await pool.query<{ id: string }>(
+    'SELECT id FROM messages WHERE tenant_id = $1 AND external_message_id = $2 LIMIT 1',
+    [tenantId, externalMessageId],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/**
  * Latest `limit` messages for the conversation, oldest-first (for AI / intent context).
  * Uses most recent window, not the earliest rows in the thread.
  */
@@ -344,6 +363,64 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
   );
 
   return mapMessageRow(rows[0]);
+}
+
+/**
+ * Transactional, idempotent message insert (P1-1 / RC-20 & RC-21). Runs on a caller-supplied
+ * client so the insert can be atomic with an outbox row (inbound) or with the staging flip +
+ * side-effect outbox rows (outbound). `ON CONFLICT (tenant_id, external_message_id) DO NOTHING`
+ * makes a BullMQ retry no-op instead of dead-lettering on the unique constraint; when the
+ * conflict fires the existing row is SELECTed back so the caller always gets the delivered row.
+ *
+ * Requires the scoped `idx_messages_tenant_external` index (migration 071) as the conflict
+ * target — behaviour is only exercised behind the P1-1 flags, which land after 071.
+ */
+export async function createMessageTx(
+  client: PoolClient,
+  input: CreateMessageInput & { send_status?: string | null; send_error?: string | null },
+): Promise<Message> {
+  const values = [
+    input.tenant_id,
+    input.conversation_id,
+    input.external_message_id,
+    input.direction,
+    input.type,
+    input.content ?? null,
+    JSON.stringify(input.attachment_urls ?? []),
+    input.sent_by,
+    input.quality_score ?? null,
+    input.flagged ?? false,
+    input.flag_reason ?? null,
+    JSON.stringify(coerceProductIds(input.product_ids)),
+    input.send_status ?? null,
+    input.send_error ?? null,
+  ];
+  const inserted = await client.query<Message>(
+    `INSERT INTO messages (
+      tenant_id, conversation_id, external_message_id, direction, type, content, attachment_urls, sent_by,
+      quality_score, flagged, flag_reason, product_ids, send_status, send_error
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, COALESCE($10, false), $11, $12::jsonb, $13, $14)
+    ON CONFLICT (tenant_id, external_message_id) DO NOTHING
+    RETURNING *`,
+    values,
+  );
+  if (inserted.rows[0]) {
+    return mapMessageRow(inserted.rows[0]);
+  }
+  // Conflict: the row already exists (a prior attempt persisted it). Return it so the caller's
+  // flip stays idempotent.
+  const existing = await client.query<Message>(
+    'SELECT * FROM messages WHERE tenant_id = $1 AND external_message_id = $2 LIMIT 1',
+    [input.tenant_id, input.external_message_id],
+  );
+  if (!existing.rows[0]) {
+    // Should not happen (DO NOTHING implies a conflicting row exists), but never silently
+    // return a phantom — surface it so the transaction rolls back and retries.
+    throw new Error(
+      `createMessageTx: conflict on (tenant_id, external_message_id) but no existing row found for ${input.external_message_id}`,
+    );
+  }
+  return mapMessageRow(existing.rows[0]);
 }
 
 export async function updateMessageReplyResolved(

@@ -1,0 +1,22 @@
+-- P1-1 (RC-20): add a tenant-scoped uniqueness index on messages.external_message_id ALONGSIDE
+-- the existing global UNIQUE (012_create_messages.sql:5 → messages_external_message_id_key).
+--
+-- The global UNIQUE is what dead-letters a delivered FB/IG/Viber reply on retry (the re-INSERT
+-- of the real graph id collides) and also leaks dedupe across tenants (C-114). The scoped index
+-- lets the outbound flip use ON CONFLICT (tenant_id, external_message_id) DO NOTHING so a retry
+-- no-ops instead of erroring, and lets inbound dedupe become tenant-scoped.
+--
+-- Scope on tenant_id (NOT NULL on messages) rather than channel_id: messages has no channel_id
+-- column, and conversations/contacts survive channel disconnect (channel_id → NULL), so tenant_id
+-- is the stable, always-present scope.
+--
+-- This migration only ADDS the scoped index. Dropping the global UNIQUE is P1-1 migration step 5,
+-- a separate later PR after staging soak (it is destructive and must not run until the scoped
+-- path has been validated in production).
+--
+-- NOTE: created WITHOUT CONCURRENTLY because the migration runner wraps each file in a single
+-- transaction (db/migrate.ts) and CREATE INDEX CONCURRENTLY cannot run inside one. The messages
+-- table is small enough at current scale that the brief lock is acceptable; a concurrent build
+-- can be done out-of-band before enabling MESSAGES_SCOPED_UNIQUE_READ on a large deployment.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_tenant_external
+  ON messages (tenant_id, external_message_id);
