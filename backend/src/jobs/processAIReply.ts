@@ -126,6 +126,7 @@ import {
 import { createFeedbackLog } from '../db/models/feedbackLog';
 import { detect } from '../services/intentDetectionService';
 import { sendMessage, sendImageMessage } from '../services/channelSenderService';
+import { stageAndSend, isStageBeforeSendEnabled } from '../services/stageAndSend';
 import { socketService } from '../services/socketService';
 import { logEvent } from '../services/analyticsService';
 import { getHumanHoldMinutes } from '../services/conversationService';
@@ -3581,10 +3582,123 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // ---- End product image request handling --------------------------------
 
   const contact = await findContactById(conversation.contact_id);
+
+  // When the turn was replaced by a generic holding/escalation message (knowledge gap, price or
+  // product-name hallucination), the customer was NOT shown these products, so their ids must not
+  // be persisted (a later follow-up would silently reuse products never presented). Computed here
+  // so the staged and legacy persist paths agree.
+  const replyWasHoldingOrEscalation =
+    knowledgeGapEscalated ||
+    priceHallucinationEscalated ||
+    productNameHallucinationEscalated ||
+    uncertainAnswerEscalated;
+  const persistedProductIds = replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id);
+
+  // Product image send (idempotent via the ai_img_sent marker). Extracted so both the staged
+  // (P1-1) and legacy reply paths deliver images identically.
+  const sendProductImagesForReply = async (): Promise<void> => {
+    const imgIdemKey = `ai_img_sent:${conversationId}:${data.messageExternalId}`;
+    const imagesAlreadySent =
+      productsToSendImages.length > 0
+        ? !!(await redisConnection.get(imgIdemKey).catch(() => null))
+        : false;
+    if (imagesAlreadySent) {
+      console.warn('[ai.reply] Product image(s) already delivered on a prior attempt — skipping duplicate image send', {
+        conversationId,
+        scheduledFor: data.messageExternalId,
+      });
+      return;
+    }
+    if (productsToSendImages.length > 0 && contact) {
+      let allImagesSent = true;
+      for (const imageProduct of productsToSendImages) {
+        const imageUrl = imageProduct.image_urls[0];
+        if (!imageUrl) continue;
+        try {
+          const imageResult = await sendImageMessage(channel, contact.external_id, imageUrl);
+          if (imageResult.success) {
+            await markSelfSentMessageEcho(imageResult.graphMessageId);
+            console.info('[ai.reply] Product image sent', {
+              conversationId,
+              tenantId,
+              productId: imageProduct.id,
+              productName: imageProduct.name,
+            });
+          } else {
+            allImagesSent = false;
+            console.error('[ai.reply] Product image send failed', {
+              conversationId,
+              tenantId,
+              productId: imageProduct.id,
+              error: imageResult.error,
+            });
+          }
+        } catch (imgErr) {
+          allImagesSent = false;
+          console.error('[ai.reply] Product image send threw unexpectedly', {
+            conversationId,
+            tenantId,
+            productId: imageProduct.id,
+            error: imgErr instanceof Error ? imgErr.message : String(imgErr),
+          });
+        }
+      }
+      if (allImagesSent) {
+        await redisConnection.set(imgIdemKey, '1', 'EX', 3600).catch(() => undefined);
+      }
+    }
+  };
+
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
+  let outboundMessage: Message;
+  let alreadySent = false;
 
+  // ---- P1-1 (RC-20): durable stage-before-send when enabled for this channel ----
+  const stageEnabled = isStageBeforeSendEnabled(channel.type);
+  if (stageEnabled) {
+    const staged = await stageAndSend({
+      tenantId,
+      conversationId,
+      channelType: channel.type,
+      logicalInboundExternalId: data.messageExternalId,
+      replySlot: 'main',
+      replyText: finalReplyText,
+      qualityScore,
+      flagged: qualityFailing,
+      flagReason,
+      productIds: persistedProductIds,
+      guardVerdicts: {
+        knowledgeGapEscalated,
+        priceHallucinationEscalated,
+        productNameHallucinationEscalated,
+        uncertainAnswerEscalated,
+      },
+      send: (text) =>
+        contact
+          ? sendMessage(channel, contact.external_id, text)
+          : Promise.resolve({ success: false, error: 'Contact not found for conversation' }),
+    });
+    if (!staged.wasFirstDelivery) {
+      // Retry of an already-delivered reply: the message row and every side-effect (rate count,
+      // alerts, analytics, use-case enqueue, draft order) committed on the first attempt. Re-emit
+      // the socket best-effort and stop — re-running the side-effects would duplicate them.
+      if (staged.outboundMessage) {
+        socketService.emitNewMessage(tenantId, staged.outboundMessage);
+        socketService.emitConversationUpdated(tenantId, conversationId);
+      }
+      console.info('[ai.reply] Reply already delivered on a prior attempt — skipping duplicate side-effects', {
+        conversationId,
+        scheduledFor: data.messageExternalId,
+      });
+      return;
+    }
+    outboundMessage = staged.outboundMessage!;
+    sendResult = staged.sendResult ?? null;
+    finalReplyText = staged.replyText;
+    await sendProductImagesForReply();
+  } else {
   // ---- Idempotent send guard ----------------------------------------------
   // If the channel send on a PRIOR attempt succeeded but a later step (e.g.
   // persisting the outbound message) failed, BullMQ retries the whole job. This
@@ -3594,7 +3708,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // so the conversation record self-heals.
   const sendIdemKey = `ai_send_done:${conversationId}:${data.messageExternalId}`;
   const priorSendMarker = await redisConnection.get(sendIdemKey).catch(() => null);
-  const alreadySent = !!priorSendMarker;
+  alreadySent = !!priorSendMarker;
   const priorGraphMessageId =
     priorSendMarker && priorSendMarker !== '1' ? priorSendMarker : null;
 
@@ -3644,103 +3758,29 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     });
   }
 
-  // Send product image messages immediately after the confirming text.
-  // Each image is sent as a separate attachment message so the customer sees
-  // the text ("Here is a photo of…") followed by the image — standard chat UX.
-  // Image sends run independently of the text send result: if the text failed
-  // (e.g. transient network error) the image may still succeed.
-  //
-  // Idempotency: the most common retry trigger is a failure AFTER the sends
-  // succeeded (e.g. persisting the outbound row throws), which re-runs the whole
-  // job. Without a guard the customer would receive the product image(s) again on
-  // every retry. We record a marker only once ALL images for this inbound message
-  // have been delivered, so a retry skips the re-send in that case while a genuine
-  // partial/failed send still re-attempts delivery.
-  const imgIdemKey = `ai_img_sent:${conversationId}:${data.messageExternalId}`;
-  const imagesAlreadySent =
-    productsToSendImages.length > 0
-      ? !!(await redisConnection.get(imgIdemKey).catch(() => null))
-      : false;
+    // Send product image messages immediately after the confirming text (idempotent via marker).
+    await sendProductImagesForReply();
 
-  if (imagesAlreadySent) {
-    console.warn('[ai.reply] Product image(s) already delivered on a prior attempt — skipping duplicate image send', {
-      conversationId,
-      scheduledFor: data.messageExternalId,
+    outboundMessage = await createMessage({
+      tenant_id: tenantId,
+      conversation_id: conversationId,
+      external_message_id:
+        sendResult?.graphMessageId ?? priorGraphMessageId ?? `ai_${crypto.randomUUID()}`,
+      direction: 'outbound',
+      type: 'text',
+      content: finalReplyText,
+      sent_by: 'ai',
+      quality_score: qualityScore,
+      flagged: qualityFailing,
+      flag_reason: flagReason,
+      // Persist the products this reply identified so follow-up turns ("what are the
+      // prices?", "what flavors?", "are these in stock?") can deterministically reuse
+      // them instead of re-running a fragile text lookup that may fail and wrongly claim
+      // the products are not in the catalog.
+      product_ids: persistedProductIds,
     });
-  } else if (productsToSendImages.length > 0 && contact) {
-    let allImagesSent = true;
-    for (const imageProduct of productsToSendImages) {
-      const imageUrl = imageProduct.image_urls[0];
-      if (!imageUrl) continue;
-      try {
-        const imageResult = await sendImageMessage(channel, contact.external_id, imageUrl);
-        if (imageResult.success) {
-          // Register the image send id so its Meta echo is recognised as ours (auto-sent
-          // images are not persisted as an outbound row here, so the inbound handler has no
-          // DB row to match the echo against and would otherwise treat it as a human reply).
-          await markSelfSentMessageEcho(imageResult.graphMessageId);
-          console.info('[ai.reply] Product image sent', {
-            conversationId,
-            tenantId,
-            productId: imageProduct.id,
-            productName: imageProduct.name,
-          });
-        } else {
-          allImagesSent = false;
-          console.error('[ai.reply] Product image send failed', {
-            conversationId,
-            tenantId,
-            productId: imageProduct.id,
-            error: imageResult.error,
-          });
-        }
-      } catch (imgErr) {
-        allImagesSent = false;
-        console.error('[ai.reply] Product image send threw unexpectedly', {
-          conversationId,
-          tenantId,
-          productId: imageProduct.id,
-          error: imgErr instanceof Error ? imgErr.message : String(imgErr),
-        });
-      }
-    }
-    // Only mark as delivered when every image went out, so a retry after a partial
-    // failure still re-attempts the images that did not make it.
-    if (allImagesSent) {
-      await redisConnection.set(imgIdemKey, '1', 'EX', 3600).catch(() => undefined);
-    }
   }
-
-  // When the turn was replaced by a generic holding/escalation message (knowledge gap,
-  // price or product-name hallucination), the customer was NOT actually shown these
-  // products. Persisting them would let a later follow-up ("what's the price?", "what
-  // flavors?") silently reuse products the assistant never presented, producing a
-  // contradictory thread. Only carry product_ids forward when the reply genuinely
-  // presented the matched products.
-  const replyWasHoldingOrEscalation =
-    knowledgeGapEscalated ||
-    priceHallucinationEscalated ||
-    productNameHallucinationEscalated ||
-    uncertainAnswerEscalated;
-
-  const outboundMessage = await createMessage({
-    tenant_id: tenantId,
-    conversation_id: conversationId,
-    external_message_id:
-      sendResult?.graphMessageId ?? priorGraphMessageId ?? `ai_${crypto.randomUUID()}`,
-    direction: 'outbound',
-    type: 'text',
-    content: finalReplyText,
-    sent_by: 'ai',
-    quality_score: qualityScore,
-    flagged: qualityFailing,
-    flag_reason: flagReason,
-    // Persist the products this reply identified so follow-up turns ("what are the
-    // prices?", "what flavors?", "are these in stock?") can deterministically reuse
-    // them instead of re-running a fragile text lookup that may fail and wrongly claim
-    // the products are not in the catalog.
-    product_ids: replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id),
-  });
+  // ---- End send / persist (staged or legacy) --------------------------------
 
   // P0-6 (RC-18): charge the 25/h budget only now that a reply has actually been
   // delivered AND persisted. This is the single point every delivered path converges on:

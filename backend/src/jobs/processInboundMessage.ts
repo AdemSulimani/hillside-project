@@ -11,15 +11,23 @@ import {
 import {
   applyMessageEdit,
   createMessage,
+  createMessageTx,
   existsOutboundAfter,
   findMessageByExternalMessageIdForTenant,
   findMessageByIdForTenant,
   findMessageIdByExternalMessageId,
+  findMessageIdByTenantAndExternalMessageId,
   findRecentOutboundMessageByContent,
   buildReplySnapshotFromMessage,
   updateMessageReplyExternalOnly,
   updateMessageReplyResolved,
 } from '../db/models/message';
+import {
+  aiReplyDedupeKey,
+  hasLiveAiReply,
+  upsertLiveAiReplyTx,
+} from '../db/models/outbox';
+import pool from '../db/pool';
 import {
   isHumanAgentEcho,
   webhookNormalizerService,
@@ -80,6 +88,39 @@ const ECHO_DURABLE_CORROBORATION =
  * tight window shrinks the chance a genuine human reply coincidentally equals a recent outbound.
  */
 const ECHO_HUMAN_CORROBORATION_WINDOW_MS = 60 * 1000;
+
+/**
+ * P1-1 (RC-21): when true, the inbound message persist and the ai.reply enqueue-intent are
+ * written in ONE Postgres transaction (message row + a live `ai.reply` transactional_outbox row),
+ * and the outbox relay drains the intent to BullMQ. A crash between the persist and the enqueue
+ * can no longer lose the reply job — on retry the dedupe re-check finds no live intent and
+ * re-inserts one, instead of the legacy bare early-return that silently dropped the turn forever.
+ * The racy getJobs→remove→add debounce is replaced by the single-live-intent upsert.
+ * Defaults OFF: flag-off keeps the legacy persist-then-`aiQueue.add` path byte-for-byte. In
+ * shadow (relay not dispatching) the legacy direct add still runs, so no double job. Flip in
+ * staging first.
+ */
+const INBOUND_OUTBOX_ENQUEUE =
+  (process.env.INBOUND_OUTBOX_ENQUEUE ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P1-1: whether the outbox relay is DISPATCHING (not just shadow-draining). Read here so the
+ * inbound path knows whether the relay will deliver the ai.reply intent. Shadow (dispatch off):
+ * write the outbox intent AND keep the legacy direct `aiQueue.add` so delivery continues while the
+ * relay plumbing is validated. Dispatch on: the relay owns delivery, so the inbound path drops the
+ * direct add (no double job). Mirrors the flag in `jobs/outboxRelay.ts`.
+ */
+const OUTBOX_DISPATCH_ENABLED =
+  (process.env.OUTBOX_DISPATCH_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P1-1 (RC-20): when true, inbound deduplication reads the tenant-scoped
+ * `idx_messages_tenant_external` index instead of the global one, so two tenants can legitimately
+ * carry the same channel `external_message_id` (closes the C-114 cross-tenant dedupe leak).
+ * Defaults OFF: flag-off keeps the legacy global lookup. Requires migration 071 (landed).
+ */
+const MESSAGES_SCOPED_UNIQUE_READ =
+  (process.env.MESSAGES_SCOPED_UNIQUE_READ ?? 'false').trim().toLowerCase() === 'true';
 
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -486,13 +527,18 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   }
   const normalized: InboundMessageDTO = event;
 
-  const existingId = await findMessageIdByExternalMessageId(normalized.externalMessageId);
-  if (existingId) {
-    console.info('[inbound] Duplicate external_message_id, skipping processing', {
-      external_message_id: normalized.externalMessageId,
-      message_id: existingId,
-    });
-    return;
+  // Legacy inbound dedupe (flags off): a GLOBAL external-id match short-circuits before channel
+  // resolution. Under the P1-1 flags the dedupe moves BELOW channel resolution so it is
+  // tenant-scoped (RC-20 / C-114) and can re-check the live ai.reply intent on a duplicate (RC-21).
+  if (!MESSAGES_SCOPED_UNIQUE_READ && !INBOUND_OUTBOX_ENQUEUE) {
+    const existingId = await findMessageIdByExternalMessageId(normalized.externalMessageId);
+    if (existingId) {
+      console.info('[inbound] Duplicate external_message_id, skipping processing', {
+        external_message_id: normalized.externalMessageId,
+        message_id: existingId,
+      });
+      return;
+    }
   }
 
   const channel = await findChannelByTypeAndExternalId(
@@ -509,6 +555,66 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     throw new Error(
       `Channel not found for type=${normalized.channelType} external_id=${normalized.channelExternalId}`,
     );
+  }
+
+  // P1-1 tenant-scoped dedupe + RC-21 live-intent re-check (runs once the tenant is known).
+  if (MESSAGES_SCOPED_UNIQUE_READ || INBOUND_OUTBOX_ENQUEUE) {
+    const existingId = await findMessageIdByTenantAndExternalMessageId(
+      channel.tenant_id,
+      normalized.externalMessageId,
+    );
+    if (existingId) {
+      const existing = await findMessageByIdForTenant(existingId, channel.tenant_id);
+      // Under the outbox path, a lost enqueue must self-heal: if the message expects an AI reply,
+      // has not already been answered, and has no live ai.reply intent, re-insert the intent
+      // instead of the legacy bare early-return that dropped the turn forever (RC-21). The primary
+      // RC-21 fix is the atomic persist+intent below; this is the recovery net for a Meta
+      // redelivery of a turn whose intent was somehow lost.
+      if (
+        INBOUND_OUTBOX_ENQUEUE &&
+        existing &&
+        normalized.skipAiReply !== true &&
+        !(await existsOutboundAfter(existing.conversation_id, channel.tenant_id, existing.created_at)) &&
+        !(await hasLiveAiReply(existing.conversation_id))
+      ) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await upsertLiveAiReplyTx(client, {
+            tenant_id: channel.tenant_id,
+            conversation_id: existing.conversation_id,
+            dedupe_key: aiReplyDedupeKey(existing.conversation_id, normalized.externalMessageId),
+            payload: {
+              tenantId: channel.tenant_id,
+              channelId: channel.id,
+              conversationId: existing.conversation_id,
+              messageExternalId: normalized.externalMessageId,
+              traceId: (data as { traceId?: string }).traceId,
+            },
+            available_at: new Date(),
+          });
+          await client.query('COMMIT');
+          console.warn('[inbound] Re-enqueued missing ai.reply intent for a persisted message (RC-21 recovery)', {
+            conversationId: existing.conversation_id,
+            external_message_id: normalized.externalMessageId,
+          });
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          console.error('[inbound] Failed to re-enqueue ai.reply intent', {
+            external_message_id: normalized.externalMessageId,
+            err,
+          });
+        } finally {
+          client.release();
+        }
+      } else {
+        console.info('[inbound] Duplicate external_message_id, skipping processing', {
+          external_message_id: normalized.externalMessageId,
+          message_id: existingId,
+        });
+      }
+      return;
+    }
   }
 
   let contactName = normalized.contactName;
@@ -897,16 +1003,62 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     return;
   }
 
-  const inboundMessage = await createMessage({
-    tenant_id: channel.tenant_id,
-    conversation_id: conversation.id,
-    external_message_id: normalized.externalMessageId,
-    direction: 'inbound',
-    type: resolvedInboundMessageType,
-    content: normalized.content,
-    attachment_urls: permanentAttachmentUrls,
-    sent_by: 'customer',
-  });
+  // Persist the inbound message. P1-1 (RC-21): when the outbox path is on, persist the message row
+  // AND the live ai.reply enqueue-intent in ONE transaction, so a crash between them cannot lose
+  // the reply job. The `idx_outbox_live_ai_reply` upsert also replaces the racy getJobs→remove→add
+  // debounce: a burst collapses to a single live intent pointing at the latest inbound.
+  let inboundMessage;
+  if (INBOUND_OUTBOX_ENQUEUE) {
+    const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
+    const delayMs = Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      inboundMessage = await createMessageTx(client, {
+        tenant_id: channel.tenant_id,
+        conversation_id: conversation.id,
+        external_message_id: normalized.externalMessageId,
+        direction: 'inbound',
+        type: resolvedInboundMessageType,
+        content: normalized.content,
+        attachment_urls: permanentAttachmentUrls,
+        sent_by: 'customer',
+      });
+      if (normalized.skipAiReply !== true) {
+        await upsertLiveAiReplyTx(client, {
+          tenant_id: channel.tenant_id,
+          conversation_id: conversation.id,
+          dedupe_key: aiReplyDedupeKey(conversation.id, normalized.externalMessageId),
+          payload: {
+            tenantId: channel.tenant_id,
+            channelId: channel.id,
+            conversationId: conversation.id,
+            messageExternalId: normalized.externalMessageId,
+            traceId: (data as { traceId?: string }).traceId,
+          },
+          // Debounce: the intent becomes eligible to drain AI_REPLY_DELAY_MS after this inbound.
+          available_at: new Date(Date.now() + delayMs),
+        });
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+      throw err;
+    }
+    client.release();
+  } else {
+    inboundMessage = await createMessage({
+      tenant_id: channel.tenant_id,
+      conversation_id: conversation.id,
+      external_message_id: normalized.externalMessageId,
+      direction: 'inbound',
+      type: resolvedInboundMessageType,
+      content: normalized.content,
+      attachment_urls: permanentAttachmentUrls,
+      sent_by: 'customer',
+    });
+  }
 
   let inboundForSocket = inboundMessage;
   let replyToPayload: MessageReplyToPayload | undefined;
@@ -948,7 +1100,12 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   socketService.emitNewMessage(channel.tenant_id, inboundForSocket, replyToPayload);
   socketService.emitConversationUpdated(channel.tenant_id, conversation.id);
 
-  if (normalized.skipAiReply !== true) {
+  // Legacy direct enqueue + debounce. Skipped only when the outbox relay OWNS delivery
+  // (INBOUND_OUTBOX_ENQUEUE + dispatch on) — then the atomic intent above is the single source of
+  // the job. In shadow (dispatch off) this still runs so delivery continues while the relay is
+  // validated; the relay shadow-drains the intent without dispatching, so there is no double job.
+  const outboxOwnsDelivery = INBOUND_OUTBOX_ENQUEUE && OUTBOX_DISPATCH_ENABLED;
+  if (normalized.skipAiReply !== true && !outboxOwnsDelivery) {
     const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
     const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
     const existingJob = pendingAiReplyJobs.find(

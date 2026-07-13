@@ -39,6 +39,7 @@ import {
   runPauseInvariantMonitor,
   initPauseInvariantMonitorScheduler,
 } from './pauseInvariantMonitor';
+import { processOutboxRelay, initOutboxRelayScheduler } from './outboxRelay';
 import { attachWorkerFailureHandler } from './failureHandler';
 
 /** Shared BullMQ worker tuning to reduce idle / polling Redis traffic. */
@@ -153,6 +154,10 @@ export const defaultWorker = new Worker<
       await runPauseInvariantMonitor();
       return;
     }
+    if (job.name === 'outboxDrain') {
+      await processOutboxRelay();
+      return;
+    }
     if (job.name === 'embeddingReconcile') {
       await processReconcileProductEmbeddings();
       return;
@@ -230,4 +235,8 @@ void initRefreshMetaTokensScheduler().catch((err) => {
 
 void initMonthlyUseCaseSnapshotScheduler().catch((err) => {
   console.error('[jobs] Failed to register monthly use case snapshot scheduler', err);
+});
+
+void initOutboxRelayScheduler().catch((err) => {
+  console.error('[jobs] Failed to register outbox relay scheduler', err);
 });

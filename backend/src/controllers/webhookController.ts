@@ -37,6 +37,17 @@ function isWebhookDebug(): boolean {
 
 const WEBHOOK_TS_MAX_SKEW_MS = 300_000;
 
+/**
+ * P1-1 (RC-21): when true, the webhook ACKs 200 only AFTER `webhookQueue.add` has committed the
+ * inbound job, and releases the `webhook_seen` dedupe claim on enqueue failure so Meta's retry is
+ * honored. This closes the legacy gap where the 200 was sent and the enqueue was a detached
+ * `void` — a failed enqueue was only logged, the seen-claim stayed set for 24h, and the delivery
+ * was lost forever. Defaults OFF: flag-off keeps the legacy ack-then-fire-and-forget. Flip in
+ * staging first.
+ */
+const WEBHOOK_ACK_AFTER_ENQUEUE =
+  (process.env.WEBHOOK_ACK_AFTER_ENQUEUE ?? 'false').trim().toLowerCase() === 'true';
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -244,6 +255,9 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
       });
     } catch (err) {
       console.error('[webhook] failed to enqueue inbound payload', { err, traceId });
+      // P1-1 (RC-21): when acking after enqueue, surface the failure so the caller can release
+      // the seen-claim and return 500 (Meta then retries). Legacy path keeps swallowing.
+      if (WEBHOOK_ACK_AFTER_ENQUEUE) throw err;
     }
   };
 
@@ -330,6 +344,22 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
 
   if (isWebhookDebug() && channelTypeParam === 'instagram') {
     console.info('[webhook][debug] instagram payload digest', summarizeInstagramWebhookPayload(parsedPayload));
+  }
+
+  // P1-1 (RC-21): ack only after the inbound job is durably enqueued. On failure, release the
+  // seen-claim so Meta's redelivery is honored instead of being deduped away for 24h.
+  if (WEBHOOK_ACK_AFTER_ENQUEUE) {
+    try {
+      await enqueueInboundPayload();
+      res.sendStatus(200);
+    } catch (err) {
+      await redisConnection.del(seenKey).catch(() => undefined);
+      console.error('[webhook] enqueue failed after seen-claim — released claim, returning 500', {
+        err,
+      });
+      res.sendStatus(500);
+    }
+    return;
   }
 
   res.sendStatus(200);
