@@ -11,8 +11,12 @@ import {
 } from './jobs/workers';
 import { initSocketServer } from './sockets';
 import { startRedisMemoryMonitor, stopRedisMemoryMonitor } from './services/redisMemoryMonitor';
+import { startDeadLetterMonitor, stopDeadLetterMonitor } from './services/deadLetterMonitor';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
+
+/** P1-2 step 5: dead-letter growth monitor (off by default). */
+const DLQ_METRICS_ENABLED = (process.env.DLQ_METRICS_ENABLED ?? 'false').trim().toLowerCase() === 'true';
 
 const httpServer = http.createServer(app);
 initSocketServer(httpServer);
@@ -21,6 +25,7 @@ httpServer.listen(PORT, () => {
   console.log(`[server] Running in ${process.env.NODE_ENV || 'development'} mode`);
   console.log(`[server] Listening on http://localhost:${PORT}`);
   startRedisMemoryMonitor();
+  if (DLQ_METRICS_ENABLED) startDeadLetterMonitor();
 });
 
 // ---------------------------------------------------------------------------
@@ -46,6 +51,7 @@ async function shutdown(signal: string): Promise<void> {
   });
 
   stopRedisMemoryMonitor();
+  stopDeadLetterMonitor();
 
   // Stop the HTTP server from accepting new connections. Existing requests
   // will finish, then the server closes. The deploy health check stops polling
