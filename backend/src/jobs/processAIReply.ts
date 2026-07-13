@@ -22,6 +22,12 @@ import {
   hasOpenSensitiveAlertForConversation,
   type AIAlert,
 } from '../db/models/aiAlert';
+import type { LedgerDecisionEvent } from '../db/models/aiDecisionLedger';
+import {
+  buildLedgerRecord,
+  enqueueLedgerViaOutbox,
+  writeLedgerBestEffort,
+} from './aiDecisionLedgerWriter';
 import {
   createOrder,
   findLatestActiveOrderForConversation,
@@ -1325,6 +1331,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId, traceId } = data;
   console.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
 
+  // ---- P1-5: AI decision ledger accumulator -------------------------------
+  // Per-classifier decision events, pushed co-located with each gate's existing [X] log. The
+  // correlation id is per-message (the logical inbound this reply answers) so burst-merge does
+  // not collapse it. All ledger writes are gated by AI_DECISION_LEDGER_ENABLED (default off).
+  const decisionEvents: LedgerDecisionEvent[] = [];
+  const recordDecision = (event: LedgerDecisionEvent): void => {
+    decisionEvents.push(event);
+  };
+  const ledgerCorrelationId = data.messageExternalId;
+
   // ---- Per-tenant fairness ------------------------------------------------
   const tenantActiveKey = `ai_active_jobs:${tenantId}`;
   const activeCount = await redisConnection.incr(tenantActiveKey);
@@ -1652,6 +1668,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           conversation_id: conversationId,
           message_id: lastInbound?.id ?? null,
           reason: 'uncertain_answer_escalated',
+          // P1-5: this escalation is a fail-closed degradation (a sensitive detector threw), not a
+          // genuine positive classification — distinguish it for on-call.
+          fail_closed: true,
         },
         client,
       );
@@ -1791,6 +1810,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         0.8,
         CONFIDENCE_CONTRACT_SYMMETRY,
       );
+      recordDecision({
+        classifier: 'cancellation_refund',
+        raw_score: cancellationRefundIntent.confidence ?? null,
+        threshold: 0.8,
+        boost_applied: false,
+        passed: hasCancelOrRefundIntent && confidentCancelOrRefund,
+        branch: hasCancelOrRefundIntent && confidentCancelOrRefund ? 'escalate' : 'continue',
+      });
 
       if (hasCancelOrRefundIntent && confidentCancelOrRefund) {
         const candidateOrder = await findLatestOpenOrderForContactForEscalation(
@@ -1902,6 +1929,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             error: errReason,
           });
         }
+        void writeLedgerBestEffort(
+          buildLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'holding:sensitive',
+            decisionKind: cancellationRefundIntent.is_cancellation
+              ? 'escalation:cancellation'
+              : 'escalation:refund',
+            messageId: outboundAck.id,
+            decisionEvents,
+          }),
+        );
         return;
       }
 
@@ -1915,10 +1956,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         tenantId,
         conversationId,
       });
-      if (
+      const wrongProductEscalate =
         wrongProductIntent.is_wrong_product &&
-        passesConfidenceGate(wrongProductIntent.confidence, 0.8, CONFIDENCE_CONTRACT_SYMMETRY)
-      ) {
+        passesConfidenceGate(wrongProductIntent.confidence, 0.8, CONFIDENCE_CONTRACT_SYMMETRY);
+      recordDecision({
+        classifier: 'wrong_product',
+        raw_score: wrongProductIntent.confidence ?? null,
+        threshold: 0.8,
+        boost_applied: false,
+        passed: wrongProductEscalate,
+        branch: wrongProductEscalate ? 'escalate' : 'continue',
+      });
+      if (wrongProductEscalate) {
         const wrongProductPrecheck = await shouldStillSendAutomatedReply({
           tenantId,
           channelId,
@@ -2002,6 +2051,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             error: errReason,
           });
         }
+        void writeLedgerBestEffort(
+          buildLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'ack:wrong_product',
+            decisionKind: 'escalation:wrong_product',
+            messageId: outboundAck.id,
+            decisionEvents,
+          }),
+        );
         return;
       }
 
@@ -2061,6 +2122,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       console.info(
         `[POST_PURCHASE_SUPPORT] tenantId: ${tenantId} conversationId: ${conversationId} eta_query: ${postPurchaseSupportIntent.is_delivery_eta_query} not_delivered: ${postPurchaseSupportIntent.is_not_delivered_complaint} wrong_product: ${postPurchaseSupportIntent.is_wrong_product_issue} product_problem: ${postPurchaseSupportIntent.is_product_problem_issue} confidence: ${postPurchaseSupportIntent.confidence} reasoning: ${logJsonStringOrNull(postPurchaseSupportIntent.reason)}`,
       );
+
+      recordDecision({
+        classifier: 'post_purchase_support',
+        raw_score: postPurchaseSupportIntent.confidence ?? null,
+        threshold: 0.8,
+        boost_applied: false,
+        passed: hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent,
+        branch:
+          hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent
+            ? 'escalate'
+            : 'continue',
+      });
 
       // Auto-reply with the configured delivery time when the customer is only asking
       // about ETA (not a delay/issue complaint). The existing alert system for delays
@@ -2149,6 +2222,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           await touchConversationLastMessageAt(conversationId);
           console.info(
             `[DELIVERY_ETA_AUTO_REPLY] tenantId: ${tenantId} conversationId: ${conversationId} delivery_time: ${configuredDeliveryTime}`,
+          );
+          void writeLedgerBestEffort(
+            buildLedgerRecord({
+              tenantId,
+              conversationId,
+              correlationId: ledgerCorrelationId,
+              traceId,
+              replySlot: 'ack:eta',
+              decisionKind: 'ack:delivery_eta',
+              messageId: outboundEta.id,
+              decisionEvents,
+            }),
           );
           return;
         }
@@ -2248,6 +2333,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             error: errReason,
           });
         }
+        void writeLedgerBestEffort(
+          buildLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'holding:sensitive',
+            decisionKind: 'escalation:post_purchase',
+            messageId: outboundAck.id,
+            decisionEvents,
+          }),
+        );
         return;
       }
       // ---- Order information update (customer correcting address / phone / name / notes) ----
@@ -2265,10 +2362,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         tenantId,
         conversationId,
       });
-      if (
+      const orderInfoUpdateEscalate =
         orderInfoUpdateIntent.is_order_info_update &&
-        passesConfidenceGate(orderInfoUpdateIntent.confidence, 0.82, CONFIDENCE_CONTRACT_SYMMETRY)
-      ) {
+        passesConfidenceGate(orderInfoUpdateIntent.confidence, 0.82, CONFIDENCE_CONTRACT_SYMMETRY);
+      recordDecision({
+        classifier: 'order_info_update',
+        raw_score: orderInfoUpdateIntent.confidence ?? null,
+        threshold: 0.82,
+        boost_applied: false,
+        passed: orderInfoUpdateEscalate,
+        branch: orderInfoUpdateEscalate ? 'update_order' : 'continue',
+      });
+      if (orderInfoUpdateEscalate) {
         const extractedFields = orderInfoUpdateIntent.fields;
         const fieldsToUpdate: UpdateOrderCustomerInfoInput = {};
         if (extractedFields.delivery_address !== null) {
@@ -2397,6 +2502,18 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
               tenantId,
               conversationId,
             });
+            void writeLedgerBestEffort(
+              buildLedgerRecord({
+                tenantId,
+                conversationId,
+                correlationId: ledgerCorrelationId,
+                traceId,
+                replySlot: 'ack:order',
+                decisionKind: 'ack:order_info_update',
+                messageId: outboundConfirm.id,
+                decisionEvents,
+              }),
+            );
             return;
           }
 
@@ -2460,6 +2577,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     attributeIntent,
     hadImages,
     productNotInCatalog: visionProductNotInCatalog,
+    telemetry: replyTelemetry,
   } = await generateReply(
       conversationId,
       tenantId,
@@ -2467,6 +2585,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       attachmentUrls,
       undefined,
       replyLanguage,
+      traceId, // P1-5: thread the correlation id into aiService (closes C-109).
     );
 
   // Await the image classification result — it should already be resolved since
@@ -2479,6 +2598,20 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let productsWithMissingImages: Product[] = [];
 
   if (replyText.trim() === '[NO_REPLY]') {
+    // P1-5: a [NO_REPLY] still made a decision — record it so billing-class divergence (a turn the
+    // AI chose not to answer) is visible in the ledger, not silent.
+    void writeLedgerBestEffort(
+      buildLedgerRecord({
+        tenantId,
+        conversationId,
+        correlationId: ledgerCorrelationId,
+        traceId,
+        replySlot: 'none',
+        decisionKind: 'no_reply',
+        telemetry: replyTelemetry,
+        decisionEvents,
+      }),
+    );
     return;
   }
 
@@ -2930,6 +3063,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // with a clean deterministic net sends the AI reply as-is (fail-open). A
       // fully-answerable request keeps the original, well-tuned AI reply untouched.
       const shouldEscalate = decideGapEscalation(assessment, status, GAP_GATE_DETERMINISTIC_FIRST);
+      recordDecision({
+        classifier: 'product_info_gap',
+        raw_score: null,
+        threshold: null,
+        boost_applied: false,
+        passed: shouldEscalate,
+        branch: shouldEscalate ? 'escalate' : 'answer_as_is',
+      });
 
       if (!shouldEscalate) {
         console.info('[ai.reply] Product information fully answerable — sending AI reply as-is', {
@@ -3238,6 +3379,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let qualityFailing =
     qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
   const qualityScore = qualityEval?.quality_score ?? null;
+  recordDecision({
+    classifier: 'quality_eval',
+    raw_score: qualityScore,
+    threshold: qualityThreshold,
+    boost_applied: false,
+    passed: qualityFailing,
+    branch: qualityFailing ? 'flagged' : 'ok',
+  });
   let flagReason =
     qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
   const suppressibleOrderConfirmationFlags = new Set(['irrelevant', 'off_topic', 'low_confidence']);
@@ -3341,6 +3490,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       catalogPriceSet = buildCatalogPriceSet(matchedProducts);
     }
     const hallucinatedPrices = filterHallucinatedPrices(finalReplyText, catalogPriceSet);
+    recordDecision({
+      classifier: 'price_hallucination_guard',
+      raw_score: hallucinatedPrices.length,
+      threshold: null,
+      boost_applied: false,
+      passed: hallucinatedPrices.length > 0,
+      branch: hallucinatedPrices.length > 0 ? 'escalate' : 'pass',
+    });
     if (hallucinatedPrices.length > 0) {
       console.warn('[PRICE GUARD] Reply states price(s) not in catalog — escalating to holding message', {
         tenantId,
@@ -3451,6 +3608,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         }
       }
 
+      recordDecision({
+        classifier: 'product_name_hallucination_guard',
+        raw_score: confirmedNames.length,
+        threshold: null,
+        boost_applied: false,
+        passed: confirmedNames.length > 0,
+        branch: confirmedNames.length > 0 ? 'escalate' : 'pass',
+      });
       if (confirmedNames.length > 0) {
         console.warn('[PRODUCT NAME GUARD] Reply names product(s) not in catalog — escalating to holding message', {
           tenantId,
@@ -3722,6 +3887,23 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   let alreadySent = false;
 
   // ---- P1-1 (RC-20): durable stage-before-send when enabled for this channel ----
+  // P1-5: the guard verdicts + the branch the reply took, shared by the staging row and the
+  // decision ledger.
+  const ledgerGuardVerdicts = {
+    knowledgeGapEscalated,
+    priceHallucinationEscalated,
+    productNameHallucinationEscalated,
+    uncertainAnswerEscalated,
+  };
+  const ledgerDecisionKind = productNameHallucinationEscalated
+    ? 'escalation:product_name'
+    : priceHallucinationEscalated
+      ? 'escalation:price'
+      : knowledgeGapEscalated
+        ? 'escalation:knowledge_gap'
+        : uncertainAnswerEscalated
+          ? 'escalation:uncertain'
+          : 'reply';
   const stageEnabled = isStageBeforeSendEnabled(channel.type);
   if (stageEnabled) {
     const staged = await stageAndSend({
@@ -3735,11 +3917,25 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       flagged: qualityFailing,
       flagReason,
       productIds: persistedProductIds,
-      guardVerdicts: {
-        knowledgeGapEscalated,
-        priceHallucinationEscalated,
-        productNameHallucinationEscalated,
-        uncertainAnswerEscalated,
+      guardVerdicts: ledgerGuardVerdicts,
+      // P1-5: write the decision-ledger row THROUGH the outbox in the SAME flip txn as the reply
+      // persist (under a SAVEPOINT, so a ledger failure can never roll back a delivered reply).
+      onFlip: async (client, message) => {
+        await enqueueLedgerViaOutbox(
+          client,
+          buildLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'main',
+            decisionKind: ledgerDecisionKind,
+            messageId: message.id,
+            telemetry: replyTelemetry,
+            decisionEvents,
+            guardVerdicts: ledgerGuardVerdicts,
+          }),
+        );
       },
       send: (text) =>
         contact
@@ -3845,6 +4041,23 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // the products are not in the catalog.
       product_ids: persistedProductIds,
     });
+
+    // P1-5: the legacy path has no flip transaction to hook, so write the ledger row best-effort
+    // (direct, redacted, never throws) after the message persists.
+    void writeLedgerBestEffort(
+      buildLedgerRecord({
+        tenantId,
+        conversationId,
+        correlationId: ledgerCorrelationId,
+        traceId,
+        replySlot: 'main',
+        decisionKind: ledgerDecisionKind,
+        messageId: outboundMessage.id,
+        telemetry: replyTelemetry,
+        decisionEvents,
+        guardVerdicts: ledgerGuardVerdicts,
+      }),
+    );
   }
   // ---- End send / persist (staged or legacy) --------------------------------
 
@@ -4534,6 +4747,9 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           conversation_id: conversationId,
           message_id: lastInbound?.id ?? null,
           reason: 'order_detection_failed',
+          // P1-5: fail-closed — the post-send intent/draft-order step threw and was surfaced as an
+          // alert rather than swallowed; not a genuine detection.
+          fail_closed: true,
         });
         const contactForAlert = await findContactById(conversation.contact_id);
         socketService.emitAIAlert(tenantId, {

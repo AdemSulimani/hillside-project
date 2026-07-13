@@ -19,7 +19,10 @@ export type OutboxTopic =
   | 'usecase.eval'
   | 'reply.ratecount'
   | 'alert.message_send_failed'
-  | 'alert.product_image_unavailable';
+  | 'alert.product_image_unavailable'
+  // P1-5: the AI decision ledger row for a delivered reply, enqueued in the flip txn and
+  // INSERTed by the relay so a ledger-write failure can never fail the reply.
+  | 'ledger.write';
 
 export type OutboxStatus = 'pending' | 'processing' | 'done' | 'dead';
 

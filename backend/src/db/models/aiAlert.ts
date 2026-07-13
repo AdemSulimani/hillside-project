@@ -13,6 +13,9 @@ export interface AIAlert {
   reason: string;
   status: AIAlertStatus;
   details: Record<string, unknown> | null;
+  /** P1-5: true when this escalation was produced by a fail-closed degradation path (a detector
+   * threw / could not decide) rather than a genuine positive classification. */
+  fail_closed: boolean;
   created_at: Date;
 }
 
@@ -23,6 +26,9 @@ export interface CreateAIAlertInput {
   reason: string;
   /** Optional structured metadata (e.g. changed fields, previous/new values for order updates). */
   details?: Record<string, unknown> | null;
+  /** P1-5: set true ONLY on fail-closed escalation paths (see the two sites in processAIReply.ts).
+   * Defaults false — the ~21 genuine-classification producers pass nothing. */
+  fail_closed?: boolean;
 }
 
 export async function createAIAlert(
@@ -34,10 +40,17 @@ export async function createAIAlert(
   // previews) before it is persisted. `redactAlertDetails` is a no-op when REDACT_PII is off.
   const details = redactAlertDetails(input.details ?? null);
   const { rows } = await client.query<AIAlert>(
-    `INSERT INTO ai_alerts (tenant_id, conversation_id, message_id, reason, details)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO ai_alerts (tenant_id, conversation_id, message_id, reason, details, fail_closed)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING *`,
-    [input.tenant_id, input.conversation_id, input.message_id, input.reason, details],
+    [
+      input.tenant_id,
+      input.conversation_id,
+      input.message_id,
+      input.reason,
+      details,
+      input.fail_closed ?? false,
+    ],
   );
   return rows[0];
 }
@@ -190,6 +203,7 @@ function mapAlertListRow(row: AIAlertListQueryRow): AIAlertWithContext {
     reason: row.reason,
     status: row.status,
     details: row.details ?? null,
+    fail_closed: row.fail_closed ?? false,
     created_at: row.created_at,
     contact_name: row.contact_name,
     channel_type: row.channel_type,
@@ -241,6 +255,7 @@ export async function listAIAlertsForTenant(
        a.reason,
        a.status,
        a.created_at,
+       a.fail_closed,
        COALESCE(ct.name, '—') AS contact_name,
        COALESCE(ch.type, 'facebook') AS channel_type,
        COALESCE(ch.name, '—') AS channel_name,

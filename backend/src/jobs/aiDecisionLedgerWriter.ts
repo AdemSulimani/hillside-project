@@ -1,0 +1,148 @@
+/**
+ * P1-5: the write-side glue for the AI decision ledger, kept out of the 4500-line processAIReply.
+ *
+ * - `buildLedgerRecord` maps generateReply's telemetry + the orchestrator's accumulated decision
+ *   events + guard verdicts + correlation context into a `LedgerRecord`.
+ * - `enqueueLedgerViaOutbox` writes the ledger row THROUGH P1-1's outbox inside the reply-flip
+ *   transaction (stageAndSend `onFlip`), under a SAVEPOINT so a ledger failure can never poison
+ *   the flip and roll back a delivered reply (Postgres aborts the whole txn on any error).
+ * - `writeLedgerBestEffort` is the direct fire-and-forget path for early returns that never reach
+ *   the flip txn ([NO_REPLY], sensitive acks, holding messages, the legacy non-staged send).
+ *
+ * All writes are gated by AI_DECISION_LEDGER_ENABLED (default off) → zero behaviour change when off.
+ */
+import type { PoolClient } from 'pg';
+import { deriveReplyIdempotencyKey, type ReplySlot } from '../services/replyIdempotency';
+import { insertOutboxTx } from '../db/models/outbox';
+import {
+  buildLedgerOutboxPayload,
+  insertLedgerBestEffort,
+  ledgerDedupeKey,
+  type LedgerDecisionEvent,
+  type LedgerRecord,
+} from '../db/models/aiDecisionLedger';
+import type { ReplyTelemetry } from '../services/aiTelemetry';
+
+const AI_DECISION_LEDGER_ENABLED =
+  (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+
+export function isDecisionLedgerEnabled(): boolean {
+  return AI_DECISION_LEDGER_ENABLED;
+}
+
+export interface BuildLedgerRecordInput {
+  tenantId: string;
+  conversationId: string;
+  /** Per-message correlation (AIReplyJobData.messageExternalId) — burst-merge collapses traceId. */
+  correlationId: string;
+  traceId?: string | null;
+  /** 'main' joins to ai_reply_staging.idempotency_key; early returns use their own slot. */
+  replySlot: string;
+  decisionKind: string;
+  messageId?: string | null;
+  telemetry?: ReplyTelemetry;
+  decisionEvents: LedgerDecisionEvent[];
+  guardVerdicts?: Record<string, unknown>;
+}
+
+export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
+  const idempotencyKey = deriveReplyIdempotencyKey({
+    conversationId: input.conversationId,
+    logicalInboundExternalId: input.correlationId,
+    // The key derivation is slot-agnostic at runtime (it hashes the joined strings); the cast lets
+    // early-return slots outside the ReplySlot union ('none', escalation acks) reuse it.
+    replySlot: input.replySlot as ReplySlot,
+  });
+  const t = input.telemetry;
+  return {
+    tenant_id: input.tenantId,
+    conversation_id: input.conversationId,
+    message_id: input.messageId ?? null,
+    correlation_id: input.correlationId,
+    trace_id: input.traceId ?? null,
+    idempotency_key: idempotencyKey,
+    reply_slot: input.replySlot,
+    decision_kind: input.decisionKind,
+    prompt: t
+      ? {
+          hash: t.prompt.hash,
+          char_count: t.prompt.charCount,
+          token_estimate: t.prompt.tokenEstimate,
+          preview: t.prompt.preview,
+        }
+      : null,
+    model: t
+      ? {
+          requested: t.model.requested,
+          served: t.model.served,
+          custom_model_used: t.model.customModelUsed,
+          temperature: t.model.temperature,
+          max_tokens: t.model.maxTokens,
+          seed: t.model.seed,
+          finish_reason: t.model.finishReason,
+          truncated: t.model.truncated,
+          system_fingerprint: t.model.systemFingerprint,
+        }
+      : null,
+    usage: t
+      ? {
+          prompt_tokens: t.usage.promptTokens,
+          completion_tokens: t.usage.completionTokens,
+          total_tokens: t.usage.totalTokens,
+          usd_cost: t.usage.usdCost,
+        }
+      : null,
+    retrieval: t?.retrieval
+      ? {
+          semantic_skipped: t.retrieval.semanticSkipped,
+          skip_reason: t.retrieval.skipReason,
+          threshold: t.retrieval.threshold,
+          core_count: t.retrieval.coreCount,
+          band_count: t.retrieval.bandCount,
+          sources: t.retrieval.sources,
+          top: t.retrieval.top,
+          product_ids: t.retrieval.productIds,
+        }
+      : null,
+    decision_events: input.decisionEvents,
+    guard_verdicts: input.guardVerdicts ?? {},
+    facts_used: null,
+  };
+}
+
+/**
+ * Enqueue the ledger row via the outbox INSIDE the reply-flip transaction (onFlip). Wrapped in a
+ * SAVEPOINT: on any error we ROLLBACK TO the savepoint (clearing the txn's aborted state) and
+ * swallow, so the flip's `createMessageTx` + `flipStagingTx` still commit — a ledger write can
+ * never fail or roll back a delivered reply. No-op when the flag is off.
+ */
+export async function enqueueLedgerViaOutbox(
+  client: PoolClient,
+  record: LedgerRecord,
+): Promise<void> {
+  if (!AI_DECISION_LEDGER_ENABLED) return;
+  await client.query('SAVEPOINT ai_ledger');
+  try {
+    await insertOutboxTx(client, {
+      tenant_id: record.tenant_id,
+      conversation_id: record.conversation_id,
+      topic: 'ledger.write',
+      dedupe_key: ledgerDedupeKey(record.idempotency_key),
+      payload: buildLedgerOutboxPayload(record),
+    });
+    await client.query('RELEASE SAVEPOINT ai_ledger');
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT ai_ledger').catch(() => undefined);
+    console.warn('[ai_decision_ledger] outbox enqueue failed inside flip (savepoint rolled back)', {
+      conversationId: record.conversation_id,
+      correlationId: record.correlation_id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Direct best-effort write for paths with no flip txn. Fire-and-forget; never throws. */
+export async function writeLedgerBestEffort(record: LedgerRecord): Promise<void> {
+  if (!AI_DECISION_LEDGER_ENABLED) return;
+  await insertLedgerBestEffort(record);
+}

@@ -28,6 +28,7 @@ const aiQueueAdd = (aiQueue as unknown as {
   add: (name: string, data: unknown, opts?: unknown) => Promise<unknown>;
 }).add.bind(aiQueue);
 import { createAIAlert } from '../db/models/aiAlert';
+import { insertLedgerTx, type LedgerRecord } from '../db/models/aiDecisionLedger';
 import {
   claimOutboxBatch,
   markOutboxDone,
@@ -148,6 +149,14 @@ async function dispatchRow(row: OutboxRow): Promise<boolean> {
           /* ignore */
         }
       }
+      return true;
+    }
+    case 'ledger.write': {
+      // P1-5: the payload is a pre-redacted LedgerRecord (redaction ran at enqueue). insertLedgerTx
+      // re-runs the redaction pass idempotently and `ON CONFLICT (idempotency_key) DO NOTHING`s.
+      await withEffectTxn(row.id, async (client) => {
+        await insertLedgerTx(client, row.payload as unknown as LedgerRecord);
+      });
       return true;
     }
     default: {
