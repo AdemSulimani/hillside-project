@@ -81,6 +81,22 @@ describe('filterFreeFormInfoLabels', () => {
     );
   });
 
+  it('suppresses bare product-category nutrition echoes for supplement catalogs', () => {
+    // In a supplements niche "protein" is the product category, not a nutrition-info
+    // request: an LLM echo like "proteina" on an answerable question must not survive
+    // the filter (it would reintroduce the RC-01 false-escalation class). Only
+    // content/quantity-shaped labels count as genuine nutrition gaps.
+    assert.deepEqual(
+      filterFreeFormInfoLabels(['proteina', 'protein', 'kalori', 'kaloritë', 'calories']),
+      [],
+    );
+  });
+
+  it('keeps content/quantity-shaped nutrition labels (genuine free-form gaps)', () => {
+    const kept = ['sa proteina ka', 'protein content per serving', 'sa kalori ka nje doze'];
+    assert.deepEqual(filterFreeFormInfoLabels(kept), kept);
+  });
+
   it('drops empty/whitespace/non-string junk', () => {
     assert.deepEqual(filterFreeFormInfoLabels(['', '   ', null as unknown as string]), []);
   });

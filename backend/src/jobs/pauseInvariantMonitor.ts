@@ -2,8 +2,10 @@
  * P0-5 (RC-14) part 4 — AI-pause invariant monitor (observational).
  *
  * Invariant: no conversation may remain AI-paused with an inbound newer than `ai_paused_at`
- * and no open sensitive alert. A conversation violating it is a permanent-silence dead-end
- * that auto-resume (parts 2/3) should have cleared — the exact RC-14 failure mode.
+ * and no open alert of ANY kind. A conversation violating it is a permanent-silence
+ * dead-end that auto-resume (parts 2/3) should have cleared — the exact RC-14 failure
+ * mode. Pauses with an open alert (sensitive or not) are excluded: those are pending
+ * human resolution by design, and counting them would bury the real dead-ends in noise.
  *
  * This job only LOGS the violation count (plus a bounded id sample) so the failure becomes
  * visible; it performs NO writes and never resumes anything. It is gated on AI_AUTO_RESUME:
@@ -33,7 +35,7 @@ export async function runPauseInvariantMonitor(): Promise<void> {
   }
 
   console.warn(
-    '[ai.pauseInvariant] conversations left AI-paused past a newer inbound with no open sensitive alert',
+    '[ai.pauseInvariant] conversations left AI-paused past a newer inbound with no open alert',
     {
       count: violations.length,
       sample: violations

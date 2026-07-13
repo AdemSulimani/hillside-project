@@ -19,6 +19,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canDefaultResumeConversation,
   shouldResumeOnResolve,
   shouldAutoResumeRateLimitPause,
   isSensitiveAlertReason,
@@ -137,5 +138,45 @@ describe('shouldAutoResumeRateLimitPause', () => {
 
   it('does NOT resume while a human hold is active (would wipe human_override_until)', () => {
     assert.equal(shouldAutoResumeRateLimitPause({ ...ok, humanOverrideActive: true }), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// canDefaultResumeConversation — the conversation-state guard for a default
+// (omitted resume_ai) resolve. shouldResumeOnResolve only sees the ALERT's
+// reason; this guard is what keeps a plain Close from un-pausing a manual
+// pause or resuming past another open sensitive alert.
+// ---------------------------------------------------------------------------
+
+describe('canDefaultResumeConversation', () => {
+  const automatedPause = {
+    aiPaused: true,
+    aiPausedAt: new Date('2026-07-01T10:00:00Z'),
+    hasOpenSensitiveAlert: false,
+  };
+
+  it('resumes an automated pause with no open sensitive alert', () => {
+    assert.equal(canDefaultResumeConversation(automatedPause), true);
+  });
+
+  it('never un-pauses a MANUAL/legacy pause (ai_paused_at NULL — human-owned or pre-migration)', () => {
+    // toggleAiPaused deliberately leaves ai_paused_at NULL so an owner's explicit
+    // "AI off" survives staff closing an unrelated alert.
+    assert.equal(canDefaultResumeConversation({ ...automatedPause, aiPausedAt: null }), false);
+  });
+
+  it('never resumes past another OPEN sensitive alert on the same conversation', () => {
+    // Closing a non-sensitive alert while a refund_request is still open must not
+    // reactivate the AI mid-refund — mirrors the rate-limit auto-expiry conjunct.
+    assert.equal(
+      canDefaultResumeConversation({ ...automatedPause, hasOpenSensitiveAlert: true }),
+      false,
+    );
+  });
+
+  it('is a no-op for a conversation that is not paused (avoids clearing an active human hold)', () => {
+    // setConversationAiPaused(false) also wipes human_override_until; a default resolve
+    // of an alert on an unpaused conversation must not issue that write.
+    assert.equal(canDefaultResumeConversation({ ...automatedPause, aiPaused: false }), false);
   });
 });

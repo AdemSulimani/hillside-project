@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/services/__tests__/**/*.test.ts",
+    "test:integration": "tsx --test src/__integration__/**/*.integration.test.ts",
     "repair-product-text": "tsx src/scripts/repairProductTextEncoding.ts",
     "migrate": "tsx src/db/migrate.ts",
     "embed-all": "tsx src/scripts/embedAllProducts.ts",

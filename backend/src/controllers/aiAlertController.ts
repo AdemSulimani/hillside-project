@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import {
   countUnreadAIAlertsForTenant,
   findAIAlertByIdForTenant,
+  hasOpenSensitiveAlertForConversation,
   listAIAlertsForTenant,
   markAllUnreadAIAlertsAsReadForTenant,
   updateAIAlertStatus,
@@ -9,14 +10,15 @@ import {
 import { findConversationByIdForTenant, setConversationAiPaused } from '../db/models/conversation';
 import { socketService } from '../services/socketService';
 import { sendError, sendPaginated, sendSuccess } from '../utils/response';
-import { shouldResumeOnResolve } from '../services/aiResumePolicy';
+import { canDefaultResumeConversation, shouldResumeOnResolve } from '../services/aiResumePolicy';
 import type { AIAlertListQuery, ResolveAIAlertBody } from '../validators/aiAlert';
 
 /**
  * P0-5 (RC-14): when ON, resolving a NON-sensitive alert without an explicit `resume_ai`
- * resumes the AI (ending the permanent-silence dead-end); sensitive reasons and legacy
- * NULL-reason pauses still require an explicit resume. Defaults OFF: flag-off preserves
- * the legacy resume-only-via-`resume_ai:true` behaviour byte-for-byte.
+ * resumes the AI (ending the permanent-silence dead-end). Sensitive reasons, manual and
+ * legacy pauses (`ai_paused_at` NULL), and conversations with another open sensitive
+ * alert still require an explicit resume. Defaults OFF: flag-off preserves the legacy
+ * resume-only-via-`resume_ai:true` behaviour byte-for-byte.
  */
 const AI_AUTO_RESUME =
   (process.env.AI_AUTO_RESUME ?? 'false').trim().toLowerCase() === 'true';
@@ -101,9 +103,8 @@ export async function resolve(req: Request, res: Response): Promise<void> {
     }
 
     // P0-5 (RC-14): decide whether to resume the AI. Explicit resume_ai always wins; when
-    // omitted, AI_AUTO_RESUME default-resumes a NON-sensitive alert (sensitive reasons and
-    // legacy NULL-reason pauses require an explicit resume). Flag off → resume only on
-    // explicit resume_ai:true (legacy).
+    // omitted, AI_AUTO_RESUME default-resumes a NON-sensitive alert. Flag off → resume
+    // only on explicit resume_ai:true (legacy).
     const resume = shouldResumeOnResolve(existing.reason, body.resume_ai, AI_AUTO_RESUME);
 
     // An EXPLICIT resume of a system alert with no conversation is a user error (preserve
@@ -114,12 +115,33 @@ export async function resolve(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const willResume = resume && existing.conversation_id != null;
+    let willResume = resume && existing.conversation_id != null;
     if (willResume) {
       const convo = await findConversationByIdForTenant(existing.conversation_id!, tenantId);
       if (!convo) {
-        sendError(res, 'Conversation not found', 404);
-        return;
+        // Explicit resume of a missing conversation stays a hard error (legacy 404); a
+        // default resolve just resolves the alert without resuming.
+        if (body.resume_ai === true) {
+          sendError(res, 'Conversation not found', 404);
+          return;
+        }
+        willResume = false;
+      } else if (body.resume_ai !== true) {
+        // Default (omitted resume_ai) resume is additionally guarded by the CONVERSATION's
+        // pause state: never un-pause a manual/legacy pause (ai_paused_at NULL) and never
+        // resume past another still-open sensitive alert (a human may be mid-refund even
+        // though THIS alert is non-sensitive). The sensitive-alert probe fails safe: on
+        // error, treat as "has one" and stay paused. Explicit resume_ai:true bypasses all
+        // of this — the human's decision wins (legacy).
+        const hasOpenSensitiveAlert = await hasOpenSensitiveAlertForConversation(
+          existing.conversation_id!,
+          tenantId,
+        ).catch(() => true);
+        willResume = canDefaultResumeConversation({
+          aiPaused: convo.ai_paused,
+          aiPausedAt: convo.ai_paused_at,
+          hasOpenSensitiveAlert,
+        });
       }
     }
 

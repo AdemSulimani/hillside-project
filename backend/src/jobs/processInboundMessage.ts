@@ -33,7 +33,10 @@ import {
   type MessageReplyToPayload,
 } from '../services/conversationService';
 import { lookupSelfSentMessageEcho } from '../services/outboundEchoRegistry';
-import { shouldClassifyEchoAsHuman } from '../services/echoDurableCorroboration';
+import {
+  canCorroborateEchoContent,
+  shouldClassifyEchoAsHuman,
+} from '../services/echoDurableCorroboration';
 import { cryptoService } from '../services/cryptoService';
 import { socketService } from '../services/socketService';
 import { uploadImage } from '../services/cloudinaryService';
@@ -838,14 +841,18 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     // `isHumanAgentEcho` heuristic above always lands here; a content match against a recent
     // outbound we sent proves the echo is ours and must NOT set `human_replied` / a hold / a
     // phantom `sent_by:'human'` row. Flag OFF skips the query and always proceeds (byte-for-byte).
-    const contentMatchesRecentOutbound = ECHO_DURABLE_CORROBORATION
-      ? (await findRecentOutboundMessageByContent(
-          conversation.id,
-          channel.tenant_id,
-          normalized.content,
-          ECHO_HUMAN_CORROBORATION_WINDOW_MS,
-        )) != null
-      : false;
+    // Content-less echoes (pure images) never corroborate: the NULL-safe lookup would match any
+    // recent NULL-content outbound (e.g. an AI image echo row) and suppress+drop a genuine
+    // human image reply — see canCorroborateEchoContent.
+    const contentMatchesRecentOutbound =
+      ECHO_DURABLE_CORROBORATION && canCorroborateEchoContent(normalized.content)
+        ? (await findRecentOutboundMessageByContent(
+            conversation.id,
+            channel.tenant_id,
+            normalized.content,
+            ECHO_HUMAN_CORROBORATION_WINDOW_MS,
+          )) != null
+        : false;
 
     if (
       !shouldClassifyEchoAsHuman({

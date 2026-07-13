@@ -1,6 +1,8 @@
 -- P0-5 (RC-14, RC-06): record WHY and WHEN the AI was paused so auto-resume and the
 -- invariant monitor can reason about each pause. Additive and nullable — the columns are
--- unused (and always NULL) until the AI_AUTO_RESUME flag is enabled.
+-- stamped by every automated pause regardless of the AI_AUTO_RESUME flag (manual toggles
+-- deliberately leave them NULL); only the columns' CONSUMERS (auto-resume, the invariant
+-- monitor) are flag-gated.
 --   ai_paused_reason: the pause cause (e.g. 'rate_limit_exceeded'); NULL for legacy/manual
 --                     pauses, which auto-resume treats as "unknown → require explicit resume".
 --   ai_paused_at:     when the automated pause was set; the invariant monitor flags a

@@ -33,7 +33,9 @@
  *                  delivered, so a BullMQ re-run cannot double-send.
  *  - `post_send` — a throw AFTER a send/ack already went out. Retrying would re-run the
  *                  whole job and double-send the delivered message (RC-20), so we must
- *                  fall through (`continue`) rather than re-throw.
+ *                  stop rather than re-throw — and stop also must not fall through to
+ *                  `generateReply`, or the delivered sensitive ack would be followed by
+ *                  a normal sales reply (the RC-19 outcome by another door).
  */
 export type SensitivePathFailureKind = 'detector' | 'pre_send' | 'post_send';
 
@@ -43,18 +45,24 @@ export type SensitivePathFailureKind = 'detector' | 'pre_send' | 'post_send';
  *  - `escalate` — route to the safe escalation path (holding message + alert + pause)
  *                 instead of a normal sales reply, then stop.
  *  - `retry`    — re-throw so BullMQ retries the job.
- *  - `continue` — legacy fail-OPEN: log and fall through to `generateReply` (flag off),
- *                 or decline to re-throw because a message already went out (post-send).
+ *  - `stop`     — end the job cleanly: an ack/holding reply is already on the wire, so
+ *                 re-throwing would double-send it (RC-20) and falling through to
+ *                 `generateReply` would follow the sensitive ack with a normal sales
+ *                 reply. The customer already received a message for this inbound;
+ *                 side effects committed before the throw stand, and the error is
+ *                 logged for ops.
+ *  - `continue` — legacy fail-OPEN: log and fall through to `generateReply` (flag off).
  */
-export type SensitivePathAction = 'escalate' | 'retry' | 'continue';
+export type SensitivePathAction = 'escalate' | 'retry' | 'stop' | 'continue';
 
 /**
  * The whole P0-4 fail-closed policy as a pure function.
  *
  * Flag OFF → always `continue` (legacy umbrella: warn + fall through to a normal reply).
  * Flag ON  → fail closed by failure kind: escalate a failed detector, retry a pre-send
- *            error, and (critically) `continue` a post-send error so a retry cannot
- *            double-send an already-delivered reply (RC-20).
+ *            error, and `stop` on a post-send error — never re-throw (a retry would
+ *            double-send the delivered ack, RC-20) and never fall through (the ack must
+ *            not be followed by a normal sales reply, RC-19).
  */
 export function decideSensitivePathAction(
   kind: SensitivePathFailureKind,
@@ -69,7 +77,7 @@ export function decideSensitivePathAction(
     case 'pre_send':
       return 'retry';
     case 'post_send':
-      return 'continue';
+      return 'stop';
     default:
       return 'continue';
   }

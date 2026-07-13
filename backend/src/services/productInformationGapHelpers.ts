@@ -328,8 +328,16 @@ const FREE_FORM_INFO_STEMS: string[] = [
   'expir', 'afat', 'skadenc', 'shelf life',
   // origin / provenance
   'origin', 'origjin', 'prejardhj',
-  // nutrition
-  'nutrition', 'nutritional', 'vlera ushqyese', 'vlerat ushqyese', 'kalori', 'calorie', 'protein',
+  // nutrition — deliberately NO single-word 'protein'/'kalori' stems: in a supplements
+  // catalog "protein" is the product category, so a stochastic question echo like
+  // "proteina" would sail through the filter and reintroduce the RC-01 false-escalation
+  // class. Only content/quantity-shaped labels ("sa proteina ka", "protein content")
+  // count as a genuine nutrition-info gap; the residual (an LLM labelling a true gap
+  // with the bare word "proteina") fails soft — the customer still gets the grounded
+  // reply, no escalation.
+  'nutrition', 'nutritional', 'vlera ushqyese', 'vlerat ushqyese',
+  'sa proteina', 'proteina ka', 'gram proteina', 'protein content', 'permban proteina',
+  'sa kalori', 'kalori ka', 'calorie content',
   // allergens / dietary
   'allergen', 'alergjen', 'gluten', 'laktoz', 'lactose', 'sheqer', 'sugar', 'vegan', 'vegetarian',
   // certifications / warranty / authenticity
