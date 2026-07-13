@@ -1,7 +1,13 @@
 import type { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import axios from 'axios';
-import { createChannel, findChannelByExternalId, updateChannel } from '../db/models/channel';
+import {
+  createChannel,
+  findChannelByExternalId,
+  findConflictingChannelBinding,
+  updateChannel,
+} from '../db/models/channel';
+import { isPgUniqueViolation } from '../utils/pgErrors';
 import { cryptoService } from '../services/cryptoService';
 import { sendError, sendSuccess } from '../utils/response';
 
@@ -143,6 +149,7 @@ export async function callback(req: Request, res: Response): Promise<void> {
 
     const pages = pagesResp.data.data ?? [];
     let connectedCount = 0;
+    let blockedCount = 0;
     for (const page of pages) {
       const tokenToStore = page.access_token || longLivedToken;
       const encrypted = cryptoService.encrypt(tokenToStore);
@@ -158,6 +165,19 @@ export async function callback(req: Request, res: Response): Promise<void> {
         subscribed_apps_configured: subscription.ok,
         subscribed_apps_error: subscription.ok ? null : subscription.error,
       };
+      // P1-7 (RC-09 / SEC-2): skip a page already bound to another business (a same-tenant
+      // reconnect returns null and proceeds to the update branch).
+      const facebookConflict = await findConflictingChannelBinding(parsedState.tenantId, 'facebook', page.id);
+      if (facebookConflict) {
+        console.warn('[meta_oauth] page already connected to another business — skipping', {
+          pageId: page.id,
+          ownerTenantId: facebookConflict.tenant_id,
+          tenantId: parsedState.tenantId,
+        });
+        blockedCount++;
+        continue;
+      }
+
       const existingFacebook = await findChannelByExternalId(parsedState.tenantId, 'facebook', page.id);
       if (existingFacebook) {
         await updateChannel(existingFacebook.id, parsedState.tenantId, {
@@ -187,8 +207,21 @@ export async function callback(req: Request, res: Response): Promise<void> {
     redirectUrl.searchParams.set('status', 'connected');
     redirectUrl.searchParams.set('type', 'facebook');
     redirectUrl.searchParams.set('count', String(connectedCount));
+    if (blockedCount > 0) {
+      redirectUrl.searchParams.set('blocked', String(blockedCount));
+    }
     res.redirect(302, redirectUrl.toString());
   } catch (err) {
+    // P1-7: the DB global UNIQUE (migration 075) is the hard backstop if the pre-check races.
+    if (isPgUniqueViolation(err)) {
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const redirectUrl = new URL('/channels', frontendUrl);
+      redirectUrl.searchParams.set('status', 'error');
+      redirectUrl.searchParams.set('type', 'facebook');
+      redirectUrl.searchParams.set('reason', 'already_connected');
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
     if (axios.isAxiosError(err)) {
       sendError(
         res,
