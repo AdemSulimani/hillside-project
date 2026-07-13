@@ -64,6 +64,12 @@ import {
   matchesUsageQuestionKeyword,
   containsSpeculativeHealthAdvice,
 } from './usageSuitabilityHelpers';
+import {
+  CONFIDENCE_CONTRACT_SYMMETRY,
+  hasUsableConfidence,
+  normalizeClassifierConfidence,
+  resolveEscalationConfidence,
+} from './classifierConfidenceContract';
 
 export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeyword, containsSpeculativeHealthAdvice };
 
@@ -130,16 +136,24 @@ function estimateTokens(text: string): number {
   return text.length / 4;
 }
 
-/** Parses `confidence` from structured JSON models (number or numeric string; 0–1 or 0–100). */
-function parseModelClassifierConfidence(raw: unknown): number {
-  let confidence = 0;
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    confidence = raw > 1 ? raw / 100 : raw;
-  } else if (typeof raw === 'string') {
-    const n = parseFloat(raw.trim());
-    if (Number.isFinite(n)) confidence = n > 1 ? n / 100 : n;
-  }
-  return Math.min(1, Math.max(0, confidence));
+/**
+ * P1-3 (RC-07) log-only measurement (migration path step 1): emit a structured,
+ * behaviour-neutral marker whenever a detector asserts its intent boolean but the model
+ * omitted/invalidated `confidence` and it normalizes to 0 — the exact malformed-output case
+ * where the legacy code boosted (four escalation paths) or silently forfeited the order
+ * (affirmation path). Grep `[CONFIDENCE_CONTRACT]` to measure the real boost-applied
+ * frequency before/after flipping CONFIDENCE_CONTRACT_SYMMETRY. (When P1-5's decision ledger
+ * lands this becomes a ledger field; until then it is a log line.)
+ */
+function logMissingConfidenceContract(
+  detector: string,
+  rawConfidence: unknown,
+  intentAsserted: boolean,
+): void {
+  if (!intentAsserted || normalizeClassifierConfidence(rawConfidence) !== 0) return;
+  console.info(
+    `[CONFIDENCE_CONTRACT] detector: ${detector} intentAsserted: true normalizedZero: true omitted: ${!hasUsableConfidence(rawConfidence)} symmetry: ${CONFIDENCE_CONTRACT_SYMMETRY}`,
+  );
 }
 
 /** Matches normalized inbound text from webhookNormalizer (Feature 22). */
@@ -2505,10 +2519,14 @@ Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | nu
 
     const is_cancellation = parsed.is_cancellation === true;
     const is_refund = parsed.is_refund === true;
-    let confidence = parseModelClassifierConfidence(parsed.confidence);
-    if ((is_cancellation || is_refund) && confidence === 0) {
-      confidence = 0.9;
-    }
+    const intentAsserted = is_cancellation || is_refund;
+    logMissingConfidenceContract('cancellation_refund', parsed.confidence, intentAsserted);
+    const confidence = resolveEscalationConfidence({
+      raw: parsed.confidence,
+      intentAsserted,
+      legacyBoost: 0.9,
+      applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
+    });
 
     return {
       is_cancellation,
@@ -2580,10 +2598,13 @@ Return JSON: { "is_wrong_product": boolean, "reason": string | null, "confidence
     };
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
     const is_wrong_product = parsed.is_wrong_product === true;
-    let confidence = parseModelClassifierConfidence(parsed.confidence);
-    if (is_wrong_product && confidence === 0) {
-      confidence = 0.9;
-    }
+    logMissingConfidenceContract('wrong_product', parsed.confidence, is_wrong_product);
+    const confidence = resolveEscalationConfidence({
+      raw: parsed.confidence,
+      intentAsserted: is_wrong_product,
+      legacyBoost: 0.9,
+      applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
+    });
     return {
       is_wrong_product,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
@@ -2677,15 +2698,18 @@ Return JSON exactly:
     const is_not_delivered_complaint = parsed.is_not_delivered_complaint === true;
     const is_wrong_product_issue = parsed.is_wrong_product_issue === true;
     const is_product_problem_issue = parsed.is_product_problem_issue === true;
-    let confidence = parseModelClassifierConfidence(parsed.confidence);
     const anyIntent =
       is_delivery_eta_query ||
       is_not_delivered_complaint ||
       is_wrong_product_issue ||
       is_product_problem_issue;
-    if (anyIntent && confidence === 0) {
-      confidence = 0.9;
-    }
+    logMissingConfidenceContract('post_purchase', parsed.confidence, anyIntent);
+    const confidence = resolveEscalationConfidence({
+      raw: parsed.confidence,
+      intentAsserted: anyIntent,
+      legacyBoost: 0.9,
+      applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
+    });
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
 
     return {
@@ -2756,11 +2780,16 @@ Return JSON exactly:
       confidence?: number;
       reason?: string | null;
     };
-    let confidence = 0;
-    if (typeof parsed.confidence === 'number' && Number.isFinite(parsed.confidence)) {
-      confidence = parsed.confidence > 1 ? parsed.confidence / 100 : parsed.confidence;
-    }
-    confidence = Math.min(1, Math.max(0, confidence));
+    // Order/affirmation path (DP-GPR-16): unified onto the shared contract normalizer — it
+    // carries NO boost, so a missing/zero confidence leaves confidence low and the caller's
+    // gate abstains (the deterministic order-stage slot check in processAIReply.ts is what
+    // preserves revenue, symmetrically with the escalation paths).
+    logMissingConfidenceContract(
+      'order_affirmation',
+      parsed.confidence,
+      parsed.is_order_affirmation === true,
+    );
+    const confidence = normalizeClassifierConfidence(parsed.confidence);
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
     return {
       is_order_affirmation: parsed.is_order_affirmation === true,
@@ -2884,8 +2913,13 @@ Return ONLY JSON:
     };
 
     const is_order_info_update = parsed.is_order_info_update === true;
-    let confidence = parseModelClassifierConfidence(parsed.confidence);
-    if (is_order_info_update && confidence === 0) confidence = 0.85;
+    logMissingConfidenceContract('order_info_update', parsed.confidence, is_order_info_update);
+    const confidence = resolveEscalationConfidence({
+      raw: parsed.confidence,
+      intentAsserted: is_order_info_update,
+      legacyBoost: 0.85,
+      applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
+    });
 
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
     const fields: OrderInfoUpdateFields = {

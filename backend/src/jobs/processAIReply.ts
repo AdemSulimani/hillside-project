@@ -111,6 +111,13 @@ import {
   SensitivePathEscalatedError,
 } from '../services/sensitivePathFailClosed';
 import {
+  CONFIDENCE_CONTRACT_SYMMETRY,
+  CONFIDENCE_HYSTERESIS_BAND,
+  classifyConfidenceGate,
+  isLikelyE164Phone,
+  passesConfidenceGate,
+} from '../services/classifierConfidenceContract';
+import {
   shouldCountDeliveredReply,
   isOverDeliveredRateLimit,
   rateCountedMarkerKey,
@@ -730,6 +737,33 @@ const NAME_GUARD_LLM_CATALOG_CAP = (() => {
   const n = parseInt(process.env.NAME_GUARD_LLM_CATALOG_CAP || '150', 10);
   return Number.isFinite(n) && n > 0 ? n : 150;
 })();
+
+/**
+ * P1-3 (RC-08) boundary observability: when CONFIDENCE_CONTRACT_SYMMETRY is ON, emit a
+ * structured marker whenever a confidence/score falls inside the abstain band around a hard
+ * gate — the boundary phrasing that used to flip outcome-class run-to-run. Grep
+ * `[CONFIDENCE_GATE]` to measure how often decisions land in the band. Behaviour-neutral
+ * (log-only) and inert when the flag is OFF.
+ */
+function logConfidenceGateBoundary(
+  gate: string,
+  confidence: number,
+  threshold: number,
+  ctx: { tenantId: string; conversationId: string },
+): void {
+  if (!CONFIDENCE_CONTRACT_SYMMETRY) return;
+  const verdict = classifyConfidenceGate({
+    confidence,
+    threshold,
+    band: CONFIDENCE_HYSTERESIS_BAND,
+    applySymmetry: true,
+  });
+  if (verdict === 'abstain') {
+    console.info(
+      `[CONFIDENCE_GATE] gate: ${gate} verdict: abstain confidence: ${confidence} threshold: ${threshold} band: ${CONFIDENCE_HYSTERESIS_BAND} tenantId: ${ctx.tenantId} conversationId: ${ctx.conversationId}`,
+    );
+  }
+}
 
 const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
   '24h': 24,
@@ -1747,7 +1781,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       );
       const hasCancelOrRefundIntent =
         cancellationRefundIntent.is_cancellation || cancellationRefundIntent.is_refund;
-      const confidentCancelOrRefund = cancellationRefundIntent.confidence > 0.8;
+      logConfidenceGateBoundary('cancellation_refund', cancellationRefundIntent.confidence, 0.8, {
+        tenantId,
+        conversationId,
+      });
+      const confidentCancelOrRefund = passesConfidenceGate(
+        cancellationRefundIntent.confidence,
+        0.8,
+        CONFIDENCE_CONTRACT_SYMMETRY,
+      );
 
       if (hasCancelOrRefundIntent && confidentCancelOrRefund) {
         const candidateOrder = await findLatestOpenOrderForContactForEscalation(
@@ -1868,7 +1910,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       console.info(
         `[WRONG_PRODUCT] tenantId: ${tenantId} conversationId: ${conversationId} is_wrong_product: ${wrongProductIntent.is_wrong_product} confidence: ${wrongProductIntent.confidence} reasoning: ${logJsonStringOrNull(wrongProductIntent.reason)}`,
       );
-      if (wrongProductIntent.is_wrong_product && wrongProductIntent.confidence > 0.8) {
+      logConfidenceGateBoundary('wrong_product', wrongProductIntent.confidence, 0.8, {
+        tenantId,
+        conversationId,
+      });
+      if (
+        wrongProductIntent.is_wrong_product &&
+        passesConfidenceGate(wrongProductIntent.confidence, 0.8, CONFIDENCE_CONTRACT_SYMMETRY)
+      ) {
         const wrongProductPrecheck = await shouldStillSendAutomatedReply({
           tenantId,
           channelId,
@@ -1958,7 +2007,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       const isLikelyNewOrderSignal = await classifyNewOrderSignal(inboundText);
       const orderAffirmationIntent = await detectOrderAffirmationIntent(inboundText, recentMessages);
       const isLikelyOrderAffirmation =
-        orderAffirmationIntent.is_order_affirmation && orderAffirmationIntent.confidence > 0.7;
+        orderAffirmationIntent.is_order_affirmation &&
+        passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
       const shouldCheckPostPurchaseSupport =
         hasPostPurchaseIssueCue(inboundText) && !looksLikeOrderAffirmation(inboundText) && !isLikelyOrderAffirmation;
       const likelyDeliveryEtaOnlyByText = hasDeliveryEtaOnlyCue(inboundText);
@@ -1998,7 +2048,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         postPurchaseSupportIntent.is_not_delivered_complaint ||
         postPurchaseSupportIntent.is_wrong_product_issue ||
         postPurchaseSupportIntent.is_product_problem_issue;
-      const confidentPostPurchaseSupportIntent = postPurchaseSupportIntent.confidence > 0.8;
+      logConfidenceGateBoundary('post_purchase', postPurchaseSupportIntent.confidence, 0.8, {
+        tenantId,
+        conversationId,
+      });
+      const confidentPostPurchaseSupportIntent = passesConfidenceGate(
+        postPurchaseSupportIntent.confidence,
+        0.8,
+        CONFIDENCE_CONTRACT_SYMMETRY,
+      );
       console.info(
         `[POST_PURCHASE_SUPPORT] tenantId: ${tenantId} conversationId: ${conversationId} eta_query: ${postPurchaseSupportIntent.is_delivery_eta_query} not_delivered: ${postPurchaseSupportIntent.is_not_delivered_complaint} wrong_product: ${postPurchaseSupportIntent.is_wrong_product_issue} product_problem: ${postPurchaseSupportIntent.is_product_problem_issue} confidence: ${postPurchaseSupportIntent.confidence} reasoning: ${logJsonStringOrNull(postPurchaseSupportIntent.reason)}`,
       );
@@ -2202,7 +2260,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       console.info(
         `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
       );
-      if (orderInfoUpdateIntent.is_order_info_update && orderInfoUpdateIntent.confidence > 0.82) {
+      logConfidenceGateBoundary('order_info_update', orderInfoUpdateIntent.confidence, 0.82, {
+        tenantId,
+        conversationId,
+      });
+      if (
+        orderInfoUpdateIntent.is_order_info_update &&
+        passesConfidenceGate(orderInfoUpdateIntent.confidence, 0.82, CONFIDENCE_CONTRACT_SYMMETRY)
+      ) {
         const extractedFields = orderInfoUpdateIntent.fields;
         const fieldsToUpdate: UpdateOrderCustomerInfoInput = {};
         if (extractedFields.delivery_address !== null) {
@@ -4119,8 +4184,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         : 0.85;
     const explicitNewOrder = await classifyNewOrderSignal(inboundText);
     const orderAffirmationIntent = await detectOrderAffirmationIntent(inboundText, messagesForIntent);
+    logConfidenceGateBoundary('order_affirmation', orderAffirmationIntent.confidence, 0.7, {
+      tenantId,
+      conversationId,
+    });
     const latestMessageAffirmsOrder =
-      orderAffirmationIntent.is_order_affirmation === true && orderAffirmationIntent.confidence > 0.7;
+      orderAffirmationIntent.is_order_affirmation === true &&
+      passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
 
     const hasDeliveryAddress =
       typeof intent.delivery_address === 'string' && intent.delivery_address.trim().length > 0;
@@ -4135,6 +4205,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     const customerPhone =
       customerPhoneFromMetadata ?? customerPhoneFromConversation ?? customerPhoneFromContactExternalId;
     const hasCustomerPhone = typeof customerPhone === 'string' && customerPhone.length > 0;
+    // P1-3 (RC-07): E.164-shape signal for the order-stage deterministic slot check. Surfaced
+    // for observability only — it never blocks order creation (tightening hasCustomerPhone to
+    // E.164 would regress revenue on loosely-formatted but valid numbers). It lets us measure
+    // how often a missing/low-confidence affirmation is nonetheless corroborated by a
+    // structurally-valid phone alongside the non-empty address + consent-lexicon slots — the
+    // deterministic path that keeps the order-affirmation symmetry from forfeiting revenue.
+    const customerPhoneLooksE164 = isLikelyE164Phone(customerPhone);
 
     const resolvedCustomerName = resolveCustomerNameForOrder({
       customerFirstNameFromIntent: intent.customer_first_name,
@@ -4186,7 +4263,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     // Use [ORDER_COLLECTION_STATE] as the search key in your log aggregator.
     console.info(
       `[ORDER_COLLECTION_STATE] tenantId: ${tenantId} conversationId: ${conversationId}` +
-      ` hasName: ${hasCustomerName} hasPhone: ${hasCustomerPhone} hasAddress: ${hasDeliveryAddress}` +
+      ` hasName: ${hasCustomerName} hasPhone: ${hasCustomerPhone} phoneE164Shape: ${customerPhoneLooksE164} hasAddress: ${hasDeliveryAddress}` +
       ` dataConfirmationSent: ${dataConfirmationSentBeforeCurrentTurn}` +
       ` shouldAffirmOrder: ${shouldAffirmOrder} explicitNewOrder: ${explicitNewOrder}` +
       ` is_ready_to_order: ${intent.is_ready_to_order} intent_score: ${intent.intent_score}` +
@@ -4194,9 +4271,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       ` intentFirstName: ${logJsonStringOrNull(intent.customer_first_name)}`,
     );
 
+    logConfidenceGateBoundary('order_intent_score', intent.intent_score, intentOrderMinScore, {
+      tenantId,
+      conversationId,
+    });
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
-      intent.intent_score > intentOrderMinScore &&
+      passesConfidenceGate(intent.intent_score, intentOrderMinScore, CONFIDENCE_CONTRACT_SYMMETRY) &&
       intent.product_name != null &&
       hasDeliveryAddress &&
       hasCustomerPhone &&
