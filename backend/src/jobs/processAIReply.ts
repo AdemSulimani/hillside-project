@@ -4,7 +4,7 @@ import { logSafe, logSafeStructured } from '../utils/redact';
 import { redisConnection } from './redisConnection';
 import { findChannelById } from '../db/models/channel';
 import {
-  findConversationById,
+  findConversationByIdForTenant,
   setConversationAiPaused,
   setConversationHumanReplied,
   touchConversationLastMessageAt,
@@ -407,7 +407,7 @@ async function shouldStillSendAutomatedReply(args: {
     return { ok: false, reason: 'ai_disabled_for_channel' };
   }
 
-  const conversation = await findConversationById(conversationId);
+  const conversation = await findConversationByIdForTenant(conversationId, tenantId);
   if (!conversation) {
     return { ok: false, reason: 'conversation_not_found' };
   }
@@ -422,7 +422,7 @@ async function shouldStillSendAutomatedReply(args: {
     };
   }
 
-  const latestMessages = await findMessagesByConversation(conversationId, 8);
+  const latestMessages = await findMessagesByConversation(conversationId, 8, tenantId);
   const latestInbound = [...latestMessages].reverse().find((msg) => msg.direction === 'inbound');
   if (!latestInbound || latestInbound.external_message_id !== scheduledInboundExternalId) {
     return {
@@ -482,7 +482,7 @@ async function rescheduleReplyAfterHumanHold(
     return;
   }
 
-  const latestMessages = await findMessagesByConversation(conversationId, 8);
+  const latestMessages = await findMessagesByConversation(conversationId, 8, tenantId);
   const latestInbound = [...latestMessages].reverse().find((msg) => msg.direction === 'inbound');
   if (!latestInbound || latestInbound.external_message_id !== data.messageExternalId) {
     // A newer inbound message exists; its own ai.reply job will handle the conversation.
@@ -1491,7 +1491,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     if (alert) {
       const channel = await findChannelById(channelId, tenantId);
       if (channel) {
-        const conversation = await findConversationById(conversationId);
+        const conversation = await findConversationByIdForTenant(conversationId, tenantId);
         const contactForAlert = conversation
           ? await findContactById(conversation.contact_id)
           : null;
@@ -1529,7 +1529,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   }
 
   // Level 3: Per-conversation controls
-  const conversation = await findConversationById(conversationId);
+  const conversation = await findConversationByIdForTenant(conversationId, tenantId);
   if (!conversation) {
     console.warn('[ai.reply] Conversation not found, skipping', { conversationId });
     return;
@@ -1593,7 +1593,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     return;
   }
 
-  const recentMessages = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT);
+  const recentMessages = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT, tenantId);
   const { latestInbound: lastInbound, mergedInboundText, mergedAttachmentUrls } =
     buildInboundBurstContext(recentMessages);
   if (!lastInbound) {
@@ -4383,7 +4383,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       return;
     }
 
-    const messagesForIntent = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT);
+    const messagesForIntent = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT, tenantId);
     const catalogProductNames = await findActiveProductNamesForTenant(tenantId);
     const intent = await detect(messagesForIntent, tenantId, catalogProductNames);
     const qtyDisplay = intent.quantity === null ? 'null' : String(intent.quantity);

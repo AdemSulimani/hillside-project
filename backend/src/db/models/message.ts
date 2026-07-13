@@ -319,22 +319,33 @@ export async function findMessageIdByTenantAndExternalMessageId(
 /**
  * Latest `limit` messages for the conversation, oldest-first (for AI / intent context).
  * Uses most recent window, not the earliest rows in the thread.
+ *
+ * P1-7 (SEC-3 / C-116): pass `tenantId` to additionally scope by tenant so a mis-resolved tenant can
+ * never read another tenant's messages. Optional/additive — the filter is a no-op in normal operation
+ * (the conversation's messages already belong to that tenant), so existing callers are unaffected.
  */
 export async function findMessagesByConversation(
   conversationId: string,
   limit = 10,
+  tenantId?: string,
 ): Promise<Message[]> {
   const cap = Math.min(Math.max(1, limit), 500);
+  const params: unknown[] = [conversationId, cap];
+  let tenantClause = '';
+  if (tenantId) {
+    params.push(tenantId);
+    tenantClause = ` AND tenant_id = $${params.length}`;
+  }
   const { rows } = await pool.query<Message>(
     `SELECT * FROM (
        SELECT *
        FROM messages
-       WHERE conversation_id = $1
+       WHERE conversation_id = $1${tenantClause}
        ORDER BY created_at DESC, id DESC
        LIMIT $2
      ) sub
      ORDER BY created_at ASC, id ASC`,
-    [conversationId, cap],
+    params,
   );
   return rows.map(mapMessageRow);
 }

@@ -1,8 +1,14 @@
 import type { Request, Response } from 'express';
 import axios from 'axios';
 import crypto from 'crypto';
-import { createChannel, findChannelByExternalId, updateChannel } from '../db/models/channel';
+import {
+  createChannel,
+  findChannelByExternalId,
+  findConflictingChannelBinding,
+  updateChannel,
+} from '../db/models/channel';
 import type { Channel } from '../db/models/channel';
+import { isPgUniqueViolation } from '../utils/pgErrors';
 import { redisConnection } from '../jobs/redisConnection';
 import { cryptoService } from '../services/cryptoService';
 import {
@@ -158,6 +164,14 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
       businessToken,
     );
 
+    // P1-7 (RC-09 / SEC-2): refuse to connect a phone number already bound to another business.
+    // A same-tenant reconnect returns null and proceeds to the update branch below.
+    const conflict = await findConflictingChannelBinding(tenantId, 'whatsapp', phoneNumberId);
+    if (conflict) {
+      sendError(res, 'This WhatsApp number is already connected to another business.', 409);
+      return;
+    }
+
     const existing = await findChannelByExternalId(tenantId, 'whatsapp', phoneNumberId);
     const registration = await ensureCloudApiRegistration(
       phoneNumberId,
@@ -211,6 +225,11 @@ export async function handleEmbeddedSignup(req: Request, res: Response): Promise
       201,
     );
   } catch (err) {
+    // P1-7: the DB global UNIQUE (migration 075) is the hard backstop if the pre-check races.
+    if (isPgUniqueViolation(err)) {
+      sendError(res, 'This WhatsApp number is already connected to another business.', 409);
+      return;
+    }
     if (axios.isAxiosError(err)) {
       const body = err.response?.data as { error?: { message?: string; code?: number } } | undefined;
       const metaMsg = body?.error?.message?.trim();

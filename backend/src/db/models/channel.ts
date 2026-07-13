@@ -116,13 +116,64 @@ export async function findChannelByExternalId(
   return rows[0] ?? null;
 }
 
+/**
+ * P1-7 (RC-09 / SEC-2): deterministic result of resolving a channel binding by (type, external_id).
+ * `matchCount`/`tenantIds` let the caller detect and alert on a live cross-tenant collision.
+ */
+export interface ChannelResolution {
+  channel: Channel | null;
+  matchCount: number;
+  tenantIds: string[];
+}
+
+/**
+ * P1-7 (RC-09 / SEC-2): resolve the owning channel for an inbound webhook DETERMINISTICALLY.
+ *
+ * The channels UNIQUE key is (tenant_id, type, external_id), so — until migration 075's global
+ * UNIQUE (type, external_id) is enforced — nothing prevents two tenants binding the same account.
+ * The historical `... LIMIT 1` with no ORDER BY then routed an inbound (and the AI reply, catalog,
+ * persona, decrypted token, and commission) to an ARBITRARY tenant. Ordering by the earliest
+ * binding (created_at ASC, id ASC) makes resolution stable; `matchCount`/`tenantIds` surface a
+ * live collision so the caller can alert (there is at most one row once 075 is enforced).
+ */
+export async function resolveChannelByTypeAndExternalId(
+  type: ChannelType,
+  externalId: string,
+): Promise<ChannelResolution> {
+  const { rows } = await pool.query<Channel>(
+    `SELECT * FROM channels
+     WHERE type = $1 AND external_id = $2
+     ORDER BY created_at ASC, id ASC`,
+    [type, externalId],
+  );
+  const tenantIds = [...new Set(rows.map((r) => r.tenant_id))];
+  return { channel: rows[0] ?? null, matchCount: rows.length, tenantIds };
+}
+
 export async function findChannelByTypeAndExternalId(
   type: ChannelType,
   externalId: string,
 ): Promise<Channel | null> {
+  return (await resolveChannelByTypeAndExternalId(type, externalId)).channel;
+}
+
+/**
+ * P1-7: the earliest channel binding for (type, external_id) owned by a tenant OTHER than
+ * `tenantId`, or null. The onboarding connect paths use it to reject a second tenant connecting an
+ * account already bound elsewhere (the DB global UNIQUE from 075 is the hard backstop; this yields
+ * a friendly error before the INSERT). A same-tenant reconnect returns null (allowed).
+ */
+export async function findConflictingChannelBinding(
+  tenantId: string,
+  type: ChannelType,
+  externalId: string,
+): Promise<Channel | null> {
   const { rows } = await pool.query<Channel>(
-    'SELECT * FROM channels WHERE type = $1 AND external_id = $2 LIMIT 1',
-    [type, externalId],
+    `SELECT * FROM channels
+     WHERE type = $1 AND external_id = $2 AND tenant_id <> $3
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1`,
+    [type, externalId, tenantId],
   );
   return rows[0] ?? null;
 }

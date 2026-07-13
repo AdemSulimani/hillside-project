@@ -1,7 +1,11 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import path from 'path';
-import { findChannelByTypeAndExternalId, type ChannelType } from '../db/models/channel';
+import {
+  findChannelByTypeAndExternalId,
+  resolveChannelByTypeAndExternalId,
+  type ChannelType,
+} from '../db/models/channel';
 import { findContactByExternalIdForTenantChannel, upsertContact } from '../db/models/contact';
 import {
   upsertConversation,
@@ -51,6 +55,7 @@ import { uploadImage } from '../services/cloudinaryService';
 import { uploadFile } from '../services/backblazeService';
 import { aiQueue } from './queues';
 import { logEvent } from '../services/analyticsService';
+import { reportChannelBindingConflict } from '../services/channelIsolationService';
 import type { InboundWebhookJobData } from './jobTypes';
 
 export type { InboundWebhookJobData } from './jobTypes';
@@ -541,7 +546,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     }
   }
 
-  const channel = await findChannelByTypeAndExternalId(
+  const { channel, matchCount, tenantIds } = await resolveChannelByTypeAndExternalId(
     normalized.channelType,
     normalized.channelExternalId,
   );
@@ -555,6 +560,19 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     throw new Error(
       `Channel not found for type=${normalized.channelType} external_id=${normalized.channelExternalId}`,
     );
+  }
+
+  // P1-7 (RC-09 / SEC-2): if this (type, external_id) is bound to more than one tenant we routed to
+  // the earliest (deterministic) binding above; surface the collision best-effort so ops/tenants can
+  // resolve the dual-connect. At most one row exists once migration 075's global UNIQUE is enforced.
+  if (matchCount > 1) {
+    await reportChannelBindingConflict({
+      type: normalized.channelType,
+      externalId: normalized.channelExternalId,
+      matchCount,
+      tenantIds,
+      resolvedTenantId: channel.tenant_id,
+    }).catch(() => undefined);
   }
 
   // P1-1 tenant-scoped dedupe + RC-21 live-intent re-check (runs once the tenant is known).

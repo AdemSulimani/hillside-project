@@ -1,7 +1,13 @@
 import type { Request, Response } from 'express';
 import axios from 'axios';
 import jwt from 'jsonwebtoken';
-import { createChannel, findChannelByExternalId, updateChannel } from '../db/models/channel';
+import {
+  createChannel,
+  findChannelByExternalId,
+  findConflictingChannelBinding,
+  updateChannel,
+} from '../db/models/channel';
+import { isPgUniqueViolation } from '../utils/pgErrors';
 import { cryptoService } from '../services/cryptoService';
 import { sendError, sendSuccess } from '../utils/response';
 
@@ -249,6 +255,19 @@ export async function callback(req: Request, res: Response): Promise<void> {
       subscribed_apps_endpoint: successfulAttempt?.endpoint ?? null,
     };
 
+    // P1-7 (RC-09 / SEC-2): refuse to connect an IG account already bound to another business
+    // (a same-tenant reconnect returns null and proceeds to the update branch).
+    const instagramConflict = await findConflictingChannelBinding(parsedState.tenantId, 'instagram', externalId);
+    if (instagramConflict) {
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const redirectUrl = new URL('/channels', frontendUrl);
+      redirectUrl.searchParams.set('status', 'error');
+      redirectUrl.searchParams.set('type', 'instagram');
+      redirectUrl.searchParams.set('reason', 'already_connected');
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
+
     const existing = await findChannelByExternalId(parsedState.tenantId, 'instagram', externalId);
     if (existing) {
       await updateChannel(existing.id, parsedState.tenantId, {
@@ -277,6 +296,16 @@ export async function callback(req: Request, res: Response): Promise<void> {
     redirectUrl.searchParams.set('type', 'instagram');
     res.redirect(302, redirectUrl.toString());
   } catch (err) {
+    // P1-7: the DB global UNIQUE (migration 075) is the hard backstop if the pre-check races.
+    if (isPgUniqueViolation(err)) {
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const redirectUrl = new URL('/channels', frontendUrl);
+      redirectUrl.searchParams.set('status', 'error');
+      redirectUrl.searchParams.set('type', 'instagram');
+      redirectUrl.searchParams.set('reason', 'already_connected');
+      res.redirect(302, redirectUrl.toString());
+      return;
+    }
     if (axios.isAxiosError(err)) {
       sendError(
         res,

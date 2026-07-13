@@ -1,7 +1,13 @@
 import axios from 'axios';
 import type { Request, Response } from 'express';
-import { createChannel, findChannelByExternalId, updateChannel } from '../db/models/channel';
+import {
+  createChannel,
+  findChannelByExternalId,
+  findConflictingChannelBinding,
+  updateChannel,
+} from '../db/models/channel';
 import type { Channel } from '../db/models/channel';
+import { isPgUniqueViolation } from '../utils/pgErrors';
 import { cryptoService } from '../services/cryptoService';
 import { sendError, sendSuccess } from '../utils/response';
 
@@ -127,6 +133,14 @@ export async function connectViber(req: Request, res: Response): Promise<void> {
     const encryptedToken = cryptoService.encrypt(auth_token);
     const metadata: Record<string, unknown> = { bot_uri: botUri, bot_id: botId };
 
+    // P1-7 (RC-09 / SEC-2): refuse to connect a bot already bound to another business.
+    // A same-tenant reconnect returns null and proceeds to the update branch below.
+    const conflict = await findConflictingChannelBinding(tenantId, 'viber', botId);
+    if (conflict) {
+      sendError(res, 'This Viber bot is already connected to another business.', 409);
+      return;
+    }
+
     // 2. Create or update the channel.
     const existing = await findChannelByExternalId(tenantId, 'viber', botId);
 
@@ -172,6 +186,11 @@ export async function connectViber(req: Request, res: Response): Promise<void> {
       existing ? 200 : 201,
     );
   } catch (err) {
+    // P1-7: the DB global UNIQUE (migration 075) is the hard backstop if the pre-check races.
+    if (isPgUniqueViolation(err)) {
+      sendError(res, 'This Viber bot is already connected to another business.', 409);
+      return;
+    }
     if (axios.isAxiosError(err)) {
       const body = err.response?.data as { status_message?: string } | undefined;
       const msg = body?.status_message?.trim() || 'Viber API request failed';
