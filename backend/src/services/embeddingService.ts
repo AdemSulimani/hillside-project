@@ -2,17 +2,28 @@ import { openai, OPENAI_EMBEDDING_MODEL } from './openaiClient';
 
 /**
  * Generates an embedding vector with OpenAI embeddings.
+ *
+ * `options.signal` (P1-4/RC-04) lets a caller impose a HARD deadline that actually cancels the
+ * request — the per-message query path aborts at ~5 s and fails open to lexical retrieval
+ * instead of letting the request hang up to the client's 60 s ceiling. Batch/reconcile callers
+ * omit it and keep the client-default timeout.
  */
-export async function generateEmbedding(text: string): Promise<number[]> {
+export async function generateEmbedding(
+  text: string,
+  options?: { signal?: AbortSignal },
+): Promise<number[]> {
   const input = text.trim();
   if (!input) {
     throw new Error('Cannot generate embedding for empty text');
   }
 
-  const data = await openai.embeddings.create({
-    model: process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL,
-    input,
-  });
+  const data = await openai.embeddings.create(
+    {
+      model: process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL,
+      input,
+    },
+    options?.signal ? { signal: options.signal } : undefined,
+  );
 
   const vector = data.data?.[0]?.embedding;
   if (!vector || vector.length === 0) {
