@@ -25,7 +25,14 @@ import {
   seedTenantPromptBlocksFromCatalog,
 } from '../db/models/promptBlock';
 import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
-import { logSafe, logSafeStructured } from '../utils/redact';
+import { logSafe, logSafeStructured, redactPII } from '../utils/redact';
+import { createHash } from 'node:crypto';
+import { computeCost } from './modelPricing';
+import type {
+  ReplyTelemetry,
+  RetrievalTelemetry,
+  RetrievalTelemetrySink,
+} from './aiTelemetry';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import {
   activeEmbeddingModel,
@@ -88,6 +95,9 @@ export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeywor
 // and were silently discarded, pushing execution into the 5-product fallback.
 // Operators can override this via the SIMILARITY_THRESHOLD env variable.
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.65');
+// P1-5: cap on the masked system-prompt copy stored in the decision ledger. Enough to see the
+// persona/blocks/footer/injected directives without persisting the full 26–33K-char prompt.
+const LEDGER_PROMPT_PREVIEW_MAX_CHARS = 12000;
 // Log the live value once at startup so operators always know which threshold is active
 // (the .env.example default of 0.65 and an overriding SIMILARITY_THRESHOLD=0.75 both
 // used to be in circulation, causing silent config drift in deployed environments).
@@ -643,6 +653,9 @@ export async function matchProductsForCustomerMessage(
   tenantId: string,
   searchText: string,
   limit: number,
+  // P1-5: optional retrieval-telemetry sink. When provided, populated with the similarity scores,
+  // threshold outcomes and semanticSkipped that RRF otherwise drops before the caller sees them.
+  telemetrySink?: RetrievalTelemetrySink,
 ): Promise<Product[]> {
   const trimmed = searchText.trim();
   if (!trimmed) return [];
@@ -668,6 +681,11 @@ export async function matchProductsForCustomerMessage(
   // always empty → retrieved sets identical to the legacy `>= threshold` filter.
   let semanticBandCandidates: Product[] = [];
   let semanticSkipped = false;
+  // P1-5 retrieval-telemetry capture (scores are dropped by RRF below, so grab them here).
+  let skipReason: string | null = null;
+  let coreCount = 0;
+  let bandCount = 0;
+  let retrievalTop: Array<{ id: string; similarity: number }> = [];
   if (embeddingVector) {
     try {
       const similar = await searchProductsBySimilarity(
@@ -685,14 +703,23 @@ export async function matchProductsForCustomerMessage(
       );
       semanticCandidates = partitioned.core;
       semanticBandCandidates = partitioned.band;
+      coreCount = partitioned.core.length;
+      bandCount = partitioned.band.length;
+      // Top candidates WITH scores — records how far the correct products fell vs. the threshold
+      // (the §15.2 gap the fcd0af7e incident needed manual SQL to recover).
+      retrievalTop = similar
+        .slice(0, 8)
+        .map((p) => ({ id: p.id, similarity: p.similarity }));
     } catch {
       semanticSkipped = true;
+      skipReason = 'similarity_query_error';
       // The embedding path skip (timeout/error/dim-mismatch) is already logged+counted inside
       // getOrComputeQueryEmbedding; this counts the distinct similarity-query (DB) failure.
       logSemanticSkipped('similarity_query_error', tenantId);
     }
   } else {
     semanticSkipped = true;
+    skipReason = 'embedding_unavailable';
   }
 
   const phraseDirect: Product[] = [];
@@ -743,6 +770,19 @@ export async function matchProductsForCustomerMessage(
       tenantId,
       queryLength: trimmed.length,
     });
+  }
+
+  if (telemetrySink) {
+    telemetrySink.value = {
+      semanticSkipped,
+      skipReason,
+      threshold: SIMILARITY_THRESHOLD,
+      coreCount,
+      bandCount,
+      sources: sources.map((s) => ({ name: s.name, count: s.products.length })),
+      top: retrievalTop,
+      productIds: results.map((p) => p.id),
+    };
   }
 
   return results;
@@ -3462,6 +3502,9 @@ export async function generateReply(
   attachmentUrlsRaw: unknown = [],
   productCatalogContext?: string,
   precomputedLanguage?: ReplyLocale,
+  // P1-5: correlation id (per-message, = AIReplyJobData.messageExternalId) threaded from the
+  // webhook so the [ai.generation] log and the ledger row are joinable across the fan-out (C-109).
+  traceId?: string,
 ): Promise<{
   reply: string;
   productCatalogContext: string;
@@ -3474,7 +3517,13 @@ export async function generateReply(
   productNotInCatalog: boolean;
   /** True when the customer's message was classified as asking about price or cost. */
   customerAskedPrice: boolean;
+  /** P1-5: per-reply decision-ledger telemetry. Present on the main LLM path; undefined on the
+   * canned early-return paths (discount-finalized / OOS / repeat-closing — no model call). */
+  telemetry?: ReplyTelemetry;
 }> {
+  // P1-5: retrieval-telemetry sink, populated by the fresh matchProducts calls below. Stays
+  // undefined when the reply reuses persisted/contextual products (no fresh retrieval this turn).
+  const retrievalSink: RetrievalTelemetrySink = {};
   const attachmentUrls = normalizeAttachmentUrls(attachmentUrlsRaw);
   const { visionUrls } = partitionVisionAttachments(attachmentUrls);
   const hasImages = visionUrls.length > 0;
@@ -3654,7 +3703,12 @@ export async function generateReply(
     });
     if (freshSearchQuery) {
       try {
-        products = await matchProductsForCustomerMessage(tenantId, freshSearchQuery, contextualMatchLimit);
+        products = await matchProductsForCustomerMessage(
+          tenantId,
+          freshSearchQuery,
+          contextualMatchLimit,
+          retrievalSink,
+        );
       } catch (err) {
         console.warn('[aiService] Other-options anchor search failed', err);
       }
@@ -3674,6 +3728,7 @@ export async function generateReply(
         tenantId,
         searchText,
         contextualMatchLimit,
+        retrievalSink,
       );
     } catch (err) {
       console.warn('[aiService] Product matching failed', err);
@@ -4127,18 +4182,67 @@ Using packaging-derived details (IMPORTANT — source precedence):
       ? Math.min(AI_REPLY_TEMPERATURE, 0.3)
       : AI_REPLY_TEMPERATURE;
 
+  // Cap length to discourage rambling; still enough for verbatim usage text and required fixed phrases.
+  const replyMaxTokens = 768;
   const completion = await openai.chat.completions.create({
     model,
     messages: messages as Parameters<typeof openai.chat.completions.create>[0]['messages'],
     temperature: replyTemperature,
-    // Cap length to discourage rambling; still enough for verbatim usage text and required fixed phrases.
-    max_tokens: 768,
+    max_tokens: replyMaxTokens,
   });
 
   const reply = completion.choices[0]?.message?.content;
   if (!reply) {
     throw new Error('OpenAI returned an empty response');
   }
+
+  // ---- P1-5: capture the decision telemetry that was previously discarded at this line ----
+  const finishReason = completion.choices[0]?.finish_reason ?? null;
+  const usage = completion.usage ?? null;
+  const telemetry: ReplyTelemetry = {
+    prompt: {
+      hash: createHash('sha256').update(JSON.stringify(messages)).digest('hex'),
+      charCount: systemPrompt.length,
+      tokenEstimate: estimateTokens(systemPrompt),
+      // Masked, size-capped copy of the SYSTEM prompt (persona/blocks/footer/injected directives —
+      // the §15.2 reconstruction target). redactPII keeps structure while masking any embedded PII.
+      preview: redactPII(systemPrompt).slice(0, LEDGER_PROMPT_PREVIEW_MAX_CHARS),
+    },
+    model: {
+      requested: model,
+      served: completion.model ?? null,
+      customModelUsed: Boolean(config.custom_model_id),
+      temperature: replyTemperature,
+      maxTokens: replyMaxTokens,
+      seed: null, // never sent today; recording a seed is an RC-03 change, out of P1-5 scope.
+      finishReason,
+      truncated: finishReason === 'length',
+      systemFingerprint: completion.system_fingerprint ?? null,
+    },
+    usage: {
+      promptTokens: usage?.prompt_tokens ?? null,
+      completionTokens: usage?.completion_tokens ?? null,
+      totalTokens: usage?.total_tokens ?? null,
+      usdCost: computeCost(model, usage),
+    },
+    retrieval: retrievalSink.value ?? null,
+  };
+  // Structured cost/telemetry log — observable immediately, before the ledger relay drains
+  // (migration-path step 2). No customer text; the query is already redacted in the [retrieval] log.
+  console.info('[ai.generation]', {
+    conversationId,
+    tenantId,
+    traceId: traceId ?? null,
+    model: telemetry.model.requested,
+    served: telemetry.model.served,
+    temperature: telemetry.model.temperature,
+    finishReason: telemetry.model.finishReason,
+    truncated: telemetry.model.truncated,
+    promptTokens: telemetry.usage.promptTokens,
+    completionTokens: telemetry.usage.completionTokens,
+    usdCost: telemetry.usage.usdCost,
+    semanticSkipped: telemetry.retrieval?.semanticSkipped ?? null,
+  });
 
   return {
     reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
@@ -4153,6 +4257,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
     hadImages: hasImages,
     productNotInCatalog,
     customerAskedPrice,
+    telemetry,
   };
 }
 
