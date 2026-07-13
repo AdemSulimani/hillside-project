@@ -25,6 +25,7 @@ import {
   seedTenantPromptBlocksFromCatalog,
 } from '../db/models/promptBlock';
 import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
+import { logSafe, logSafeStructured } from '../utils/redact';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import {
   activeEmbeddingModel,
@@ -727,7 +728,7 @@ export async function matchProductsForCustomerMessage(
   // aggregator. Captures enough to reconstruct what was retrieved vs. what was correct.
   console.info('[retrieval]', {
     tenantId,
-    query: trimmed.slice(0, 120),
+    query: logSafe(trimmed),
     categoryIntent,
     semanticSkipped,
     sources: sources.map((s) => ({ name: s.name, count: s.products.length })),
@@ -1260,19 +1261,19 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
     if (raw?.trim()) {
       const parsed = JSON.parse(raw) as { is_price_question?: boolean };
       if (parsed.is_price_question === true) {
-        console.info('[price_classifier] result=true message_preview:', inbound.slice(0, 80));
+        console.info('[price_classifier] result=true message_preview:', logSafe(inbound));
         return true;
       }
       if (parsed.is_price_question === false) {
-        console.info('[price_classifier] result=false message_preview:', inbound.slice(0, 80));
+        console.info('[price_classifier] result=false message_preview:', logSafe(inbound));
         return false;
       }
-      console.warn('[price_classifier] unexpected shape — falling back to lexical', { raw: raw.slice(0, 200) });
+      console.warn('[price_classifier] unexpected shape — falling back to lexical', { raw: logSafeStructured(raw) });
     }
   } catch (err) {
     console.warn('[price_classifier] classifier failed — falling back to lexical', {
       error: err instanceof Error ? err.message : String(err),
-      message_preview: inbound.slice(0, 80),
+      message_preview: logSafe(inbound),
     });
   }
 
@@ -1436,7 +1437,7 @@ export async function classifySpeculativeHealthAdvice(text: string): Promise<boo
   } catch (err) {
     console.warn('[speculative_health_classifier] classifier failed — falling open', {
       error: err instanceof Error ? err.message : String(err),
-      text_preview: text.slice(0, 80),
+      text_preview: logSafe(text),
     });
   }
 
@@ -1513,7 +1514,7 @@ export async function classifyFollowUpInvitationInReply(reply: string): Promise<
   } catch (err) {
     console.warn('[follow_up_invitation_classifier] classifier failed — falling open', {
       error: err instanceof Error ? err.message : String(err),
-      reply_preview: text.slice(0, 80),
+      reply_preview: logSafe(text),
     });
   }
 
@@ -1577,14 +1578,14 @@ export async function classifyContextualProductFollowUp(
     if (raw?.trim()) {
       const parsed = JSON.parse(raw) as { is_followup?: boolean };
       if (typeof parsed.is_followup === 'boolean') {
-        console.info('[followup_classifier] result=' + parsed.is_followup + ' message_preview:', inbound.slice(0, 80));
+        console.info('[followup_classifier] result=' + parsed.is_followup + ' message_preview:', logSafe(inbound));
         return parsed.is_followup;
       }
     }
   } catch (err) {
     console.warn('[followup_classifier] classifier failed — falling back to heuristics', {
       error: err instanceof Error ? err.message : String(err),
-      message_preview: inbound.slice(0, 80),
+      message_preview: logSafe(inbound),
     });
   }
 
@@ -1729,7 +1730,7 @@ export async function classifyOtherProductOptionsIntent(
         console.info('[other_options_classifier]', {
           result: result.is_other_options_request,
           category_hint: result.category_hint,
-          message_preview: inbound.slice(0, 80),
+          message_preview: logSafe(inbound),
         });
         return result;
       }
@@ -1737,7 +1738,7 @@ export async function classifyOtherProductOptionsIntent(
   } catch (err) {
     console.warn('[other_options_classifier] Classifier failed — falling back to heuristic', {
       error: err instanceof Error ? err.message : String(err),
-      message_preview: inbound.slice(0, 80),
+      message_preview: logSafe(inbound),
     });
   }
 
@@ -2922,7 +2923,7 @@ Return ONLY JSON:
   } catch (err) {
     console.warn('[order_info_update_classifier] failed, returning default', {
       error: err instanceof Error ? err.message : String(err),
-      message_preview: inbound.slice(0, 80),
+      message_preview: logSafe(inbound),
     });
     return defaultResult;
   }
@@ -3648,8 +3649,8 @@ export async function generateReply(
       conversationId,
       tenantId,
       categoryHint: otherOptionsIntent.category_hint,
-      anchor: anchor?.slice(0, 80) ?? null,
-      freshSearchQuery: freshSearchQuery?.slice(0, 80) ?? null,
+      anchor: anchor ? logSafe(anchor) : null,
+      freshSearchQuery: freshSearchQuery ? logSafe(freshSearchQuery) : null,
     });
     if (freshSearchQuery) {
       try {
@@ -3737,7 +3738,7 @@ export async function generateReply(
           conversationId,
           tenantId,
           productIds: persisted.map((p) => p.id),
-          query: searchText.slice(0, 120),
+          query: logSafe(searchText),
           detectedBy: heuristicFollowUp ? 'heuristic' : 'classifier',
         });
       }
@@ -4290,7 +4291,7 @@ export async function classifyProductImageRequest(
 
     console.info('[image_request_classifier] is_image_request=true', {
       product_refs: refs,
-      message_preview: inbound.slice(0, 80),
+      message_preview: logSafe(inbound),
     });
 
     return {
@@ -4300,7 +4301,7 @@ export async function classifyProductImageRequest(
   } catch (err) {
     console.warn('[image_request_classifier] Classifier failed — returning false', {
       error: err instanceof Error ? err.message : String(err),
-      message_preview: inbound.slice(0, 80),
+      message_preview: logSafe(inbound),
     });
     return falseResult;
   }
