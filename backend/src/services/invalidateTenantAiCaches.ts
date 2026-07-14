@@ -3,6 +3,7 @@ import {
   catalogGuardNamesKey,
   catalogGuardPricesKey,
 } from './catalogGuardReferenceService';
+import { deleteVersionedAiCaches } from './aiConfigCache';
 
 /**
  * Clears all Redis caches used by AI reply assembly for this tenant.
@@ -23,4 +24,10 @@ export async function invalidateTenantAiCaches(tenantId: string): Promise<void> 
     catalogGuardPricesKey(tenantId),
     catalogGuardNamesKey(tenantId),
   );
+  // P2-3 (RC-17): also clear the versioned ai_config / prompt-blocks keys so every existing caller
+  // (all 12 delete-only sites) self-corrects under the flag. ai_config-ROW mutators additionally
+  // write-through the fresh row (see writeThroughAiConfig) AFTER this DEL for instant fleet-wide
+  // propagation; generic callers (prompt-block / catalog / tenant edits) leave the versioned key
+  // deleted so the next read repopulates from the unchanged DB row. No-op when the flag is off.
+  await deleteVersionedAiCaches(tenantId);
 }

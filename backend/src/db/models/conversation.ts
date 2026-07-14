@@ -31,6 +31,9 @@ export interface Conversation {
   slot_customer_name?: string | null;
   slot_customer_phone?: string | null;
   slot_delivery_address?: string | null;
+  // P2-3 (migration 078, RC-13) — the last AI-recommended product ids, persisted so the
+  // recommendation anchor survives past the 40-row history window. JSONB array of catalog UUIDs.
+  slot_last_recommended_product_ids?: string[] | null;
   reply_locale?: 'sq' | 'en' | null;
   reply_locale_updated_at?: Date | null;
   created_at: Date;
@@ -249,6 +252,28 @@ export async function persistOrderSlots(
          updated_at = now()
      WHERE id = $1 AND tenant_id = $2`,
     [id, tenantId, slots.name ?? null, slots.phone ?? null, slots.address ?? null],
+  );
+}
+
+/**
+ * P2-3 (RC-13): persist the ids of the products this AI reply recommended, so the recommendation
+ * anchor survives past the 40-row history window. REPLACE-on-non-empty (newest recommendation
+ * wins); a caller MUST NOT pass an empty list for a holding/escalation turn — the skip-empty guard
+ * here is a second line of defence so an empty list never wipes a previously-stored anchor (mirrors
+ * `collectRecentlyDiscussedProductIds`'s skip-empty logic).
+ */
+export async function persistLastRecommendedProductIds(
+  id: string,
+  tenantId: string,
+  productIds: string[],
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  if (!Array.isArray(productIds) || productIds.length === 0) return;
+  await client.query(
+    `UPDATE conversations
+     SET slot_last_recommended_product_ids = $3::jsonb, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [id, tenantId, JSON.stringify(productIds)],
   );
 }
 

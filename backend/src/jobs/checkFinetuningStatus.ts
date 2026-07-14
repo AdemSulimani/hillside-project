@@ -3,6 +3,7 @@ import { finetuningQueue } from './queues';
 import { openai, OPENAI_FINETUNING_BASE_MODEL } from '../services/openaiClient';
 import { updateAIConfig } from '../db/models/aiConfig';
 import { invalidateTenantAiCaches } from '../services/invalidateTenantAiCaches';
+import { writeThroughAiConfig } from '../services/aiConfigCache';
 import pool from '../db/pool';
 
 export interface CheckFinetuningStatusJobData extends Record<string, unknown> {
@@ -50,7 +51,9 @@ export async function checkFinetuningStatus(
   const status = job.status;
 
   if (status === 'succeeded' && job.fine_tuned_model) {
-    await updateAIConfig(data.tenantId, { custom_model_id: job.fine_tuned_model });
+    const updatedConfig = await updateAIConfig(data.tenantId, {
+      custom_model_id: job.fine_tuned_model,
+    });
     // Clear the cached ai_config so the AI starts using the new fine-tuned model
     // immediately instead of after the 15-min cache TTL — otherwise replies keep
     // coming from the previous/base model for up to 15 minutes after training.
@@ -60,6 +63,10 @@ export async function checkFinetuningStatus(
         err,
       });
     });
+    // P2-3 (RC-17): write-through the new custom_model_id so every worker switches models within one
+    // request rather than after the TTL — the RC-17 headline case. Best-effort (no-op when the
+    // versioned-cache flag is off); the DEL above already prevents a stale serve if this blips.
+    await writeThroughAiConfig(data.tenantId, updatedConfig);
     try {
       await pool.query(
         `UPDATE feedback_logs

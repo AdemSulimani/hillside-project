@@ -6,6 +6,8 @@ import {
   findPausedConversationsByTenant,
 } from '../db/models/conversation';
 import { sendError, sendSuccess } from '../utils/response';
+import { invalidateTenantAiCaches } from '../services/invalidateTenantAiCaches';
+import { AI_CONFIG_VERSIONED_CACHE, writeThroughAiConfig } from '../services/aiConfigCache';
 
 export async function globalStatus(req: Request, res: Response): Promise<void> {
   try {
@@ -29,6 +31,15 @@ export async function toggleGlobal(req: Request, res: Response): Promise<void> {
     }
 
     const updated = await updateAIConfig(tenantId, { is_active: !config.is_active });
+
+    // P2-3 (RC-17 / C-55): the toggle path historically never invalidated the ai_config cache, so a
+    // flipped is_active stayed stale for up to 900s per worker (workers diverged on whether AI was
+    // on). Under the versioned cache, invalidate + write-through the fresh row for instant fleet-wide
+    // propagation. Gated by the flag so flag-off stays byte-for-byte (C-55 heals with the refactor).
+    if (AI_CONFIG_VERSIONED_CACHE) {
+      await invalidateTenantAiCaches(tenantId);
+      await writeThroughAiConfig(tenantId, updated ?? null);
+    }
 
     sendSuccess(
       res,

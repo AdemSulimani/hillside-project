@@ -23,6 +23,24 @@ import {
   type Product,
 } from '../db/models/product';
 import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
+import { findConversationById } from '../db/models/conversation';
+import {
+  AI_CONFIG_VERSIONED_CACHE,
+  aiConfigVersion,
+  cacheSetIfNewer,
+  normalizeAiConfig,
+  promptBlocksVersion,
+  readVersionedCache,
+  versionedAiConfigKey,
+  versionedPromptBlocksKey,
+} from './aiConfigCache';
+import { isCannedHoldingCopy } from './cannedReplyText';
+import { historyRoleFor, keepMessageInHistory } from './historyTranscript';
+import {
+  buildConversationSummary,
+  type SummaryMessage,
+  type SummaryProduct,
+} from './conversationSummary';
 import {
   countTenantPromptBlocks,
   forceSyncLockedBlocksForTenant,
@@ -133,6 +151,36 @@ export const DEFAULT_REPLY_LOCALE: ReplyLocale = 'sq';
  */
 export const STICKY_LOCALE_SLOT =
   (process.env.STICKY_LOCALE_SLOT ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-3 (RC-16): when ON, the reassembled history excludes never-delivered (send-failed) non-customer
+ * rows and relabels delivered-but-non-authoritative rows (flagged low-quality replies + canned
+ * holding/escalation/procedural copy) from `assistant` to `system`, so the model stops
+ * re-conditioning on its own bad or phantom prior output. Defaults OFF: flag-off keeps the binary
+ * `sent_by==='customer' ? 'user' : 'assistant'` mapping byte-for-byte.
+ */
+const HISTORY_DELIVERY_FILTERED =
+  (process.env.HISTORY_DELIVERY_FILTERED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-3 (RC-13): when ON, the older-context summary is rebuilt from the PERSISTED slot store
+ * (name/phone/address/order_stage + the last-recommendation anchor, migrations 077/078) plus a
+ * bounded extractive tail — so load-bearing facts survive past the 40-row window and the AI never
+ * re-asks a provided field or denies a previously-recommended in-stock product. Defaults OFF:
+ * flag-off runs the legacy customer-message-only `summarizeOlderConversationContext` byte-for-byte
+ * and writes no slots.
+ */
+export const SUMMARY_SLOT_BACKED =
+  (process.env.SUMMARY_SLOT_BACKED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * Hard cap (characters) on the slot-backed summary's extractive tail — the RC-26 unbudgeted-prompt
+ * guard. Env-overridable.
+ */
+const SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS = (() => {
+  const n = parseInt(process.env.SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS || '600', 10);
+  return Number.isFinite(n) && n > 0 ? n : 600;
+})();
 
 const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   const raw = process.env.CONTEXT_MAX_HISTORY_TOKENS;
@@ -294,6 +342,24 @@ const DEFAULT_AI_CONFIG: Pick<
 };
 
 async function loadAIConfig(tenantId: string) {
+  // P2-3 (RC-17): versioned / compare-and-set path. Read the versioned key; on a miss, load the DB
+  // row and populate with SET-IF-NEWER so a stale populate can never overwrite a newer write-through
+  // (resurrection race closed). A missing config row (brand-new tenant mid-onboarding) is NOT cached
+  // — we return the default and re-check DB next call so a version-0 default can never mask the real
+  // row once it is created. Trust the TTL on a hit (no DB revalidation → immune to the benign
+  // feedback_count → updated_at bump).
+  if (AI_CONFIG_VERSIONED_CACHE) {
+    const versionedKey = versionedAiConfigKey(tenantId);
+    const hit = await readVersionedCache<AIConfig>(versionedKey);
+    if (hit) return normalizeAiConfig(hit);
+
+    const config = await findAIConfigByTenant(tenantId);
+    if (!config) return normalizeAiConfig(DEFAULT_AI_CONFIG);
+    const normalized = normalizeAiConfig(config);
+    await cacheSetIfNewer(versionedKey, aiConfigVersion(config.updated_at), normalized);
+    return normalized;
+  }
+
   const cacheKey = `ai_config:${tenantId}`;
   const cached = await redisConnection.get(cacheKey);
   if (cached) {
@@ -346,6 +412,23 @@ async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
 }
 
 async function loadTenantPromptBlocksCached(tenantId: string) {
+  // P2-3 (RC-17): the prompt-blocks twin shares the ai_config resurrection shape. Under the flag it
+  // uses the SAME versioned populate (SET-IF-NEWER, version = newest block updated_at). Block
+  // mutators keep DELETE-based invalidation (there is no cheap fresh-list write-through), so a
+  // narrow residual window remains after an edit — bounded by the every-reply locked-block self-heal
+  // which re-DELs on drift, and block edits are rare. Behind AI_CONFIG_VERSIONED_CACHE; flag-off is
+  // the legacy EX 900 path byte-for-byte.
+  if (AI_CONFIG_VERSIONED_CACHE) {
+    const versionedKey = versionedPromptBlocksKey(tenantId);
+    const hit = await readVersionedCache<Awaited<ReturnType<typeof listTenantPromptBlocksRuntime>>>(
+      versionedKey,
+    );
+    if (hit) return hit;
+    const rows = await listTenantPromptBlocksRuntime(tenantId);
+    await cacheSetIfNewer(versionedKey, promptBlocksVersion(rows), rows);
+    return rows;
+  }
+
   const cacheKey = `tenant_prompt_blocks:${tenantId}`;
   const cached = await redisConnection.get(cacheKey);
   if (cached) {
@@ -3181,6 +3264,54 @@ function summarizeOlderConversationContext(messages: Message[]): string | null {
   return parts.join(' ');
 }
 
+/**
+ * P2-3 (RC-13): the slot-backed replacement for `summarizeOlderConversationContext`. Pulls the
+ * persisted slots (name/phone/address/order_stage) + the last-recommendation anchor — which survive
+ * beyond the 40-row window — from the conversation row, resolves the anchor to still-active/in-stock
+ * products (so a since-deleted product is never re-offered and an in-stock prior recommendation is
+ * never denied), and hands them with the older segment to the pure projector. Best-effort reads: a
+ * DB blip degrades to the extractive tail rather than throwing.
+ */
+async function buildSlotBackedOlderSummary(
+  tenantId: string,
+  conversationId: string,
+  olderHistory: Message[],
+): Promise<string | null> {
+  const conversation = await findConversationById(conversationId).catch(() => null);
+  const recIds = Array.isArray(conversation?.slot_last_recommended_product_ids)
+    ? (conversation!.slot_last_recommended_product_ids as string[])
+    : [];
+  let recommendedProducts: SummaryProduct[] = [];
+  if (recIds.length > 0) {
+    const products = await findActiveProductsByIds(tenantId, recIds).catch(() => [] as Product[]);
+    recommendedProducts = products.map((p) => ({
+      name: p.name,
+      price: p.price != null ? Number(p.price) : null,
+      discountedPrice: p.discounted_price != null ? Number(p.discounted_price) : null,
+    }));
+  }
+  const olderMessages: SummaryMessage[] = olderHistory.map((msg) => ({
+    isCustomer: msg.sent_by === 'customer',
+    text:
+      msg.sent_by === 'customer'
+        ? formatCustomerMessageContentForPrompt(msg, {
+            editedAfterOutbound: customerMessageEditedAfterOutbound(msg, olderHistory),
+          })
+        : (msg.content ?? '').trim(),
+  }));
+  return buildConversationSummary({
+    slots: {
+      name: conversation?.slot_customer_name ?? null,
+      phone: conversation?.slot_customer_phone ?? null,
+      address: conversation?.slot_delivery_address ?? null,
+      orderStage: conversation?.order_stage ?? null,
+    },
+    recommendedProducts,
+    olderMessages,
+    maxTailChars: SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS,
+  });
+}
+
 function buildMessagesArray(
   systemPrompt: string,
   conversationHistory: Message[],
@@ -3206,16 +3337,27 @@ function buildMessagesArray(
 
   for (const msg of conversationHistory) {
     const histUrls = normalizeAttachmentUrls(msg.attachment_urls);
-    const role: 'user' | 'assistant' =
-      msg.sent_by === 'customer' ? 'user' : 'assistant';
-    const textContent =
+    // P2-3 (RC-16): under the flag, a delivered-but-non-authoritative non-customer row (a flagged
+    // low-quality reply or canned holding/escalation copy) maps to `system` instead of `assistant`
+    // so the model does not treat it as its own authoritative prior statement. Flag-off keeps the
+    // binary customer→user / else→assistant mapping byte-for-byte.
+    const role: 'user' | 'assistant' | 'system' = HISTORY_DELIVERY_FILTERED
+      ? historyRoleFor(msg, isCannedHoldingCopy)
+      : msg.sent_by === 'customer'
+        ? 'user'
+        : 'assistant';
+    const rawText =
       role === 'user'
         ? formatCustomerMessageContentForPrompt(msg, {
             editedAfterOutbound: customerMessageEditedAfterOutbound(msg, conversationHistory),
           })
         : (msg.content ?? '').trim();
-    if (!textContent && histUrls.length === 0) continue;
+    if (!rawText && histUrls.length === 0) continue;
 
+    const textContent =
+      role === 'system'
+        ? `[Prior lower-quality/holding assistant reply — context only, not authoritative]\n${rawText}`
+        : rawText;
     messages.push({ role, content: textContent });
   }
 
@@ -3584,15 +3726,30 @@ export async function generateReply(
     productCatalogContext ? Promise.resolve([] as Product[]) : loadProductCatalog(tenantId),
     countActiveProducts(tenantId),
   ]);
+  // P2-3 (RC-16): delivery-filter the fetched window (drop never-delivered send-failed non-customer
+  // rows) BEFORE the older/recent split, so both the summary and the transcript role loop operate on
+  // kept rows only. Flag-off uses the raw window byte-for-byte. Language detection below still reads
+  // the raw `conversationHistoryWindow` (a failed send should not influence anything, but we keep the
+  // filter scoped to prompt assembly to stay surgical).
+  const historyWindowForPrompt = HISTORY_DELIVERY_FILTERED
+    ? conversationHistoryWindow.filter(keepMessageInHistory)
+    : conversationHistoryWindow;
   const olderHistory =
-    conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
-      ? conversationHistoryWindow.slice(0, -RECENT_RAW_HISTORY_MESSAGES)
+    historyWindowForPrompt.length > RECENT_RAW_HISTORY_MESSAGES
+      ? historyWindowForPrompt.slice(0, -RECENT_RAW_HISTORY_MESSAGES)
       : [];
-  const olderHistorySummary = summarizeOlderConversationContext(olderHistory);
+  // P2-3 (RC-13): the slot-backed summary carries persisted facts + the last recommendation past the
+  // window (only when an older segment exists — a short conversation keeps every fact in the recent
+  // raw window). Flag-off runs the legacy customer-message-only summarizer byte-for-byte.
+  const olderHistorySummary = SUMMARY_SLOT_BACKED
+    ? olderHistory.length > 0
+      ? await buildSlotBackedOlderSummary(tenantId, conversationId, olderHistory)
+      : null
+    : summarizeOlderConversationContext(olderHistory);
   const conversationHistory =
-    conversationHistoryWindow.length > RECENT_RAW_HISTORY_MESSAGES
-      ? conversationHistoryWindow.slice(-RECENT_RAW_HISTORY_MESSAGES)
-      : conversationHistoryWindow;
+    historyWindowForPrompt.length > RECENT_RAW_HISTORY_MESSAGES
+      ? historyWindowForPrompt.slice(-RECENT_RAW_HISTORY_MESSAGES)
+      : historyWindowForPrompt;
   const [customerAskedPrice, customerAskedDiscount, detectedLanguage, attributeIntent, otherOptionsIntent] =
     await Promise.all([
       customerAskedAboutPrice(inboundMessage),
