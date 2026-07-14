@@ -1,5 +1,6 @@
 import { findTenantById } from '../db/models/tenant';
 import { openai, OPENAI_EVAL_MODEL } from './openaiClient';
+import { logger } from '../utils/logger';
 
 function evalModel(): string {
   return process.env.OPENAI_EVAL_MODEL?.trim() || OPENAI_EVAL_MODEL;
@@ -179,13 +180,18 @@ If the AI said a product is not available and that product genuinely does not ap
 
     const content = completion.choices[0]?.message?.content;
     if (!content) {
-      console.warn('[aiQuality] Empty evaluator response');
+      logger.warn('[aiQuality] Empty evaluator response');
       return null;
     }
 
     return parseEvaluationJson(content.trim());
   } catch (err) {
-    console.error('[aiQuality] evaluateReply failed', { tenantId, err });
+    // Fall-open degradation (returns null → reply proceeds unevaluated), and this eval runs on
+    // every reply — so warn (not error/Sentry) to avoid flooding on transient OpenAI blips.
+    logger.warn('[aiQuality] evaluateReply failed', {
+      tenantId,
+      err: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }

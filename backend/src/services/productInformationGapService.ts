@@ -16,6 +16,7 @@
  * imports the OpenAI client, which is not import-safe in unit tests.
  */
 import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
+import { logger } from '../utils/logger';
 
 export interface ProductInfoAssessment {
   /** Grounded answer for the parts we can answer; '' when nothing is answerable. */
@@ -111,7 +112,9 @@ export async function assessProductInformationRequest(
 
     return { answer, missing, ok: true, errored: false };
   } catch (err) {
-    console.warn('[productInformationGap] assessment failed — failing closed', { err });
+    logger.warn('[productInformationGap] assessment failed — failing closed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
     return failed;
   }
 }

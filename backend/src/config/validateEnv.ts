@@ -129,6 +129,18 @@ export function validateRequiredEnv(): void {
     );
   }
 
+  // P2-4 Part 1: surface the AI-path observability posture at boot so operators know how logs are
+  // shaped and whether the decision ledger is recording. Purely informational — never fatal.
+  const structuredLogging =
+    (process.env.STRUCTURED_LOGGING ?? 'false').trim().toLowerCase() === 'true';
+  const decisionLedger =
+    (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+  console.info(
+    `[observability] STRUCTURED_LOGGING=${structuredLogging ? 'on (JSON, correlation-keyed)' : 'off (legacy console)'}; ` +
+      `AI_DECISION_LEDGER_ENABLED=${decisionLedger ? 'on' : 'off'}; ` +
+      `REDACT_PII=${REDACT_PII ? 'on' : 'off'}`,
+  );
+
   if (warnings.length > 0) {
     console.warn('[env] Security warnings:\n' + warnings.join('\n'));
   }
