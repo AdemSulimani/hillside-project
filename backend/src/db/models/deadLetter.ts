@@ -29,6 +29,8 @@ export interface DeadLetterRow {
   attempts: number;
   max_attempts: number | null;
   payload: Record<string, unknown>;
+  /** True when the payload was PII-masked at insert time (webhook bodies) — never replayable. */
+  payload_redacted: boolean;
   status: DeadLetterStatus;
   created_at: Date;
   replayed_at: Date | null;
@@ -47,6 +49,7 @@ export interface InsertDeadLetterInput {
   attempts: number;
   max_attempts?: number | null;
   payload?: Record<string, unknown>;
+  payload_redacted?: boolean;
 }
 
 /**
@@ -62,8 +65,8 @@ export async function insertDeadLetter(
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO dead_letter
        (queue_name, job_id, job_name, tenant_id, conversation_id, trace_id,
-        classification, reason, error, attempts, max_attempts, payload)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+        classification, reason, error, attempts, max_attempts, payload, payload_redacted)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
      ON CONFLICT (queue_name, job_id) DO NOTHING
      RETURNING id`,
     [
@@ -79,6 +82,7 @@ export async function insertDeadLetter(
       input.attempts,
       input.max_attempts ?? null,
       JSON.stringify(input.payload ?? {}),
+      input.payload_redacted ?? false,
     ],
   );
   return rows[0]?.id ?? null;

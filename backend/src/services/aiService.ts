@@ -82,9 +82,10 @@ import {
 } from './usageSuitabilityHelpers';
 import {
   CONFIDENCE_CONTRACT_SYMMETRY,
+  enforceConfidenceContract,
   hasUsableConfidence,
   normalizeClassifierConfidence,
-  resolveEscalationConfidence,
+  resolveEscalationConfidenceDetailed,
 } from './classifierConfidenceContract';
 
 export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeyword, containsSpeculativeHealthAdvice };
@@ -2471,6 +2472,8 @@ export async function detectCancellationOrRefundIntent(
   is_refund: boolean;
   reason: string | null;
   confidence: number;
+  /** P1-3 (RC-07): the legacy missing-confidence boost fired for this verdict (ledger field). */
+  confidence_boost_applied?: boolean;
 }> {
   const historySlice = conversationHistory.slice(-8);
   const historyText = historySlice
@@ -2533,9 +2536,12 @@ Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | nu
     const is_cancellation = parsed.is_cancellation === true;
     const is_refund = parsed.is_refund === true;
     const intentAsserted = is_cancellation || is_refund;
+    // P1-3: enforce the required-confidence contract (measurement + range check; the fail
+    // direction stays owned by the resolve below) and record whether the legacy boost fired.
+    const contract = enforceConfidenceContract(parsed, 'cancellation_refund');
     logMissingConfidenceContract('cancellation_refund', parsed.confidence, intentAsserted);
-    const confidence = resolveEscalationConfidence({
-      raw: parsed.confidence,
+    const resolved = resolveEscalationConfidenceDetailed({
+      raw: contract.rawConfidence,
       intentAsserted,
       legacyBoost: 0.9,
       applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
@@ -2545,7 +2551,8 @@ Return JSON: { is_cancellation: boolean, is_refund: boolean, reason: string | nu
       is_cancellation,
       is_refund,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
-      confidence,
+      confidence: resolved.confidence,
+      confidence_boost_applied: resolved.boostApplied,
     };
   } catch {
     return { is_cancellation: false, is_refund: false, reason: null, confidence: 0 };
@@ -2559,6 +2566,8 @@ export async function detectWrongProductIntent(
   is_wrong_product: boolean;
   reason: string | null;
   confidence: number;
+  /** P1-3 (RC-07): the legacy missing-confidence boost fired for this verdict (ledger field). */
+  confidence_boost_applied?: boolean;
 }> {
   const historySlice = conversationHistory.slice(-8);
   const historyText = historySlice
@@ -2611,9 +2620,10 @@ Return JSON: { "is_wrong_product": boolean, "reason": string | null, "confidence
     };
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
     const is_wrong_product = parsed.is_wrong_product === true;
+    const contract = enforceConfidenceContract(parsed, 'wrong_product');
     logMissingConfidenceContract('wrong_product', parsed.confidence, is_wrong_product);
-    const confidence = resolveEscalationConfidence({
-      raw: parsed.confidence,
+    const resolved = resolveEscalationConfidenceDetailed({
+      raw: contract.rawConfidence,
       intentAsserted: is_wrong_product,
       legacyBoost: 0.9,
       applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
@@ -2621,7 +2631,8 @@ Return JSON: { "is_wrong_product": boolean, "reason": string | null, "confidence
     return {
       is_wrong_product,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
-      confidence,
+      confidence: resolved.confidence,
+      confidence_boost_applied: resolved.boostApplied,
     };
   } catch {
     return { is_wrong_product: false, reason: null, confidence: 0 };
@@ -2637,6 +2648,8 @@ export async function detectPostPurchaseSupportIntent(
   is_wrong_product_issue: boolean;
   is_product_problem_issue: boolean;
   confidence: number;
+  /** P1-3 (RC-07): the legacy missing-confidence boost fired for this verdict (ledger field). */
+  confidence_boost_applied?: boolean;
   reason: string | null;
 }> {
   const historySlice = conversationHistory.slice(-8);
@@ -2716,9 +2729,10 @@ Return JSON exactly:
       is_not_delivered_complaint ||
       is_wrong_product_issue ||
       is_product_problem_issue;
+    const contract = enforceConfidenceContract(parsed, 'post_purchase');
     logMissingConfidenceContract('post_purchase', parsed.confidence, anyIntent);
-    const confidence = resolveEscalationConfidence({
-      raw: parsed.confidence,
+    const resolved = resolveEscalationConfidenceDetailed({
+      raw: contract.rawConfidence,
       intentAsserted: anyIntent,
       legacyBoost: 0.9,
       applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
@@ -2730,7 +2744,8 @@ Return JSON exactly:
       is_not_delivered_complaint,
       is_wrong_product_issue,
       is_product_problem_issue,
-      confidence,
+      confidence: resolved.confidence,
+      confidence_boost_applied: resolved.boostApplied,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
     };
   } catch {
@@ -2797,12 +2812,13 @@ Return JSON exactly:
     // carries NO boost, so a missing/zero confidence leaves confidence low and the caller's
     // gate abstains (the deterministic order-stage slot check in processAIReply.ts is what
     // preserves revenue, symmetrically with the escalation paths).
+    const contract = enforceConfidenceContract(parsed, 'order_affirmation');
     logMissingConfidenceContract(
       'order_affirmation',
       parsed.confidence,
       parsed.is_order_affirmation === true,
     );
-    const confidence = normalizeClassifierConfidence(parsed.confidence);
+    const confidence = normalizeClassifierConfidence(contract.rawConfidence);
     const reasonRaw = typeof parsed.reason === 'string' ? parsed.reason.trim() : null;
     return {
       is_order_affirmation: parsed.is_order_affirmation === true,
@@ -2836,6 +2852,8 @@ export async function detectOrderInfoUpdateIntent(
   is_order_info_update: boolean;
   fields: OrderInfoUpdateFields;
   confidence: number;
+  /** P1-3 (RC-07): the legacy missing-confidence boost fired for this verdict (ledger field). */
+  confidence_boost_applied?: boolean;
   reason: string | null;
 }> {
   const defaultResult = {
@@ -2926,9 +2944,10 @@ Return ONLY JSON:
     };
 
     const is_order_info_update = parsed.is_order_info_update === true;
+    const contract = enforceConfidenceContract(parsed, 'order_info_update');
     logMissingConfidenceContract('order_info_update', parsed.confidence, is_order_info_update);
-    const confidence = resolveEscalationConfidence({
-      raw: parsed.confidence,
+    const resolved = resolveEscalationConfidenceDetailed({
+      raw: contract.rawConfidence,
       intentAsserted: is_order_info_update,
       legacyBoost: 0.85,
       applySymmetry: CONFIDENCE_CONTRACT_SYMMETRY,
@@ -2957,7 +2976,8 @@ Return ONLY JSON:
     return {
       is_order_info_update,
       fields,
-      confidence,
+      confidence: resolved.confidence,
+      confidence_boost_applied: resolved.boostApplied,
       reason: reasonRaw && reasonRaw.length > 0 ? reasonRaw : null,
     };
   } catch (err) {

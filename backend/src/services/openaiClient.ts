@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { instrumentOpenAIClient } from './openaiCallTracker';
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error('OPENAI_API_KEY is not configured');
@@ -27,6 +28,11 @@ export const openai = new OpenAI({
   maxRetries: OPENAI_MAX_RETRIES,
   timeout: OPENAI_TIMEOUT_MS,
 });
+
+// P1-5 (C-108): record model + token usage + USD cost of EVERY chat/embedding call made
+// inside an AI-reply job into the decision ledger's `usage.calls` (transparent pass-through
+// outside a tracking context — see services/openaiCallTracker.ts).
+instrumentOpenAIClient(openai);
 
 export const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o';
 export const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || 'gpt-4o';

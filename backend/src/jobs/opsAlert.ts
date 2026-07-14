@@ -20,11 +20,17 @@ export interface OpsJobFailedAlert {
   stack?: string | null;
 }
 
-export async function postOpsJobFailedAlert(payload: OpsJobFailedAlert): Promise<void> {
+/**
+ * Never throws. Returns whether delivery succeeded: `false` when ALERT_WEBHOOK_URL is configured
+ * and the POST failed (network error or non-2xx) — the notifications processor throws on that so
+ * BullMQ genuinely retries. When the URL is unset there is nothing to deliver, so it warns and
+ * returns `true` (a retry could never succeed).
+ */
+export async function postOpsJobFailedAlert(payload: OpsJobFailedAlert): Promise<boolean> {
   const url = process.env.ALERT_WEBHOOK_URL?.trim();
   if (!url) {
     console.warn('[jobs] ALERT_WEBHOOK_URL is not set; cannot send job-failure alert');
-    return;
+    return true;
   }
 
   const text = [
@@ -49,10 +55,13 @@ export async function postOpsJobFailedAlert(payload: OpsJobFailedAlert): Promise
         status: resp.status,
         data: resp.data,
       });
+      return false;
     }
+    return true;
   } catch (err) {
     console.error('[jobs] Failed to POST ALERT_WEBHOOK_URL', {
       error: err instanceof Error ? err.message : err,
     });
+    return false;
   }
 }

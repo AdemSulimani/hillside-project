@@ -8,6 +8,7 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   orchestrateFailedJob,
+  queueCarriesCustomerText,
   type FailedJobInfo,
   type FailedJobEffects,
   type FailedJobFlags,
@@ -57,7 +58,7 @@ function makeEffects(existingKeys = new Set<string>()) {
   return { effects, inserts, alerts };
 }
 
-const ALL_ON: FailedJobFlags = { dlqEnabled: true, alertsEnabled: true };
+const ALL_ON: FailedJobFlags = { dlqEnabled: true, alertsEnabled: true, redactPii: true };
 
 describe('orchestrateFailedJob — stalled ai.reply (deploy SIGKILL)', () => {
   it('records a dead_letter row + alerts, even at attempt 1 of 3', async () => {
@@ -130,6 +131,7 @@ describe('orchestrateFailedJob — flag gating', () => {
     const outcome = await orchestrateFailedJob(aiReplyInfo(), err, effects, {
       dlqEnabled: false,
       alertsEnabled: false,
+      redactPii: true,
     });
     assert.equal(outcome.deadLettered, false);
     assert.equal(outcome.alerted, false);
@@ -144,6 +146,7 @@ describe('orchestrateFailedJob — flag gating', () => {
     const outcome = await orchestrateFailedJob(aiReplyInfo(), err, effects, {
       dlqEnabled: true,
       alertsEnabled: false,
+      redactPii: true,
     });
     assert.equal(outcome.deadLettered, true);
     assert.equal(outcome.alerted, false);
@@ -158,10 +161,82 @@ describe('orchestrateFailedJob — flag gating', () => {
     const outcome = await orchestrateFailedJob(aiReplyInfo(), err, effects, {
       dlqEnabled: false,
       alertsEnabled: true,
+      redactPii: true,
     });
     assert.equal(outcome.deadLettered, false);
     assert.equal(outcome.alerted, true);
     assert.equal(inserts.length, 0);
     assert.equal(alerts.length, 1);
+  });
+});
+
+describe('orchestrateFailedJob — dead_letter payload redaction (P1-6 boundary)', () => {
+  /** A webhook-queue payload: the raw inbound body carries customer free text/phone/email. */
+  function webhookInfo(): FailedJobInfo {
+    return aiReplyInfo({
+      queueName: 'webhook',
+      jobName: 'webhook.facebook',
+      data: {
+        tenantId: TENANT,
+        body: {
+          message: 'Call me on +38344123456',
+          email: 'filan@example.com',
+        },
+      },
+    });
+  }
+
+  it('masks a webhook-queue payload and sets payload_redacted', async () => {
+    const { effects, inserts } = makeEffects();
+    const err = new Error(STALLED_MESSAGE);
+    err.name = 'UnrecoverableError';
+
+    await orchestrateFailedJob(webhookInfo(), err, effects, ALL_ON);
+
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].input.payload_redacted, true);
+    const stored = JSON.stringify(inserts[0].input.payload);
+    assert.ok(!stored.includes('38344123456'), 'phone must be masked');
+    assert.ok(!stored.includes('filan@example.com'), 'email must be masked');
+    assert.ok(stored.includes('[phone#3456]'), 'phone token keeps last-4 for correlation');
+  });
+
+  it('stores an ai-queue payload verbatim with payload_redacted=false (ids only)', async () => {
+    const { effects, inserts } = makeEffects();
+    const err = new Error(STALLED_MESSAGE);
+    err.name = 'UnrecoverableError';
+    const info = aiReplyInfo();
+
+    await orchestrateFailedJob(info, err, effects, ALL_ON);
+
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].input.payload_redacted, false);
+    assert.deepEqual(inserts[0].input.payload, info.data);
+  });
+
+  it('REDACT_PII off: webhook payload stored raw with payload_redacted=false', async () => {
+    const { effects, inserts } = makeEffects();
+    const err = new Error(STALLED_MESSAGE);
+    err.name = 'UnrecoverableError';
+    const info = webhookInfo();
+
+    await orchestrateFailedJob(info, err, effects, {
+      dlqEnabled: true,
+      alertsEnabled: true,
+      redactPii: false,
+    });
+
+    assert.equal(inserts.length, 1);
+    assert.equal(inserts[0].input.payload_redacted, false);
+    assert.deepEqual(inserts[0].input.payload, info.data);
+  });
+});
+
+describe('queueCarriesCustomerText', () => {
+  it('flags only the webhook queue (raw inbound bodies); the id-only queues stay verbatim', () => {
+    assert.equal(queueCarriesCustomerText('webhook'), true);
+    for (const q of ['ai', 'notifications', 'finetuning', 'default']) {
+      assert.equal(queueCarriesCustomerText(q), false);
+    }
   });
 });

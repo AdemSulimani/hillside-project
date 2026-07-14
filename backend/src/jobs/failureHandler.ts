@@ -23,6 +23,7 @@ import {
   type FailedJobFlags,
 } from './failedJobOrchestration';
 import { insertDeadLetter } from '../db/models/deadLetter';
+import { REDACT_PII } from '../utils/redact';
 import { createAIAlert } from '../db/models/aiAlert';
 import { findChannelById, type ChannelType } from '../db/models/channel';
 import { socketService } from '../services/socketService';
@@ -153,6 +154,7 @@ export function attachWorkerFailureHandler(
   const flags: FailedJobFlags = {
     dlqEnabled: flag('DLQ_ENABLED'),
     alertsEnabled: flag('DLQ_EXHAUSTION_ALERTS_ENABLED'),
+    redactPii: REDACT_PII,
   };
 
   worker.on('failed', (job: Job | undefined, err: Error) => {
@@ -205,6 +207,16 @@ export function attachWorkerFailureHandler(
     // worker (mirrors the previous `void sendProductionAlert`).
     void orchestrateFailedJob(info, err, realEffects, flags).catch((orchErr) => {
       console.error('[jobs] failed-job orchestration error', { queueName, jobId: info.jobId, err: orchErr });
+      // If the dead_letter INSERT itself failed (e.g. Postgres down), the Sentry event inside
+      // raiseExhaustionAlerts never fired either — report the orchestration failure to Sentry
+      // directly (DB-independent), guarded so Sentry failing can never throw in this handler.
+      try {
+        Sentry.captureException(orchErr, {
+          tags: { queue: queueName, jobName: info.jobName ?? 'unknown', phase: 'failed-job-orchestration' },
+        });
+      } catch (sentryErr) {
+        console.error('[jobs] Sentry captureException failed', { err: sentryErr });
+      }
     });
 
     // Legacy inline operator webhook — kept only when the notifications-queue path is NOT taking over.

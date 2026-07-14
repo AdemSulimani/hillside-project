@@ -28,6 +28,8 @@ import {
   enqueueLedgerViaOutbox,
   writeLedgerBestEffort,
 } from './aiDecisionLedgerWriter';
+import { insertOutboxTx } from '../db/models/outbox';
+import { deriveReplyIdempotencyKey, type ReplySlot } from '../services/replyIdempotency';
 import {
   createOrder,
   findLatestActiveOrderForConversation,
@@ -131,6 +133,8 @@ import {
   RATE_LIMIT_DELIVERED_INCR_SCRIPT,
 } from '../services/rateLimitDeliveredCount';
 import { shouldAutoResumeRateLimitPause } from '../services/aiResumePolicy';
+import { getOrComputeClassifierVerdict } from '../services/classifierVerdictStore';
+import { runWithOpenAICallTracking } from '../services/openaiCallTracker';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -723,6 +727,19 @@ const RATE_LIMIT_COUNT_DELIVERED_ONLY =
   (process.env.RATE_LIMIT_COUNT_DELIVERED_ONLY ?? 'false').trim().toLowerCase() === 'true';
 
 /**
+ * P1-1 (RC-20): when the outbox relay owns dispatch (both flags on), the staged reply's
+ * deterministic side-effects — the `ai_reply_sent` analytics event, the use-case-eval enqueue,
+ * the delivered-reply rate count, and the send-failure / missing-image alerts — are written as
+ * outbox rows INSIDE the flip transaction and performed exactly-once by the relay. The inline
+ * tail versions below are skipped, so a crash between the flip commit and the tail can no
+ * longer lose them. Off → the legacy inline tail runs as before (mirrors `outboxOwnsDelivery`
+ * in processInboundMessage.ts).
+ */
+const OUTBOX_OWNS_REPLY_EFFECTS =
+  (process.env.OUTBOX_RELAY_ENABLED ?? 'false').trim().toLowerCase() === 'true' &&
+  (process.env.OUTBOX_DISPATCH_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
  * P0-5 (RC-14, RC-06): when ON, a `rate_limit_exceeded` pause auto-expires — a new inbound
  * whose delivered-only (P0-6) rate counter has rolled over, with no open sensitive alert
  * and no active human hold, clears the pause and answers instead of leaving the
@@ -756,7 +773,7 @@ function logConfidenceGateBoundary(
   gate: string,
   confidence: number,
   threshold: number,
-  ctx: { tenantId: string; conversationId: string },
+  ctx: { tenantId: string; conversationId: string; inboundExternalId?: string },
 ): void {
   if (!CONFIDENCE_CONTRACT_SYMMETRY) return;
   const verdict = classifyConfidenceGate({
@@ -765,11 +782,42 @@ function logConfidenceGateBoundary(
     band: CONFIDENCE_HYSTERESIS_BAND,
     applySymmetry: true,
   });
-  if (verdict === 'abstain') {
-    console.info(
-      `[CONFIDENCE_GATE] gate: ${gate} verdict: abstain confidence: ${confidence} threshold: ${threshold} band: ${CONFIDENCE_HYSTERESIS_BAND} tenantId: ${ctx.tenantId} conversationId: ${ctx.conversationId}`,
-    );
-  }
+  if (verdict !== 'abstain') return;
+  console.info(
+    `[CONFIDENCE_GATE] gate: ${gate} verdict: abstain confidence: ${confidence} threshold: ${threshold} band: ${CONFIDENCE_HYSTERESIS_BAND} tenantId: ${ctx.tenantId} conversationId: ${ctx.conversationId}`,
+  );
+  // P1-3 (RC-08): an in-band score is a genuine ambiguity — the gated action does not fire,
+  // but a human should see it (a refund demand at 0.82 must not vanish into a normal sales
+  // reply with only a log line, and an in-band order-intent score is a warm lead worth a
+  // follow-up). Non-pausing, fail_closed=false (a real boundary case, not a degradation),
+  // deduped per (conversation, gate, inbound) so a BullMQ retry cannot double-alert. Entirely
+  // best-effort: an alert failure never touches the reply path. The UI also polls alerts, so
+  // no per-alert socket payload is needed here (mirrors the outbox relay's alert dispatch).
+  void (async () => {
+    try {
+      if (ctx.inboundExternalId) {
+        const marker = `ai_abstain_alert:${ctx.conversationId}:${gate}:${ctx.inboundExternalId}`;
+        const set = await redisConnection
+          .set(marker, '1', 'EX', 6 * 3600, 'NX')
+          .catch(() => null);
+        if (set !== 'OK') return;
+      }
+      await createAIAlert({
+        tenant_id: ctx.tenantId,
+        conversation_id: ctx.conversationId,
+        message_id: null,
+        reason: 'confidence_band_abstain',
+        details: { gate, confidence, threshold, band: CONFIDENCE_HYSTERESIS_BAND },
+      });
+      socketService.emitConversationUpdated(ctx.tenantId, ctx.conversationId);
+    } catch (err) {
+      console.warn('[CONFIDENCE_GATE] abstain alert failed (ignored)', {
+        gate,
+        conversationId: ctx.conversationId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  })();
 }
 
 const DELIVERY_TIME_LABEL_HOURS: Record<DeliveryTime, number> = {
@@ -1212,6 +1260,15 @@ function looksLikeOrderAffirmation(text: string): boolean {
   return (
     // Explicit short affirmations
     /^(po|ok|okej|yes|yep|sure|alright)\b/.test(normalized) ||
+    // P1-3 edge case: common Albanian/Gheg consents the lexicon previously missed —
+    // "në rregull" (alright; diacritics are stripped by the normalizer), "mirë" (fine),
+    // "dakord" (agreed), "pranoj" (I accept), and the Gheg imperatives "bone"/"boje"/
+    // "kryeje" ("do it" / "complete it"), incl. "veç/vec bone" ("just do it"). These are
+    // only consulted as order consent AFTER a data-confirmation request was sent (see
+    // recentCustomerAffirmation), so a stray "mirë" in open conversation cannot create
+    // an order on its own.
+    /^(ne rregull|nrregull|mire|shume mire|dakord|pranoj|pranoje)\b/.test(normalized) ||
+    /^((vec|veq)\s+)?(bone|boje|kryeje|kryej)\b/.test(normalized) ||
     // Direct order expressions: "dua ta porosis", "do order", "please order"
     /(dua|dush|do|doni|please|ju lutem).*(porosi|order)/.test(normalized) ||
     /(beje porosine|beje porosin|place the order|make the order)/.test(normalized) ||
@@ -1328,6 +1385,14 @@ return 0
 `;
 
 export async function processAIReply(data: AIReplyJobData): Promise<void> {
+  // P1-5 (C-108): every OpenAI call this job makes — classifiers, embeddings, and the main
+  // reply — is recorded (model + usage + USD cost, no text) into an AsyncLocalStorage context
+  // the ledger writer folds into `usage.calls`, so per-reply COGS covers all ~18–25 calls,
+  // not just the main completion.
+  return runWithOpenAICallTracking(() => processAIReplyInner(data));
+}
+
+async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId, traceId } = data;
   console.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
 
@@ -1639,6 +1704,42 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // double-send it (RC-20). Set to true immediately after every send in the block.
   let sensitivePathOutboundSent = false;
 
+  // P1-1 (RC-20): stage-and-send for the canned pre-reply sends (holding / ack / confirm /
+  // clarify). When staging is enabled for this channel the text is staged durably BEFORE the
+  // send under its own reply slot, so a BullMQ retry after a crash can never deliver a second
+  // copy of the canned message or persist a duplicate row under a fresh ai_uuid. Returns null
+  // when staging is off — the call site keeps its legacy send-then-createMessage path
+  // byte-for-byte. (The side-effects around these sends — alerts, pauses, order flags — keep
+  // their legacy retry semantics; only the send+persist pair is made idempotent here.)
+  const stageCannedReply = async (args: {
+    replySlot: ReplySlot;
+    text: string;
+    contact: Awaited<ReturnType<typeof findContactById>>;
+  }): Promise<{
+    outboundMessage?: Message;
+    sendResult: Awaited<ReturnType<typeof sendMessage>> | null;
+    wasFirstDelivery: boolean;
+  } | null> => {
+    if (!isStageBeforeSendEnabled(channel.type)) return null;
+    const result = await stageAndSend({
+      tenantId,
+      conversationId,
+      channelType: channel.type,
+      logicalInboundExternalId: data.messageExternalId,
+      replySlot: args.replySlot,
+      replyText: args.text,
+      send: (text) =>
+        args.contact
+          ? sendMessage(channel, args.contact.external_id, text)
+          : Promise.resolve({ success: false, error: 'Contact not found for conversation' }),
+    });
+    return {
+      outboundMessage: result.outboundMessage,
+      sendResult: result.sendResult ?? null,
+      wasFirstDelivery: result.wasFirstDelivery,
+    };
+  };
+
   // P0-4 (RC-19): the safe escalation path invoked when a SENSITIVE pre-reply detector
   // (cancellation/refund, wrong-product, post-purchase, order-info) throws. Instead of
   // silently downgrading to a normal sales reply, pause the AI, keep human_replied=false,
@@ -1715,20 +1816,33 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
       const contactForSend = await findContactById(conversation.contact_id);
       let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
-      if (contactForSend) {
-        sendResult = await sendMessage(channel, contactForSend.external_id, holdingMessage);
-        sensitivePathOutboundSent = true;
-      }
-
-      const outboundAck = await createMessage({
-        tenant_id: tenantId,
-        conversation_id: conversationId,
-        external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-        direction: 'outbound',
-        type: 'text',
-        content: holdingMessage,
-        sent_by: 'ai',
+      let outboundAck: Message;
+      const canned = await stageCannedReply({
+        replySlot: 'holding:sensitive',
+        text: holdingMessage,
+        contact: contactForSend,
       });
+      if (canned) {
+        sendResult = canned.sendResult;
+        if (contactForSend) sensitivePathOutboundSent = true;
+        if (!canned.outboundMessage) return; // retry of a sent row with no resolvable message
+        outboundAck = canned.outboundMessage;
+      } else {
+        if (contactForSend) {
+          sendResult = await sendMessage(channel, contactForSend.external_id, holdingMessage);
+          sensitivePathOutboundSent = true;
+        }
+
+        outboundAck = await createMessage({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+          direction: 'outbound',
+          type: 'text',
+          content: holdingMessage,
+          sent_by: 'ai',
+        });
+      }
 
       if (alert) {
         socketService.emitAIAlert(tenantId, {
@@ -1793,8 +1907,15 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
   if (inboundText) {
     try {
+      // P1-3 (RC-08): the verdict is persisted per (conversation, logical inbound) so a BullMQ
+      // retry consumes the first attempt's verdict instead of re-rolling the classifier.
       const cancellationRefundIntent = await runSensitiveDetector('cancellation_refund', () =>
-        detectCancellationOrRefundIntent(inboundText, recentMessages),
+        getOrComputeClassifierVerdict({
+          conversationId,
+          inboundExternalId: data.messageExternalId,
+          detector: 'cancellation_refund',
+          compute: () => detectCancellationOrRefundIntent(inboundText, recentMessages),
+        }),
       );
       console.info(
         `[CANCEL/REFUND] tenantId: ${tenantId} conversationId: ${conversationId} is_cancel: ${cancellationRefundIntent.is_cancellation} is_refund: ${cancellationRefundIntent.is_refund} confidence: ${cancellationRefundIntent.confidence} reasoning: ${logJsonStringOrNull(cancellationRefundIntent.reason)}`,
@@ -1804,6 +1925,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       logConfidenceGateBoundary('cancellation_refund', cancellationRefundIntent.confidence, 0.8, {
         tenantId,
         conversationId,
+        inboundExternalId: data.messageExternalId,
       });
       const confidentCancelOrRefund = passesConfidenceGate(
         cancellationRefundIntent.confidence,
@@ -1814,7 +1936,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         classifier: 'cancellation_refund',
         raw_score: cancellationRefundIntent.confidence ?? null,
         threshold: 0.8,
-        boost_applied: false,
+        boost_applied: cancellationRefundIntent.confidence_boost_applied === true,
         passed: hasCancelOrRefundIntent && confidentCancelOrRefund,
         branch: hasCancelOrRefundIntent && confidentCancelOrRefund ? 'escalate' : 'continue',
       });
@@ -1846,20 +1968,34 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           });
           return;
         }
-        if (contactForSend) {
-          sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
-          sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
-        }
-
-        const outboundAck = await createMessage({
-          tenant_id: tenantId,
-          conversation_id: conversationId,
-          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-          direction: 'outbound',
-          type: 'text',
-          content: ackText,
-          sent_by: 'ai',
+        let outboundAck: Message;
+        const canned = await stageCannedReply({
+          replySlot: 'ack:order',
+          text: ackText,
+          contact: contactForSend,
         });
+        if (canned) {
+          sendResult = canned.sendResult;
+          // P0-4: an ack is (or already was, on a retry) on the wire — no fail-closed re-throw.
+          if (contactForSend) sensitivePathOutboundSent = true;
+          if (!canned.outboundMessage) return; // retry of a sent row with no resolvable message
+          outboundAck = canned.outboundMessage;
+        } else {
+          if (contactForSend) {
+            sendResult = await sendMessage(channel, contactForSend.external_id, ackText);
+            sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
+          }
+
+          outboundAck = await createMessage({
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+            direction: 'outbound',
+            type: 'text',
+            content: ackText,
+            sent_by: 'ai',
+          });
+        }
 
         const alerts: AIAlert[] = [];
         let escalatedOrder = candidateOrder;
@@ -1947,7 +2083,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
 
       const wrongProductIntent = await runSensitiveDetector('wrong_product', () =>
-        detectWrongProductIntent(inboundText, recentMessages),
+        getOrComputeClassifierVerdict({
+          conversationId,
+          inboundExternalId: data.messageExternalId,
+          detector: 'wrong_product',
+          compute: () => detectWrongProductIntent(inboundText, recentMessages),
+        }),
       );
       console.info(
         `[WRONG_PRODUCT] tenantId: ${tenantId} conversationId: ${conversationId} is_wrong_product: ${wrongProductIntent.is_wrong_product} confidence: ${wrongProductIntent.confidence} reasoning: ${logJsonStringOrNull(wrongProductIntent.reason)}`,
@@ -1955,6 +2096,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       logConfidenceGateBoundary('wrong_product', wrongProductIntent.confidence, 0.8, {
         tenantId,
         conversationId,
+        inboundExternalId: data.messageExternalId,
       });
       const wrongProductEscalate =
         wrongProductIntent.is_wrong_product &&
@@ -1963,7 +2105,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         classifier: 'wrong_product',
         raw_score: wrongProductIntent.confidence ?? null,
         threshold: 0.8,
-        boost_applied: false,
+        boost_applied: wrongProductIntent.confidence_boost_applied === true,
         passed: wrongProductEscalate,
         branch: wrongProductEscalate ? 'escalate' : 'continue',
       });
@@ -2015,20 +2157,33 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
         const contactForSend = await findContactById(conversation.contact_id);
         let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
-        if (contactForSend) {
-          sendResult = await sendMessage(channel, contactForSend.external_id, wrongProductHoldingMessage);
-          sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
-        }
-
-        const outboundAck = await createMessage({
-          tenant_id: tenantId,
-          conversation_id: conversationId,
-          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-          direction: 'outbound',
-          type: 'text',
-          content: wrongProductHoldingMessage,
-          sent_by: 'ai',
+        let outboundAck: Message;
+        const canned = await stageCannedReply({
+          replySlot: 'ack:wrong_product',
+          text: wrongProductHoldingMessage,
+          contact: contactForSend,
         });
+        if (canned) {
+          sendResult = canned.sendResult;
+          if (contactForSend) sensitivePathOutboundSent = true;
+          if (!canned.outboundMessage) return; // retry of a sent row with no resolvable message
+          outboundAck = canned.outboundMessage;
+        } else {
+          if (contactForSend) {
+            sendResult = await sendMessage(channel, contactForSend.external_id, wrongProductHoldingMessage);
+            sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
+          }
+
+          outboundAck = await createMessage({
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+            direction: 'outbound',
+            type: 'text',
+            content: wrongProductHoldingMessage,
+            sent_by: 'ai',
+          });
+        }
 
         if (alert) {
           socketService.emitAIAlert(tenantId, {
@@ -2067,7 +2222,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       }
 
       const isLikelyNewOrderSignal = await classifyNewOrderSignal(inboundText);
-      const orderAffirmationIntent = await detectOrderAffirmationIntent(inboundText, recentMessages);
+      const orderAffirmationIntent = await getOrComputeClassifierVerdict({
+        conversationId,
+        inboundExternalId: data.messageExternalId,
+        detector: 'order_affirmation',
+        compute: () => detectOrderAffirmationIntent(inboundText, recentMessages),
+      });
       const isLikelyOrderAffirmation =
         orderAffirmationIntent.is_order_affirmation &&
         passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
@@ -2089,13 +2249,19 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         console.info('[POST_PURCHASE_SUPPORT] skipped because no post-purchase issue cue found', {
           conversationId,
           tenantId,
-          inboundText,
+          // P1-6: free-text-out reference, never raw customer text.
+          inboundText: logSafe(inboundText),
         });
       }
       const postPurchaseSupportIntent =
         shouldCheckPostPurchaseSupport && !isLikelyNewOrderSignal
           ? await runSensitiveDetector('post_purchase', () =>
-              detectPostPurchaseSupportIntent(inboundText, recentMessages),
+              getOrComputeClassifierVerdict({
+                conversationId,
+                inboundExternalId: data.messageExternalId,
+                detector: 'post_purchase',
+                compute: () => detectPostPurchaseSupportIntent(inboundText, recentMessages),
+              }),
             )
           : {
               is_delivery_eta_query: false,
@@ -2103,6 +2269,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
               is_wrong_product_issue: false,
               is_product_problem_issue: false,
               confidence: 0,
+              confidence_boost_applied: false as boolean | undefined,
               reason: null as string | null,
             };
       const hasPostPurchaseSupportIntent =
@@ -2113,6 +2280,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       logConfidenceGateBoundary('post_purchase', postPurchaseSupportIntent.confidence, 0.8, {
         tenantId,
         conversationId,
+        inboundExternalId: data.messageExternalId,
       });
       const confidentPostPurchaseSupportIntent = passesConfidenceGate(
         postPurchaseSupportIntent.confidence,
@@ -2127,7 +2295,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         classifier: 'post_purchase_support',
         raw_score: postPurchaseSupportIntent.confidence ?? null,
         threshold: 0.8,
-        boost_applied: false,
+        boost_applied: postPurchaseSupportIntent.confidence_boost_applied === true,
         passed: hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent,
         branch:
           hasPostPurchaseSupportIntent && confidentPostPurchaseSupportIntent
@@ -2171,24 +2339,37 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           let etaSendResult:
             | Awaited<ReturnType<typeof sendMessage>>
             | null = null;
-          if (contactForEtaSend) {
-            etaSendResult = await sendMessage(
-              channel,
-              contactForEtaSend.external_id,
-              deliveryEtaReply,
-            );
-            sensitivePathOutboundSent = true; // P0-4: a reply is on the wire — no fail-closed re-throw past here (RC-20)
-          }
-
-          const outboundEta = await createMessage({
-            tenant_id: tenantId,
-            conversation_id: conversationId,
-            external_message_id: etaSendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-            direction: 'outbound',
-            type: 'text',
-            content: deliveryEtaReply,
-            sent_by: 'ai',
+          let outboundEta: Message;
+          const cannedEta = await stageCannedReply({
+            replySlot: 'ack:eta',
+            text: deliveryEtaReply,
+            contact: contactForEtaSend,
           });
+          if (cannedEta) {
+            etaSendResult = cannedEta.sendResult;
+            if (contactForEtaSend) sensitivePathOutboundSent = true;
+            if (!cannedEta.outboundMessage) return; // retry of a sent row with no resolvable message
+            outboundEta = cannedEta.outboundMessage;
+          } else {
+            if (contactForEtaSend) {
+              etaSendResult = await sendMessage(
+                channel,
+                contactForEtaSend.external_id,
+                deliveryEtaReply,
+              );
+              sensitivePathOutboundSent = true; // P0-4: a reply is on the wire — no fail-closed re-throw past here (RC-20)
+            }
+
+            outboundEta = await createMessage({
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              external_message_id: etaSendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+              direction: 'outbound',
+              type: 'text',
+              content: deliveryEtaReply,
+              sent_by: 'ai',
+            });
+          }
 
           socketService.emitNewMessage(tenantId, outboundEta);
           socketService.emitConversationUpdated(tenantId, conversationId);
@@ -2293,24 +2474,37 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         let sendResult:
           | Awaited<ReturnType<typeof sendMessage>>
           | null = null;
-        if (contactForSend) {
-          sendResult = await sendMessage(
-            channel,
-            contactForSend.external_id,
-            postPurchaseHoldingMessage,
-          );
-          sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
-        }
-
-        const outboundAck = await createMessage({
-          tenant_id: tenantId,
-          conversation_id: conversationId,
-          external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-          direction: 'outbound',
-          type: 'text',
-          content: postPurchaseHoldingMessage,
-          sent_by: 'ai',
+        let outboundAck: Message;
+        const canned = await stageCannedReply({
+          replySlot: 'holding:post_purchase',
+          text: postPurchaseHoldingMessage,
+          contact: contactForSend,
         });
+        if (canned) {
+          sendResult = canned.sendResult;
+          if (contactForSend) sensitivePathOutboundSent = true;
+          if (!canned.outboundMessage) return; // retry of a sent row with no resolvable message
+          outboundAck = canned.outboundMessage;
+        } else {
+          if (contactForSend) {
+            sendResult = await sendMessage(
+              channel,
+              contactForSend.external_id,
+              postPurchaseHoldingMessage,
+            );
+            sensitivePathOutboundSent = true; // P0-4: an ack is on the wire — no fail-closed re-throw past here (RC-20)
+          }
+
+          outboundAck = await createMessage({
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+            direction: 'outbound',
+            type: 'text',
+            content: postPurchaseHoldingMessage,
+            sent_by: 'ai',
+          });
+        }
 
         if (alert) {
           socketService.emitAIAlert(tenantId, {
@@ -2353,7 +2547,12 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       // creation logic at the tail of this function can fire.
       if (!isLikelyNewOrderSignal && !isLikelyOrderAffirmation) {
       const orderInfoUpdateIntent = await runSensitiveDetector('order_info', () =>
-        detectOrderInfoUpdateIntent(inboundText, recentMessages),
+        getOrComputeClassifierVerdict({
+          conversationId,
+          inboundExternalId: data.messageExternalId,
+          detector: 'order_info_update',
+          compute: () => detectOrderInfoUpdateIntent(inboundText, recentMessages),
+        }),
       );
       console.info(
         `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
@@ -2361,6 +2560,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       logConfidenceGateBoundary('order_info_update', orderInfoUpdateIntent.confidence, 0.82, {
         tenantId,
         conversationId,
+        inboundExternalId: data.messageExternalId,
       });
       const orderInfoUpdateEscalate =
         orderInfoUpdateIntent.is_order_info_update &&
@@ -2369,7 +2569,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         classifier: 'order_info_update',
         raw_score: orderInfoUpdateIntent.confidence ?? null,
         threshold: 0.82,
-        boost_applied: false,
+        boost_applied: orderInfoUpdateIntent.confidence_boost_applied === true,
         passed: orderInfoUpdateEscalate,
         branch: orderInfoUpdateEscalate ? 'update_order' : 'continue',
       });
@@ -2432,20 +2632,33 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             const confirmationText = HOLDING_MESSAGES[locale].orderInfoUpdated;
             const contactForSend = await findContactById(conversation.contact_id);
             let sendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
-            if (contactForSend) {
-              sendResult = await sendMessage(channel, contactForSend.external_id, confirmationText);
-              sensitivePathOutboundSent = true; // P0-4: a confirmation is on the wire — no fail-closed re-throw past here (RC-20)
-            }
-
-            const outboundConfirm = await createMessage({
-              tenant_id: tenantId,
-              conversation_id: conversationId,
-              external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-              direction: 'outbound',
-              type: 'text',
-              content: confirmationText,
-              sent_by: 'ai',
+            let outboundConfirm: Message;
+            const canned = await stageCannedReply({
+              replySlot: 'ack:order_info',
+              text: confirmationText,
+              contact: contactForSend,
             });
+            if (canned) {
+              sendResult = canned.sendResult;
+              if (contactForSend) sensitivePathOutboundSent = true;
+              if (!canned.outboundMessage) return; // retry of a sent row with no resolvable message
+              outboundConfirm = canned.outboundMessage;
+            } else {
+              if (contactForSend) {
+                sendResult = await sendMessage(channel, contactForSend.external_id, confirmationText);
+                sensitivePathOutboundSent = true; // P0-4: a confirmation is on the wire — no fail-closed re-throw past here (RC-20)
+              }
+
+              outboundConfirm = await createMessage({
+                tenant_id: tenantId,
+                conversation_id: conversationId,
+                external_message_id: sendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+                direction: 'outbound',
+                type: 'text',
+                content: confirmationText,
+                sent_by: 'ai',
+              });
+            }
 
             const alert = await createAIAlert({
               tenant_id: tenantId,
@@ -3905,6 +4118,26 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           ? 'escalation:uncertain'
           : 'reply';
   const stageEnabled = isStageBeforeSendEnabled(channel.type);
+  // P1-1 (RC-20): with staging on AND the relay owning dispatch, the deterministic tail
+  // side-effects are outbox rows written in the flip txn (exactly-once via the relay); the
+  // inline tail versions are skipped.
+  const outboxOwnedEffects = stageEnabled && OUTBOX_OWNS_REPLY_EFFECTS;
+  // The stable key for this logical reply — the same key stageAndSend derives internally; used
+  // here to build the per-effect outbox dedupe keys.
+  const mainReplyIdemKey = deriveReplyIdempotencyKey({
+    conversationId,
+    logicalInboundExternalId: data.messageExternalId,
+    replySlot: 'main',
+  });
+  // Escalation/quality alerts created ATOMICALLY inside the flip txn (staged path) are captured
+  // here so their socket emits + the feedback-log side-effect can run after the commit.
+  let flipEscalationAlert: AIAlert | undefined;
+  let flipQualityAlert: AIAlert | undefined;
+  // True when this attempt is a retry of a reply the first attempt already delivered+persisted.
+  // The deterministic side-effects committed with the flip (or ran on the first attempt); only
+  // the order-detection tail below re-runs, guarded by its completion marker + the existing
+  // duplicate-order dedupe.
+  let isRetryOfDeliveredReply = false;
   if (stageEnabled) {
     const staged = await stageAndSend({
       tenantId,
@@ -3920,7 +4153,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       guardVerdicts: ledgerGuardVerdicts,
       // P1-5: write the decision-ledger row THROUGH the outbox in the SAME flip txn as the reply
       // persist (under a SAVEPOINT, so a ledger failure can never roll back a delivered reply).
-      onFlip: async (client, message) => {
+      // P1-1 (RC-20): the escalation/quality pause + alert and the deterministic side-effect
+      // outbox rows are part of the SAME transaction, so a delivered holding message can never
+      // commit without its pause/alert, and a crash after the commit can never lose the
+      // analytics / use-case / rate-count / send-failure effects.
+      onFlip: async (client, message, sendSucceeded) => {
         await enqueueLedgerViaOutbox(
           client,
           buildLedgerRecord({
@@ -3936,6 +4173,125 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
             guardVerdicts: ledgerGuardVerdicts,
           }),
         );
+
+        // Escalation pause + alert, atomic with the delivered holding message. Mirrors the
+        // legacy inline blocks below (which are skipped when staging is on). The guard kinds
+        // are mutually exclusive by construction of the guard phase.
+        if (priceHallucinationEscalated) {
+          flipEscalationAlert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: message.id,
+              reason: 'hallucinated_price',
+              details: priceHallucinationDetails,
+            },
+            client,
+          );
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'hallucinated_price');
+        } else if (productNameHallucinationEscalated) {
+          flipEscalationAlert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: message.id,
+              reason: 'hallucinated_product_name',
+              details: productNameHallucinationDetails,
+            },
+            client,
+          );
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'hallucinated_product_name');
+        } else if (uncertainAnswerEscalated) {
+          flipEscalationAlert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: message.id,
+              reason: UNCERTAIN_ANSWER_ALERT_REASON,
+              details: uncertainAnswerDetails,
+            },
+            client,
+          );
+          await setConversationAiPaused(conversationId, tenantId, true, client, 'uncertain_answer_escalated');
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+        }
+        if (qualityFailing && flagReason) {
+          flipQualityAlert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: message.id,
+              reason: flagReason,
+            },
+            client,
+          );
+          await setConversationAiPaused(conversationId, tenantId, true, client, flagReason);
+        }
+
+        // Deterministic side-effects as exactly-once outbox rows (relay-dispatched).
+        if (OUTBOX_OWNS_REPLY_EFFECTS) {
+          if (sendSucceeded) {
+            await insertOutboxTx(client, {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              topic: 'analytics.ai_reply_sent',
+              dedupe_key: `analytics.ai_reply_sent:${mainReplyIdemKey}`,
+              payload: {
+                conversation_id: conversationId,
+                channel_id: channelId,
+                message_id: message.id,
+              },
+            });
+            await insertOutboxTx(client, {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              topic: 'usecase.eval',
+              dedupe_key: `usecase.eval:${mainReplyIdemKey}`,
+              payload: { conversationId, tenantId },
+            });
+            if (
+              shouldCountDeliveredReply({
+                countDeliveredOnly: RATE_LIMIT_COUNT_DELIVERED_ONLY,
+                sendSucceeded: true,
+              })
+            ) {
+              await insertOutboxTx(client, {
+                tenant_id: tenantId,
+                conversation_id: conversationId,
+                topic: 'reply.ratecount',
+                dedupe_key: `reply.ratecount:${mainReplyIdemKey}`,
+                payload: {
+                  rate_limit_key: rateLimitKey,
+                  marker_key: rateCountedMarkerKey(conversationId, data.messageExternalId),
+                },
+              });
+            }
+          } else {
+            await insertOutboxTx(client, {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              topic: 'alert.message_send_failed',
+              dedupe_key: `alert.message_send_failed:${mainReplyIdemKey}`,
+              payload: { conversation_id: conversationId, message_id: message.id },
+            });
+          }
+          if (productsWithMissingImages.length > 0) {
+            await insertOutboxTx(client, {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              topic: 'alert.product_image_unavailable',
+              dedupe_key: `alert.product_image_unavailable:${mainReplyIdemKey}`,
+              payload: {
+                conversation_id: conversationId,
+                message_id: message.id,
+                details: {
+                  product_ids: productsWithMissingImages.map((p) => p.id),
+                  product_names: productsWithMissingImages.map((p) => p.name),
+                },
+              },
+            });
+          }
+        }
       },
       send: (text) =>
         contact
@@ -3943,23 +4299,67 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           : Promise.resolve({ success: false, error: 'Contact not found for conversation' }),
     });
     if (!staged.wasFirstDelivery) {
-      // Retry of an already-delivered reply: the message row and every side-effect (rate count,
-      // alerts, analytics, use-case enqueue, draft order) committed on the first attempt. Re-emit
-      // the socket best-effort and stop — re-running the side-effects would duplicate them.
+      // Retry of an already-delivered reply: the message row, the escalation pause/alert, and
+      // (when the relay owns dispatch) every deterministic side-effect committed with the first
+      // attempt's flip. Re-emit the socket best-effort, then fall through ONLY to the
+      // order-detection tail (marker-guarded below) so a crash mid-tail on the first attempt
+      // cannot silently forfeit a draft order/commission (RC-20/RC-22).
       if (staged.outboundMessage) {
         socketService.emitNewMessage(tenantId, staged.outboundMessage);
         socketService.emitConversationUpdated(tenantId, conversationId);
       }
-      console.info('[ai.reply] Reply already delivered on a prior attempt — skipping duplicate side-effects', {
+      console.info('[ai.reply] Reply already delivered on a prior attempt — resuming tail only', {
         conversationId,
         scheduledFor: data.messageExternalId,
       });
-      return;
-    }
+      if (!staged.outboundMessage) {
+        // No persisted row to anchor the tail on (should not happen) — nothing to self-heal.
+        return;
+      }
+      isRetryOfDeliveredReply = true;
+      outboundMessage = staged.outboundMessage;
+      sendResult = staged.sendResult ?? null;
+      finalReplyText = staged.replyText;
+      // Self-heal product images too — the ai_img_sent marker no-ops anything already delivered.
+      await sendProductImagesForReply();
+    } else {
     outboundMessage = staged.outboundMessage!;
     sendResult = staged.sendResult ?? null;
     finalReplyText = staged.replyText;
     await sendProductImagesForReply();
+    // Post-commit emits + feedback-log for alerts created atomically inside the flip.
+    if (flipEscalationAlert || flipQualityAlert) {
+      const contactForFlipAlert = await findContactById(conversation.contact_id);
+      for (const flipAlert of [flipEscalationAlert, flipQualityAlert]) {
+        if (!flipAlert) continue;
+        socketService.emitAIAlert(tenantId, {
+          ...flipAlert,
+          message_content: outboundMessage.content,
+          contact_name: contactForFlipAlert?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+      }
+      socketService.emitConversationUpdated(tenantId, conversationId);
+      if (flipQualityAlert) {
+        // Feedback→fine-tuning loop (see the legacy quality block below for rationale).
+        void createFeedbackLog({
+          tenant_id: tenantId,
+          message_id: outboundMessage.id,
+          conversation_id: conversationId,
+          original_ai_response: outboundMessage.content ?? '',
+          corrected_response: null,
+          reason: flagReason ?? 'low_confidence',
+        }).catch((err) => {
+          console.warn('[ai.reply] Failed to auto-create feedback log for quality alert', {
+            tenantId,
+            conversationId,
+            err,
+          });
+        });
+      }
+    }
+    }
   } else {
   // ---- Idempotent send guard ----------------------------------------------
   // If the channel send on a PRIOR attempt succeeded but a later step (e.g.
@@ -4070,7 +4470,11 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // rest). Flag off → shouldCountDeliveredReply() is false and the legacy pre-gate INCR
   // owns counting instead.
   const wasDelivered = sendResult?.success === true || alreadySent;
+  // P1-1: when the outbox owns the effects (or this is a retry of a delivered reply, whose
+  // count committed with the first attempt's flip), the inline count is skipped.
   if (
+    !outboxOwnedEffects &&
+    !isRetryOfDeliveredReply &&
     shouldCountDeliveredReply({
       countDeliveredOnly: RATE_LIMIT_COUNT_DELIVERED_ONLY,
       sendSucceeded: wasDelivered,
@@ -4086,7 +4490,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // product photo but the catalog entry has no image_urls. Does NOT pause the AI —
   // the business should manually send the photo while the conversation continues.
   // One alert per turn covers all missing-image products in a single notification.
-  if (productsWithMissingImages.length > 0) {
+  // P1-1: outbox-owned (or committed with the first attempt) when staged — inline skipped.
+  if (productsWithMissingImages.length > 0 && !outboxOwnedEffects && !isRetryOfDeliveredReply) {
     try {
       const missingImageAlert = await createAIAlert({
         tenant_id: tenantId,
@@ -4123,7 +4528,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // alert can link to the outbound message ID. Pauses AI so a human agent can provide
   // the correct price. Does not create a feedback-log row (the original reply was not
   // sent, so there is no correctable model output; the catalog data needs fixing).
-  if (priceHallucinationEscalated) {
+  // P1-1: on the staged path this pause+alert ran ATOMICALLY inside the flip txn — skip inline.
+  if (priceHallucinationEscalated && !stageEnabled) {
     const client = await pool.connect();
     let priceAlert: AIAlert | undefined;
     try {
@@ -4166,7 +4572,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // Product-name hallucination alert: created after the holding message is persisted so
   // the alert can reference the outbound message ID. Pauses AI so a human specialist can
   // provide the correct product information. Mirrors the price hallucination alert pattern.
-  if (productNameHallucinationEscalated) {
+  // P1-1: on the staged path this pause+alert ran ATOMICALLY inside the flip txn — skip inline.
+  if (productNameHallucinationEscalated && !stageEnabled) {
     const client = await pool.connect();
     let nameAlert: AIAlert | undefined;
     try {
@@ -4210,7 +4617,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // the alert can reference the outbound message ID. Pauses AI and flags the conversation
   // for human review so the business can reply directly with a reliable answer. Mirrors
   // the price/name hallucination alert pattern.
-  if (uncertainAnswerEscalated) {
+  // P1-1: on the staged path this pause+alert ran ATOMICALLY inside the flip txn — skip inline.
+  if (uncertainAnswerEscalated && !stageEnabled) {
     const client = await pool.connect();
     let uncertainAlert: AIAlert | undefined;
     try {
@@ -4251,7 +4659,8 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  if (qualityFailing && flagReason) {
+  // P1-1: on the staged path this pause+alert (and the feedback log) ran via the flip txn.
+  if (qualityFailing && flagReason && !stageEnabled) {
     const client = await pool.connect();
     let alert: AIAlert | undefined;
     try {
@@ -4314,33 +4723,43 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
-  await touchConversationLastMessageAt(conversationId);
+  if (!isRetryOfDeliveredReply) {
+    await touchConversationLastMessageAt(conversationId);
+  }
 
-  void logEvent(tenantId, 'ai_reply_sent', {
-    conversation_id: conversationId,
-    channel_id: channelId,
-    message_id: outboundMessage.id,
-  });
+  // P1-1: outbox-owned (or committed with the first attempt's flip) when staged — inline skipped.
+  if (!outboxOwnedEffects && !isRetryOfDeliveredReply) {
+    void logEvent(tenantId, 'ai_reply_sent', {
+      conversation_id: conversationId,
+      channel_id: channelId,
+      message_id: outboundMessage.id,
+    });
+  }
 
-  socketService.emitNewMessage(tenantId, outboundMessage);
-  socketService.emitConversationUpdated(tenantId, conversationId);
+  if (!isRetryOfDeliveredReply) {
+    socketService.emitNewMessage(tenantId, outboundMessage);
+    socketService.emitConversationUpdated(tenantId, conversationId);
+  }
 
   // Enqueue a delayed use case evaluation. The 4-hour delay acts as an inactivity window:
   // if the customer replies again within 4 hours the job fires and re-evaluates at that point.
   // jobId deduplication ensures that an explicit conversation-close enqueue (delay=0) with the
   // same jobId cancels this delayed version, preventing a redundant double-evaluation.
-  void (aiQueue as unknown as { add: (name: string, data: unknown, opts?: unknown) => Promise<unknown> }).add(
-    'evaluateConversationUseCase',
-    { conversationId, tenantId },
-    {
-      delay: 4 * 60 * 60 * 1000,
-      jobId: `eval-usecase-${conversationId}`,
-      removeOnComplete: true,
-      removeOnFail: false,
-    },
-  );
+  // P1-1: outbox-owned when staged (exactly-once via the relay) — inline skipped. No
+  // removeOnFail override: the queue-level trim (removeOnFail: 500) applies (EV-042).
+  if (!outboxOwnedEffects && !isRetryOfDeliveredReply) {
+    void (aiQueue as unknown as { add: (name: string, data: unknown, opts?: unknown) => Promise<unknown> }).add(
+      'evaluateConversationUseCase',
+      { conversationId, tenantId },
+      {
+        delay: 4 * 60 * 60 * 1000,
+        jobId: `eval-usecase-${conversationId}`,
+        removeOnComplete: true,
+      },
+    );
+  }
 
-  if (!sendResult?.success) {
+  if (!sendResult?.success && !isRetryOfDeliveredReply) {
     const errReason = sendResult?.error ?? 'Contact not found for conversation';
     if (sendResult) {
       console.error('[ai.reply] Channel send failed', { conversationId, error: errReason });
@@ -4351,20 +4770,23 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       conversationId,
       error: errReason,
     });
+    // P1-1: outbox-owned when staged (written in the flip txn, relay raises it) — inline skipped.
     let alert: AIAlert | undefined;
-    try {
-      alert = await createAIAlert({
-        tenant_id: tenantId,
-        conversation_id: conversationId,
-        message_id: outboundMessage.id,
-        reason: 'message_send_failed',
-      });
-    } catch (alertErr) {
-      console.error('[ai.reply] message_send_failed alert insert failed', {
-        conversationId,
-        tenantId,
-        err: alertErr,
-      });
+    if (!outboxOwnedEffects) {
+      try {
+        alert = await createAIAlert({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: 'message_send_failed',
+        });
+      } catch (alertErr) {
+        console.error('[ai.reply] message_send_failed alert insert failed', {
+          conversationId,
+          tenantId,
+          err: alertErr,
+        });
+      }
     }
     if (alert) {
       const contactForAlert = await findContactById(conversation.contact_id);
@@ -4378,6 +4800,24 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     }
   }
 
+  // P1-1 (RC-20/RC-22): the order-detection tail is crash-resumable. Its completion is recorded
+  // in a Redis marker; a retry of an already-delivered reply re-runs ONLY this tail when the
+  // marker is absent (a crash interrupted the first attempt mid-tail). Safe to re-run: the
+  // existing-order dedupe below skips a draft order the first attempt already created, and the
+  // rate-count / clarify sends inside are marker-idempotent.
+  const orderDetectionDoneKey = `ai_tail_done:${conversationId}:${data.messageExternalId}`;
+  if (isRetryOfDeliveredReply) {
+    const tailDone = await redisConnection.get(orderDetectionDoneKey).catch(() => null);
+    if (tailDone) {
+      return;
+    }
+    console.info('[ai.reply] Resuming interrupted order-detection tail on retry', {
+      conversationId,
+      scheduledFor: data.messageExternalId,
+    });
+  }
+  let orderDetectionTailErrored = false;
+  const runOrderDetectionTail = async (): Promise<void> => {
   try {
     if (!contact) {
       return;
@@ -4385,7 +4825,14 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     const messagesForIntent = await findMessagesByConversation(conversationId, HISTORY_FETCH_LIMIT, tenantId);
     const catalogProductNames = await findActiveProductNamesForTenant(tenantId);
-    const intent = await detect(messagesForIntent, tenantId, catalogProductNames);
+    // P1-3 (RC-08): verdicts persisted per (conversation, logical inbound) — a retry/tail-resume
+    // consumes the first attempt's scores instead of re-rolling the classifiers.
+    const intent = await getOrComputeClassifierVerdict({
+      conversationId,
+      inboundExternalId: data.messageExternalId,
+      detector: 'purchase_intent',
+      compute: () => detect(messagesForIntent, tenantId, catalogProductNames),
+    });
     const qtyDisplay = intent.quantity === null ? 'null' : String(intent.quantity);
     console.info(
       `[INTENT DETECTION] tenantId: ${tenantId} conversationId: ${conversationId} score: ${intent.intent_score} is_ready: ${intent.is_ready_to_order} product_name: ${logJsonStringOrNull(intent.product_name)} quantity: ${qtyDisplay} delivery_address: ${logJsonStringOrNull(intent.delivery_address)} reasoning: ${JSON.stringify(intent.reasoning)}`,
@@ -4397,10 +4844,16 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         ? parsedIntentThreshold
         : 0.85;
     const explicitNewOrder = await classifyNewOrderSignal(inboundText);
-    const orderAffirmationIntent = await detectOrderAffirmationIntent(inboundText, messagesForIntent);
+    const orderAffirmationIntent = await getOrComputeClassifierVerdict({
+      conversationId,
+      inboundExternalId: data.messageExternalId,
+      detector: 'order_affirmation',
+      compute: () => detectOrderAffirmationIntent(inboundText, messagesForIntent),
+    });
     logConfidenceGateBoundary('order_affirmation', orderAffirmationIntent.confidence, 0.7, {
       tenantId,
       conversationId,
+      inboundExternalId: data.messageExternalId,
     });
     const latestMessageAffirmsOrder =
       orderAffirmationIntent.is_order_affirmation === true &&
@@ -4488,6 +4941,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
     logConfidenceGateBoundary('order_intent_score', intent.intent_score, intentOrderMinScore, {
       tenantId,
       conversationId,
+      inboundExternalId: data.messageExternalId,
     });
     const passesDraftOrderValidation =
       intent.is_ready_to_order === true &&
@@ -4577,20 +5031,33 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
           resolution.candidates.map((c) => c.name),
           replyLocale,
         );
-        const clarifySendResult = await sendMessage(
-          channel,
-          contact.external_id,
-          clarificationText,
-        );
-        const clarifyMessage = await createMessage({
-          tenant_id: tenantId,
-          conversation_id: conversationId,
-          external_message_id: clarifySendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
-          direction: 'outbound',
-          type: 'text',
-          content: clarificationText,
-          sent_by: 'ai',
+        let clarifySendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
+        let clarifyMessage: Message;
+        const cannedClarify = await stageCannedReply({
+          replySlot: 'clarify',
+          text: clarificationText,
+          contact,
         });
+        if (cannedClarify) {
+          clarifySendResult = cannedClarify.sendResult;
+          if (!cannedClarify.outboundMessage) return; // retry of a sent row with no resolvable message
+          clarifyMessage = cannedClarify.outboundMessage;
+        } else {
+          clarifySendResult = await sendMessage(
+            channel,
+            contact.external_id,
+            clarificationText,
+          );
+          clarifyMessage = await createMessage({
+            tenant_id: tenantId,
+            conversation_id: conversationId,
+            external_message_id: clarifySendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+            direction: 'outbound',
+            type: 'text',
+            content: clarificationText,
+            sent_by: 'ai',
+          });
+        }
         await touchConversationLastMessageAt(conversationId);
         socketService.emitNewMessage(tenantId, clarifyMessage);
         socketService.emitConversationUpdated(tenantId, conversationId);
@@ -4730,6 +5197,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
 
     socketService.emitOrderCreated(tenantId, order);
   } catch (err) {
+    orderDetectionTailErrored = true;
     console.error('[ai.reply] Intent detection or draft order failed', {
       conversationId,
       tenantId,
@@ -4768,6 +5236,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         });
       }
     }
+  }
+  };
+  await runOrderDetectionTail();
+  if (!orderDetectionTailErrored) {
+    // Completed (including its deterministic "no order" early returns) — a later retry of this
+    // reply skips the tail. Not set on the swallowed-error path so a crash-retry re-runs it.
+    await redisConnection.set(orderDetectionDoneKey, '1', 'EX', 6 * 3600).catch(() => undefined);
   }
 
   } finally {

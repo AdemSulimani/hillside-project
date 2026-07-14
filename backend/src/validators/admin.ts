@@ -122,3 +122,16 @@ export type AdminDeadLetterListQuery = z.infer<typeof adminDeadLetterListQuerySc
 export const adminDeadLetterIdParamsSchema = z.object({
   id: z.string().regex(/^\d+$/, 'Invalid dead-letter ID'),
 });
+
+/**
+ * Replay body: `force` overrides the ai.reply staging-safety refusal (replay without P1-1's reply
+ * staging is not exactly-once-safe). It never overrides a redacted-payload refusal — the original
+ * content is gone. Defaults to `{ force: false }` so a body-less POST keeps the safe behaviour.
+ */
+export const adminDeadLetterReplayBodySchema = z
+  .object({
+    force: z.boolean().default(false),
+  })
+  .default({ force: false });
+
+export type AdminDeadLetterReplayBody = z.infer<typeof adminDeadLetterReplayBodySchema>;

@@ -17,14 +17,26 @@ import { insertOutboxTx } from '../db/models/outbox';
 import {
   buildLedgerOutboxPayload,
   insertLedgerBestEffort,
+  insertLedgerTx,
   ledgerDedupeKey,
   type LedgerDecisionEvent,
   type LedgerRecord,
 } from '../db/models/aiDecisionLedger';
 import type { ReplyTelemetry } from '../services/aiTelemetry';
+import { getTrackedOpenAICalls } from '../services/openaiCallTracker';
 
 const AI_DECISION_LEDGER_ENABLED =
   (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+
+// The relay actually performs outbox effects only when BOTH flags are on. In shadow mode
+// (relay on, dispatch off) the relay claims rows and marks them done WITHOUT effect — safe for
+// topics the legacy path still delivers (ai.reply), but a `ledger.write` row has no legacy
+// fallback and would be silently discarded. So when the relay does not own dispatch, the flip
+// writes the ledger row DIRECTLY on the flip transaction (still under the savepoint) instead
+// of enqueueing a row the relay would shadow-drain.
+const OUTBOX_LEDGER_DISPATCH_ENABLED =
+  (process.env.OUTBOX_RELAY_ENABLED ?? 'false').trim().toLowerCase() === 'true' &&
+  (process.env.OUTBOX_DISPATCH_ENABLED ?? 'false').trim().toLowerCase() === 'true';
 
 export function isDecisionLedgerEnabled(): boolean {
   return AI_DECISION_LEDGER_ENABLED;
@@ -43,6 +55,33 @@ export interface BuildLedgerRecordInput {
   telemetry?: ReplyTelemetry;
   decisionEvents: LedgerDecisionEvent[];
   guardVerdicts?: Record<string, unknown>;
+}
+
+/**
+ * P1-5 (C-108): the ledger's usage blob — the main completion's usage from `generateReply`'s
+ * telemetry, plus EVERY OpenAI call the job made (from the AsyncLocalStorage call tracker).
+ * A row is written even when the main telemetry is absent (ack/[NO_REPLY] paths) so their
+ * classifier calls still surface in COGS.
+ */
+function buildLedgerUsage(t: ReplyTelemetry | undefined): LedgerRecord['usage'] {
+  const calls = getTrackedOpenAICalls();
+  const hasCalls = !!calls && calls.length > 0;
+  if (!t && !hasCalls) return null;
+  const pricedCosts = hasCalls
+    ? calls.map((c) => c.usd_cost).filter((c): c is number => typeof c === 'number')
+    : [];
+  return {
+    prompt_tokens: t?.usage.promptTokens ?? null,
+    completion_tokens: t?.usage.completionTokens ?? null,
+    total_tokens: t?.usage.totalTokens ?? null,
+    usd_cost: t?.usage.usdCost ?? null,
+    calls: hasCalls ? calls : undefined,
+    call_count: hasCalls ? calls.length : undefined,
+    calls_usd_cost:
+      pricedCosts.length > 0
+        ? Math.round(pricedCosts.reduce((sum, c) => sum + c, 0) * 1_000_000) / 1_000_000
+        : undefined,
+  };
 }
 
 export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
@@ -84,14 +123,7 @@ export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
           system_fingerprint: t.model.systemFingerprint,
         }
       : null,
-    usage: t
-      ? {
-          prompt_tokens: t.usage.promptTokens,
-          completion_tokens: t.usage.completionTokens,
-          total_tokens: t.usage.totalTokens,
-          usd_cost: t.usage.usdCost,
-        }
-      : null,
+    usage: buildLedgerUsage(t),
     retrieval: t?.retrieval
       ? {
           semantic_skipped: t.retrieval.semanticSkipped,
@@ -123,13 +155,18 @@ export async function enqueueLedgerViaOutbox(
   if (!AI_DECISION_LEDGER_ENABLED) return;
   await client.query('SAVEPOINT ai_ledger');
   try {
-    await insertOutboxTx(client, {
-      tenant_id: record.tenant_id,
-      conversation_id: record.conversation_id,
-      topic: 'ledger.write',
-      dedupe_key: ledgerDedupeKey(record.idempotency_key),
-      payload: buildLedgerOutboxPayload(record),
-    });
+    if (OUTBOX_LEDGER_DISPATCH_ENABLED) {
+      await insertOutboxTx(client, {
+        tenant_id: record.tenant_id,
+        conversation_id: record.conversation_id,
+        topic: 'ledger.write',
+        dedupe_key: ledgerDedupeKey(record.idempotency_key),
+        payload: buildLedgerOutboxPayload(record),
+      });
+    } else {
+      // Relay dispatch off → write the (redacted, idempotent) row directly in the flip txn.
+      await insertLedgerTx(client, record);
+    }
     await client.query('RELEASE SAVEPOINT ai_ledger');
   } catch (err) {
     await client.query('ROLLBACK TO SAVEPOINT ai_ledger').catch(() => undefined);

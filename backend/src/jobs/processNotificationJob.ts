@@ -7,9 +7,10 @@ import { postOpsJobFailedAlert } from './opsAlert';
  *
  * The queue is now a real transport for operator notifications. Its first producer is the failure
  * handler, which enqueues `ops.jobFailed` when a job is dead-lettered — delivering the operator
- * webhook with BullMQ's durable retry (attempts:5) instead of a fire-and-forget axios call. A throw
- * here is intentional: it lets BullMQ retry, and the `queueName !== 'notifications'` producer guard
- * prevents a failed notification from enqueuing another one (no feedback loop).
+ * webhook with BullMQ's durable retry (attempts:5) instead of a fire-and-forget axios call.
+ * `postOpsJobFailedAlert` never throws, so a failed delivery is surfaced as a `false` return that
+ * this processor turns into a throw: it lets BullMQ retry, and the `queueName !== 'notifications'`
+ * producer guard prevents a failed notification from enqueuing another one (no feedback loop).
  */
 export async function processNotificationJob(job: Job<NotificationJobData>): Promise<void> {
   if (job.name === 'ops.jobFailed') {
@@ -28,7 +29,7 @@ export async function processNotificationJob(job: Job<NotificationJobData>): Pro
       classification: data.classification,
       error: data.error,
     });
-    await postOpsJobFailedAlert({
+    const delivered = await postOpsJobFailedAlert({
       queueName: data.queue ?? 'unknown',
       jobId: data.jobId,
       jobName: data.jobName,
@@ -36,6 +37,11 @@ export async function processNotificationJob(job: Job<NotificationJobData>): Pro
       message: data.error ?? 'unknown error',
       stack: data.stack,
     });
+    if (!delivered) {
+      throw new Error(
+        `ops.jobFailed webhook delivery failed (queue=${data.queue ?? 'unknown'}, jobId=${data.jobId ?? 'unknown'})`,
+      );
+    }
     return;
   }
 

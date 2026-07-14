@@ -21,6 +21,8 @@ import pool from '../db/pool';
 import { defaultQueue, aiQueue } from './queues';
 import type { AIReplyJobData } from './processAIReply';
 import { socketService } from '../services/socketService';
+import { redisConnection } from './redisConnection';
+import { RATE_LIMIT_DELIVERED_INCR_SCRIPT } from '../services/rateLimitDeliveredCount';
 
 /** BullMQ's aiQueue is typed to AIReplyJobData; it also carries the use-case-eval job. This
  * narrow escape hatch matches the cast the pipeline uses for the same mixed-payload queue. */
@@ -100,8 +102,27 @@ async function dispatchRow(row: OutboxRow): Promise<boolean> {
             jobId: `eval-usecase-${p.conversationId}`,
             delay: typeof p.delayMs === 'number' ? p.delayMs : 4 * 60 * 60 * 1000,
             removeOnComplete: true,
-            removeOnFail: false,
+            // No removeOnFail override: the queue-level trim (removeOnFail: 500) applies, so
+            // failed eval jobs can no longer accumulate unbounded in Redis (EV-042).
           },
+        );
+      }
+      await markDoneStandalone(row.id);
+      return true;
+    }
+    case 'reply.ratecount': {
+      // P0-6 (RC-18) via P1-1: charge the 25/h budget for a delivered reply. The row is written
+      // in the reply-flip transaction, so a crash between the flip commit and the INCR can no
+      // longer lose the count. The Lua script's NX marker makes the charge exactly-once even if
+      // this row is re-driven after a lease expiry.
+      const p = row.payload as { rate_limit_key?: string; marker_key?: string; ttl_seconds?: number };
+      if (p.rate_limit_key && p.marker_key) {
+        await redisConnection.eval(
+          RATE_LIMIT_DELIVERED_INCR_SCRIPT,
+          2,
+          p.rate_limit_key,
+          p.marker_key,
+          String(p.ttl_seconds ?? 3600),
         );
       }
       await markDoneStandalone(row.id);
