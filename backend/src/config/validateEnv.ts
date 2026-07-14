@@ -141,6 +141,18 @@ export function validateRequiredEnv(): void {
       `REDACT_PII=${REDACT_PII ? 'on' : 'off'}`,
   );
 
+  // P2-1: surface the grounding-gate posture at boot so operators know whether the deterministic
+  // gate + facts_used contract are live. Purely informational — never fatal.
+  const factsContract =
+    (process.env.FACTS_USED_CONTRACT ?? 'false').trim().toLowerCase() === 'true';
+  const groundingGate =
+    (process.env.GROUNDING_GATE_CONSOLIDATED ?? 'false').trim().toLowerCase() === 'true';
+  console.info(
+    `[grounding] FACTS_USED_CONTRACT=${factsContract ? 'on (temp0+seed+json_schema)' : 'off (legacy temp/free-prose)'}; ` +
+      `GROUNDING_GATE_CONSOLIDATED=${groundingGate ? 'on (consolidated gate)' : 'off (legacy price/name/gap guards)'}` +
+      `${factsContract && !groundingGate ? ' [SHADOW: declared facts logged, legacy guards decide]' : ''}`,
+  );
+
   if (warnings.length > 0) {
     console.warn('[env] Security warnings:\n' + warnings.join('\n'));
   }

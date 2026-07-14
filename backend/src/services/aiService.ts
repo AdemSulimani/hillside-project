@@ -1,5 +1,10 @@
 import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import type { ProductImageRef } from './productImageRequestService';
+import {
+  FACTS_USED_JSON_SCHEMA,
+  parseFactsUsedCompletion,
+  type DeclaredFact,
+} from './groundingGate';
 export type { ProductImageRef };
 import { findTenantById } from '../db/models/tenant';
 import {
@@ -151,6 +156,48 @@ const AI_REPLY_TEMPERATURE = (() => {
   const n = raw ? parseFloat(raw) : NaN;
   return Number.isFinite(n) && n >= 0 && n <= 2 ? n : 0.3;
 })();
+
+/**
+ * P2-1 (RC-03) — the `facts_used` generation contract. When ON, the customer reply is produced
+ * DETERMINISTICALLY (temperature 0 + a fixed seed) with a json_schema `response_format` returning
+ * `{ facts_used, prose }`, so the reply's asserted facts can be validated against the catalog by
+ * the consolidated grounding gate. Default OFF preserves the legacy free-prose generation
+ * byte-for-byte. Applied ONLY to the non-vision text path and skipped for `custom_model_id`
+ * tenants (fine-tuned models may not support structured outputs — they keep legacy generation
+ * until validated). Turning this on WITHOUT the gate is the shadow window: declared facts are
+ * emitted + persisted while the legacy guards still decide.
+ */
+const FACTS_USED_CONTRACT =
+  (process.env.FACTS_USED_CONTRACT ?? 'false').trim().toLowerCase() === 'true';
+
+/** Fixed seed for the deterministic reply completion (RC-03). Env-overridable. */
+const AI_REPLY_SEED = (() => {
+  const n = parseInt(process.env.AI_REPLY_SEED || '7', 10);
+  return Number.isFinite(n) ? n : 7;
+})();
+
+/**
+ * max_tokens for the contract completion: the 768-token prose budget plus headroom for the
+ * `facts_used` JSON wrapper. A truncated structured output (`finish_reason:length`) is treated as
+ * a retryable generation failure by `parseFactsUsedCompletion`.
+ */
+const FACTS_CONTRACT_MAX_TOKENS = (() => {
+  const n = parseInt(process.env.FACTS_CONTRACT_MAX_TOKENS || '1200', 10);
+  return Number.isFinite(n) && n > 0 ? n : 1200;
+})();
+
+/**
+ * Appended to the system prompt ONLY when the contract is active, so the default prompt is
+ * unchanged (respects the unbudgeted-prompt concern, RC-26). Instructs the model to ground every
+ * stated fact in the product context and to declare it in `facts_used`.
+ */
+const GROUNDING_DIRECTIVE =
+  '\n\n---\nGROUNDING CONTRACT: You may ONLY state prices, product names, and product ' +
+  'attributes that appear in the product context above. Never invent or guess a price, product ' +
+  'name, or attribute. Respond with a JSON object of two fields: "prose" (your reply to the ' +
+  'customer, in the language you would normally use) and "facts_used" (every price, product ' +
+  'name, and attribute value your prose states, each as {"type","product_ref","value"} taken ' +
+  'verbatim from the product context). State no such fact and return an empty facts_used list.';
 
 /** Rough GPT token estimate: ~4 characters per token. */
 function estimateTokens(text: string): number {
@@ -3543,6 +3590,9 @@ export async function generateReply(
   /** P1-5: per-reply decision-ledger telemetry. Present on the main LLM path; undefined on the
    * canned early-return paths (discount-finalized / OOS / repeat-closing — no model call). */
   telemetry?: ReplyTelemetry;
+  /** P2-1 (RC-03): the reply's declared facts_used. Present only when the facts_used contract is
+   * active (non-vision text path, non-custom model); undefined otherwise. */
+  factsUsed?: DeclaredFact[];
 }> {
   // P1-5: retrieval-telemetry sink, populated by the fresh matchProducts calls below. Stays
   // undefined when the reply reuses persisted/contextual products (no fresh retrieval this turn).
@@ -4181,6 +4231,16 @@ Using packaging-derived details (IMPORTANT — source precedence):
     systemPrompt += restrictionsFooter;
   }
 
+  // P2-1 (RC-03): the facts_used contract applies only to the non-vision text path and is skipped
+  // for custom (fine-tuned) models that may not support structured outputs. When active, the model
+  // must ground every stated fact in the product context and declare it — the directive is appended
+  // AFTER the restrictions footer so it never dilutes operator policy, and ONLY when active so the
+  // default prompt is unchanged.
+  const useFactsContract = FACTS_USED_CONTRACT && !hasImages && !config.custom_model_id;
+  if (useFactsContract) {
+    systemPrompt += GROUNDING_DIRECTIVE;
+  }
+
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as
   // other images). `buildMessagesArray` turns any non-empty `attachmentUrls` into vision `image_url`
   // parts next to the user text (Step 16 path).
@@ -4205,22 +4265,49 @@ Using packaging-derived details (IMPORTANT — source precedence):
       ? Math.min(AI_REPLY_TEMPERATURE, 0.3)
       : AI_REPLY_TEMPERATURE;
 
-  // Cap length to discourage rambling; still enough for verbatim usage text and required fixed phrases.
-  const replyMaxTokens = 768;
+  // Cap length to discourage rambling; still enough for verbatim usage text and required fixed
+  // phrases. With the facts_used contract (RC-03) the reply is produced DETERMINISTICALLY
+  // (temperature 0 + a fixed seed) as a json_schema { facts_used, prose } object, with extra token
+  // headroom for the JSON wrapper.
+  const replyMaxTokens = useFactsContract ? FACTS_CONTRACT_MAX_TOKENS : 768;
+  const effectiveReplyTemperature = useFactsContract ? 0 : replyTemperature;
+  const effectiveReplySeed = useFactsContract ? AI_REPLY_SEED : null;
   const completion = await openai.chat.completions.create({
     model,
     messages: messages as Parameters<typeof openai.chat.completions.create>[0]['messages'],
-    temperature: replyTemperature,
+    temperature: effectiveReplyTemperature,
     max_tokens: replyMaxTokens,
+    ...(useFactsContract
+      ? {
+          seed: AI_REPLY_SEED,
+          response_format: { type: 'json_schema' as const, json_schema: FACTS_USED_JSON_SCHEMA },
+        }
+      : {}),
   });
 
-  const reply = completion.choices[0]?.message?.content;
-  if (!reply) {
-    throw new Error('OpenAI returned an empty response');
+  const finishReason = completion.choices[0]?.finish_reason ?? null;
+
+  // With the contract on, the completion is a { facts_used, prose } JSON object: parse it and send
+  // `prose`. A truncated / unparseable / contract-violating output throws GenerationContractError
+  // (retryable) so the ai.reply job retries rather than sending malformed text.
+  let reply: string;
+  let factsUsed: DeclaredFact[] | undefined;
+  if (useFactsContract) {
+    const parsedContract = parseFactsUsedCompletion(
+      completion.choices[0]?.message?.content,
+      finishReason,
+    );
+    reply = parsedContract.prose;
+    factsUsed = parsedContract.facts_used;
+  } else {
+    const rawReply = completion.choices[0]?.message?.content;
+    if (!rawReply) {
+      throw new Error('OpenAI returned an empty response');
+    }
+    reply = rawReply;
   }
 
   // ---- P1-5: capture the decision telemetry that was previously discarded at this line ----
-  const finishReason = completion.choices[0]?.finish_reason ?? null;
   const usage = completion.usage ?? null;
   const telemetry: ReplyTelemetry = {
     prompt: {
@@ -4235,9 +4322,9 @@ Using packaging-derived details (IMPORTANT — source precedence):
       requested: model,
       served: completion.model ?? null,
       customModelUsed: Boolean(config.custom_model_id),
-      temperature: replyTemperature,
+      temperature: effectiveReplyTemperature,
       maxTokens: replyMaxTokens,
-      seed: null, // never sent today; recording a seed is an RC-03 change, out of P1-5 scope.
+      seed: effectiveReplySeed, // P2-1 (RC-03): fixed seed sent when the facts_used contract is on.
       finishReason,
       truncated: finishReason === 'length',
       systemFingerprint: completion.system_fingerprint ?? null,
@@ -4281,6 +4368,9 @@ Using packaging-derived details (IMPORTANT — source precedence):
     productNotInCatalog,
     customerAskedPrice,
     telemetry,
+    // P2-1 (RC-03): the reply's declared facts (present only when the facts_used contract is on).
+    // Fed to the consolidated grounding gate and persisted in the decision ledger.
+    factsUsed,
   };
 }
 

@@ -97,6 +97,10 @@ import {
   getFullCatalogPriceSet,
   verifySuspectedNamesAgainstCatalog,
 } from '../services/catalogGuardReferenceService';
+import {
+  evaluateConsolidatedGrounding,
+  type GroundingGateDeps,
+} from '../services/groundingGate';
 import { detectCrossMessagePriceInconsistency } from '../services/conversationFactConsistencyGuard';
 import {
   GET_BACK_TO_YOU_MESSAGES,
@@ -678,6 +682,30 @@ const GUARD_VALIDATE_AGAINST_FULL_CATALOG =
  */
 const GAP_GATE_DETERMINISTIC_FIRST =
   (process.env.GAP_GATE_DETERMINISTIC_FIRST ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-1 (RC-02/RC-01/RC-03): the CONSOLIDATED deterministic grounding gate. When ON, one gate
+ * replaces the legacy price + product-name hallucination guards (validating the reply's asserted
+ * prices/names against the tenant's FULL active catalog with TARGETED per-span action, never a
+ * blanket replace) and forces the product-info gap gate onto its deterministic-first decision
+ * (retiring the fail-closed assessor). Its single fail policy: a catalog-index infra error
+ * escalates with the distinct retryable reason `grounding_check_unavailable` (fail CLOSED).
+ * Defaults OFF: flag-off runs the legacy guards byte-for-byte. Meaningful with the facts_used
+ * contract (FACTS_USED_CONTRACT); the gate also has a deterministic prose backstop so it still
+ * validates when no facts were declared.
+ */
+const GROUNDING_GATE_CONSOLIDATED =
+  (process.env.GROUNDING_GATE_CONSOLIDATED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * Minimum grounded characters that must survive a targeted strip before the gate escalates the
+ * whole turn to a holding message instead. Keeps a reply that is nothing but a fabricated fact
+ * from being sent as an empty/degenerate message. Env-overridable.
+ */
+const GROUNDING_GATE_STRIP_FLOOR = (() => {
+  const n = parseInt(process.env.GROUNDING_GATE_STRIP_FLOOR || '24', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 24;
+})();
 
 /**
  * P0-4 (RC-19, RC-22): when ON, the pre-reply sensitive-escalation subsystem fails
@@ -2808,6 +2836,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     hadImages,
     productNotInCatalog: visionProductNotInCatalog,
     telemetry: replyTelemetry,
+    factsUsed,
   } = await generateReply(
       conversationId,
       tenantId,
@@ -2840,6 +2869,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         decisionKind: 'no_reply',
         telemetry: replyTelemetry,
         decisionEvents,
+        factsUsed,
       }),
     );
     return;
@@ -3138,6 +3168,11 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     !isProductRecommendationQuestion &&
     (attributeIntent.is_product_knowledge_question || requestedStructuredAttributes.length > 0);
 
+  // P2-1: the consolidated gate subsumes the gap assessor's structured decision, so it forces the
+  // deterministic-first path (the LLM's stochastic !ok/`missing` can never decide an escalation on
+  // its own). Equivalent to GAP_GATE_DETERMINISTIC_FIRST but also engaged by the consolidated flag.
+  const gapDeterministicFirst = GAP_GATE_DETERMINISTIC_FIRST || GROUNDING_GATE_CONSOLIDATED;
+
   if (!usageEscalated && isProductInformationQuestion && !isOosCannedReply) {
     if (hadImages) {
       // The vision pipeline inside generateReply already handled the photo query
@@ -3216,10 +3251,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       // Structured attributes are decided solely by the deterministic net below, and
       // question echoes ("ma shum", "cila eshte me e mire") are suppressed. Legacy
       // mode passes the labels through untouched.
-      const llmMissingLabels = GAP_GATE_DETERMINISTIC_FIRST
+      const llmMissingLabels = gapDeterministicFirst
         ? filterFreeFormInfoLabels(assessment.missing)
         : assessment.missing;
-      if (GAP_GATE_DETERMINISTIC_FIRST && assessment.errored) {
+      if (gapDeterministicFirst && assessment.errored) {
         console.warn('[ai.reply] gap assessor errored — deterministic-first gate failing OPEN to deterministic evidence only', {
           conversationId,
           tenantId,
@@ -3289,7 +3324,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       // escalate only on deterministically-backed missing info — an errored assessor
       // with a clean deterministic net sends the AI reply as-is (fail-open). A
       // fully-answerable request keeps the original, well-tuned AI reply untouched.
-      const shouldEscalate = decideGapEscalation(assessment, status, GAP_GATE_DETERMINISTIC_FIRST);
+      const shouldEscalate = decideGapEscalation(assessment, status, gapDeterministicFirst);
       recordDecision({
         classifier: 'product_info_gap',
         raw_score: null,
@@ -3671,6 +3706,90 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // P2-1 — Consolidated deterministic grounding gate (RC-02/RC-01/RC-03).
+  //
+  // When GROUNDING_GATE_CONSOLIDATED is on, ONE gate replaces the legacy price + product-name
+  // hallucination guards below: it validates the reply's asserted prices/names against the
+  // tenant's FULL active catalog (never this turn's matchedProducts window) and takes TARGETED
+  // action on the failing span — only the sentence carrying an ungrounded price or fabricated
+  // name is removed; grounded content is kept (the fcd0af7e fix). If too little grounded content
+  // survives (< GROUNDING_GATE_STRIP_FLOOR) it escalates to a holding message. A catalog-index
+  // infra error fails CLOSED with the distinct retryable reason `grounding_check_unavailable`.
+  //
+  // Escalations funnel through a single `groundingGateEscalated` flag with a dynamic reason,
+  // handled atomically in the flip txn (staged path) and the legacy inline path below.
+  // ---------------------------------------------------------------------------
+  let groundingGateEscalated = false;
+  let groundingGateReason = 'hallucinated_product_name';
+  let groundingGateFailClosed = false;
+  let groundingGateDetails: Record<string, unknown> | null = null;
+
+  if (GROUNDING_GATE_CONSOLIDATED) {
+    const gateEligible = !knowledgeGapEscalated && !isOosCannedReply && !isOrderConfirmationReply;
+    if (gateEligible) {
+      const gateDeps: GroundingGateDeps = {
+        getPriceSet: getFullCatalogPriceSet,
+        getNameIndex: getFullCatalogNameIndex,
+        suspectNames: filterHallucinatedProductNames,
+        verifyNames: (t, suspects, index) =>
+          verifySuspectedNamesAgainstCatalog(t, suspects, index),
+      };
+      const verdict = await evaluateConsolidatedGrounding({
+        tenantId,
+        prose: finalReplyText,
+        factsUsed,
+        deps: gateDeps,
+        nameLlmCap: NAME_GUARD_LLM_CATALOG_CAP,
+        stripFloor: GROUNDING_GATE_STRIP_FLOOR,
+      });
+      recordDecision({
+        classifier: 'grounding_gate',
+        raw_score: verdict.ungroundedPrices.length + verdict.ungroundedNames.length,
+        threshold: null,
+        boost_applied: false,
+        passed: verdict.escalate || verdict.status === 'stripped',
+        branch: verdict.status,
+      });
+
+      if (verdict.escalate) {
+        groundingGateEscalated = true;
+        groundingGateReason = verdict.reason ?? 'grounding_check_unavailable';
+        groundingGateFailClosed = verdict.failClosed ?? false;
+        groundingGateDetails = {
+          gate: 'consolidated_grounding',
+          status: verdict.status,
+          reason: groundingGateReason,
+          ungroundedPrices: verdict.ungroundedPrices,
+          ungroundedNames: verdict.ungroundedNames,
+          originalReplyPreview: finalReplyText.slice(0, 200),
+        };
+        logger.warn('[GROUNDING GATE] Reply not fully grounded — escalating to holding message', {
+          tenantId,
+          conversationId,
+          status: verdict.status,
+          reason: groundingGateReason,
+          ungroundedPrices: verdict.ungroundedPrices,
+          ungroundedNames: verdict.ungroundedNames,
+          replyPreview: logSafeStructured(finalReplyText),
+        });
+        finalReplyText = HOLDING_MESSAGES[replyLocale].productKnowledgeEscalation;
+        // Quality flags were computed against the now-replaced reply; clear them.
+        qualityFailing = false;
+        flagReason = null;
+      } else if (verdict.status === 'stripped') {
+        logger.warn('[GROUNDING GATE] Ungrounded span(s) stripped — sending grounded remainder', {
+          tenantId,
+          conversationId,
+          ungroundedPrices: verdict.ungroundedPrices,
+          ungroundedNames: verdict.ungroundedNames,
+          replyPreview: logSafeStructured(finalReplyText),
+        });
+        finalReplyText = verdict.text;
+      }
+    }
+  }
+
   // Price-consistency guard (per-reply): hard gate — if the reply states a concrete
   // price that is NOT present in the reference price set, replace the reply with a
   // specialist holding message and schedule a post-send alert + AI pause.
@@ -3688,6 +3807,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   let priceHallucinationDetails: Record<string, unknown> | null = null;
 
   const priceGuardEligible =
+    !GROUNDING_GATE_CONSOLIDATED && // P2-1: the consolidated gate above owns price grounding when on.
     !knowledgeGapEscalated &&
     !isOosCannedReply &&
     (GUARD_VALIDATE_AGAINST_FULL_CATALOG
@@ -3793,6 +3913,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   let productNameHallucinationDetails: Record<string, unknown> | null = null;
 
   if (
+    !GROUNDING_GATE_CONSOLIDATED && // P2-1: the consolidated gate above owns name grounding when on.
     !knowledgeGapEscalated &&
     !priceHallucinationEscalated &&
     !isOosCannedReply &&
@@ -3890,7 +4011,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       replyText: finalReplyText,
       enabled: UNCERTAIN_ANSWER_FALLBACK_ENABLED,
       alreadyEscalated:
-        knowledgeGapEscalated || priceHallucinationEscalated || productNameHallucinationEscalated,
+        knowledgeGapEscalated ||
+        priceHallucinationEscalated ||
+        productNameHallucinationEscalated ||
+        groundingGateEscalated,
       isOosCannedReply,
       isOrderFlowReply: isOrderConfirmationReply,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
@@ -3950,6 +4074,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     knowledgeGapEscalated ||
     priceHallucinationEscalated ||
     productNameHallucinationEscalated ||
+    groundingGateEscalated ||
     uncertainAnswerEscalated;
 
   if (imageClassification?.is_image_request && !anyEscalationFired) {
@@ -4047,6 +4172,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     knowledgeGapEscalated ||
     priceHallucinationEscalated ||
     productNameHallucinationEscalated ||
+    groundingGateEscalated ||
     uncertainAnswerEscalated;
   const persistedProductIds = replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id);
 
@@ -4116,17 +4242,21 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     knowledgeGapEscalated,
     priceHallucinationEscalated,
     productNameHallucinationEscalated,
+    groundingGateEscalated,
+    groundingGateReason: groundingGateEscalated ? groundingGateReason : null,
     uncertainAnswerEscalated,
   };
-  const ledgerDecisionKind = productNameHallucinationEscalated
-    ? 'escalation:product_name'
-    : priceHallucinationEscalated
-      ? 'escalation:price'
-      : knowledgeGapEscalated
-        ? 'escalation:knowledge_gap'
-        : uncertainAnswerEscalated
-          ? 'escalation:uncertain'
-          : 'reply';
+  const ledgerDecisionKind = groundingGateEscalated
+    ? `escalation:grounding:${groundingGateReason}`
+    : productNameHallucinationEscalated
+      ? 'escalation:product_name'
+      : priceHallucinationEscalated
+        ? 'escalation:price'
+        : knowledgeGapEscalated
+          ? 'escalation:knowledge_gap'
+          : uncertainAnswerEscalated
+            ? 'escalation:uncertain'
+            : 'reply';
   const stageEnabled = isStageBeforeSendEnabled(channel.type);
   // P1-1 (RC-20): with staging on AND the relay owning dispatch, the deterministic tail
   // side-effects are outbox rows written in the flip txn (exactly-once via the relay); the
@@ -4181,6 +4311,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
             telemetry: replyTelemetry,
             decisionEvents,
             guardVerdicts: ledgerGuardVerdicts,
+            factsUsed,
           }),
         );
 
@@ -4223,6 +4354,22 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
             client,
           );
           await setConversationAiPaused(conversationId, tenantId, true, client, 'uncertain_answer_escalated');
+          await setConversationHumanReplied(conversationId, tenantId, false, client);
+        } else if (groundingGateEscalated) {
+          // P2-1: the consolidated grounding gate escalated (ungrounded fact or catalog-index
+          // infra error). Dynamic reason; `grounding_check_unavailable` carries fail_closed=true.
+          flipEscalationAlert = await createAIAlert(
+            {
+              tenant_id: tenantId,
+              conversation_id: conversationId,
+              message_id: message.id,
+              reason: groundingGateReason,
+              details: groundingGateDetails,
+              fail_closed: groundingGateFailClosed,
+            },
+            client,
+          );
+          await setConversationAiPaused(conversationId, tenantId, true, client, groundingGateReason);
           await setConversationHumanReplied(conversationId, tenantId, false, client);
         }
         if (qualityFailing && flagReason) {
@@ -4653,6 +4800,49 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       const contactForAlert = await findContactById(conversation.contact_id);
       socketService.emitAIAlert(tenantId, {
         ...uncertainAlert,
+        message_content: outboundMessage.content,
+        contact_name: contactForAlert?.name?.trim() || 'Customer',
+        channel_type: channel.type,
+        channel_name: channel.name,
+      });
+      socketService.emitConversationUpdated(tenantId, conversationId);
+    }
+  }
+
+  // P2-1: consolidated grounding-gate escalation alert + pause (legacy inline path). On the staged
+  // path this ran ATOMICALLY inside the flip txn — skip inline. Mirrors the uncertain-answer block.
+  if (groundingGateEscalated && !stageEnabled) {
+    const client = await pool.connect();
+    let groundingAlert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      groundingAlert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: outboundMessage.id,
+          reason: groundingGateReason,
+          details: groundingGateDetails,
+          fail_closed: groundingGateFailClosed,
+        },
+        client,
+      );
+      await setConversationAiPaused(conversationId, tenantId, true, client, groundingGateReason);
+      await setConversationHumanReplied(conversationId, tenantId, false, client);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error('[ai.reply] Grounding-gate alert / pause failed', err, {
+        conversationId,
+        tenantId,
+      });
+    } finally {
+      client.release();
+    }
+    if (groundingAlert) {
+      const contactForAlert = await findContactById(conversation.contact_id);
+      socketService.emitAIAlert(tenantId, {
+        ...groundingAlert,
         message_content: outboundMessage.content,
         contact_name: contactForAlert?.name?.trim() || 'Customer',
         channel_type: channel.type,

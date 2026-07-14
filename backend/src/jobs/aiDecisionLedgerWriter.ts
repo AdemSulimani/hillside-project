@@ -23,6 +23,7 @@ import {
   type LedgerRecord,
 } from '../db/models/aiDecisionLedger';
 import type { ReplyTelemetry } from '../services/aiTelemetry';
+import type { DeclaredFact } from '../services/groundingGate';
 import { getTrackedOpenAICalls } from '../services/openaiCallTracker';
 import { logger } from '../utils/logger';
 
@@ -56,6 +57,12 @@ export interface BuildLedgerRecordInput {
   telemetry?: ReplyTelemetry;
   decisionEvents: LedgerDecisionEvent[];
   guardVerdicts?: Record<string, unknown>;
+  /**
+   * P2-1 (RC-01/RC-02): the generation's declared `facts_used`, so a grounding-gate strip can be
+   * re-judged against the catalog from the ledger alone. Present only when the facts_used contract
+   * is active; `null`/absent otherwise (byte-for-byte the prior behaviour).
+   */
+  factsUsed?: DeclaredFact[] | null;
 }
 
 /**
@@ -139,7 +146,9 @@ export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
       : null,
     decision_events: input.decisionEvents,
     guard_verdicts: input.guardVerdicts ?? {},
-    facts_used: null,
+    // P2-1: populate the reserved column with the generation's declared facts (or null when the
+    // contract is off) — closes P2-4 Part 2(a).
+    facts_used: input.factsUsed ?? null,
   };
 }
 
