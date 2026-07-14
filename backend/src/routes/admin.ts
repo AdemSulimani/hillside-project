@@ -20,6 +20,7 @@ import {
   adminMarkUseCasePeriodBodySchema,
   adminDeadLetterListQuerySchema,
   adminDeadLetterIdParamsSchema,
+  adminDeadLetterReplayBodySchema,
 } from '../validators/admin';
 import {
   adminAiTestBodySchema,
@@ -272,6 +273,7 @@ ownerRoutes.get(
 ownerRoutes.post(
   '/dead-letter/:id/replay',
   validateParams(adminDeadLetterIdParamsSchema),
+  validateBody(adminDeadLetterReplayBodySchema),
   adminDeadLetterController.replay,
 );
 

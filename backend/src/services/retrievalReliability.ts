@@ -1,6 +1,8 @@
 /**
  * P1-4 (RC-04) — Retrieval reliability: aborting embedding timeout + negative/shared query-
- * embedding cache + `semanticSkipped` metric + similarity-threshold hysteresis.
+ * embedding cache (negative caching killable via `RETRIEVAL_NEG_CACHE_TTL_SECONDS=0`) +
+ * per-process single-flight for concurrent identical queries + `semanticSkipped` metric +
+ * similarity-threshold hysteresis.
  *
  * RC-04 (`docs/audit/11-root-causes.md:297`): the legacy `generateQueryEmbeddingWithTimeout`
  * raced the OpenAI embedding call against a 5 s timer with `Promise.race` — but the timer
@@ -78,12 +80,14 @@ export const RETRIEVAL_POS_CACHE_TTL_SECONDS = (() => {
 /**
  * TTL (s) for negative (skip) sentinels. A timed-out/failed query is negatively cached for
  * this window so identical queries stop re-racing a struggling OpenAI; kept short so recovery
- * is fast. Per-exact-text, so blast radius is bounded.
+ * is fast. Per-exact-text, so blast radius is bounded. An explicit `0` is the kill switch
+ * (the P1-4 flag-based rollback): negative caching is disabled entirely — no sentinel reads,
+ * no sentinel writes. Any other invalid/absent value keeps the 30 s default.
  */
 export const RETRIEVAL_NEG_CACHE_TTL_SECONDS = (() => {
   const raw = process.env.RETRIEVAL_NEG_CACHE_TTL_SECONDS;
   const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 30;
+  return Number.isFinite(n) && n >= 0 ? n : 30;
 })();
 
 /**
@@ -337,8 +341,9 @@ async function readNegative(
   redis: RetrievalRedisClient | null,
   model: string,
   text: string,
+  ttl: number,
 ): Promise<boolean> {
-  if (!redis) return false;
+  if (ttl <= 0 || !redis) return false; // ttl 0 = kill switch: negative caching disabled
   try {
     return Boolean(await redis.get(negativeCacheKey(model, text)));
   } catch {
@@ -352,7 +357,7 @@ async function writeNegative(
   text: string,
   ttl: number,
 ): Promise<void> {
-  if (!redis) return;
+  if (ttl <= 0 || !redis) return; // ttl 0 = kill switch: never write a skip sentinel
   try {
     await redis.set(negativeCacheKey(model, text), '1', 'EX', ttl);
   } catch {
@@ -392,18 +397,46 @@ async function writeSharedPositive(
 }
 
 /**
+ * Per-process single-flight map: in-flight resolves keyed by model+text (same keying as the
+ * in-process cache). Without it, N concurrent identical queries that miss every cache each
+ * call OpenAI — the positive caches are only written AFTER a compute completes. Sharing the
+ * WHOLE resolve (including the negative-cache read/write) is safe because the result is a pure
+ * function of (model, text); `tenantId` is only used for skip logging. Entries are removed in
+ * a `finally` — success AND failure — so a failed computation never poisons later calls.
+ */
+const inFlightResolves = new Map<string, Promise<QueryEmbeddingResult>>();
+
+/**
  * Resolve a query embedding with a HARD abort deadline, a shared/in-process positive cache,
  * and a negative (skip) cache. Returns a structured result (`vector` + `source`/`reason`) so
  * the timeout/dimension/fail-open branches are directly assertable in tests; the thin
  * {@link getOrComputeQueryEmbedding} wrapper narrows it to `number[] | null` for callers.
  *
- * Order: in-process positive → shared positive → negative (skip) → compute (aborting) →
- * dimension guard → cache. Positive is checked BEFORE negative and returns early, so a live
- * good vector is never shadowed by a stale skip sentinel.
+ * Concurrent callers with the same model+text share ONE in-flight computation (single-flight);
+ * otherwise order per call: in-process positive → shared positive → negative (skip) → compute
+ * (aborting) → dimension guard → cache. Positive is checked BEFORE negative and returns early,
+ * so a live good vector is never shadowed by a stale skip sentinel.
  */
 export async function resolveQueryEmbedding(
   text: string,
   deps: QueryEmbeddingDeps = {},
+): Promise<QueryEmbeddingResult> {
+  const model = deps.model ?? activeEmbeddingModel();
+  const key = `${model} ${text}`;
+  const existing = inFlightResolves.get(key);
+  if (existing) return existing;
+  // NOTE: the map is populated synchronously (no await before `set`), so two callers in the
+  // same tick already coalesce; the `finally` removes the entry once settled either way.
+  const flight = resolveQueryEmbeddingUncoalesced(text, deps).finally(() => {
+    inFlightResolves.delete(key);
+  });
+  inFlightResolves.set(key, flight);
+  return flight;
+}
+
+async function resolveQueryEmbeddingUncoalesced(
+  text: string,
+  deps: QueryEmbeddingDeps,
 ): Promise<QueryEmbeddingResult> {
   const embed: EmbedFn =
     deps.embed ??
@@ -436,7 +469,8 @@ export async function resolveQueryEmbedding(
   }
 
   // 3. Negative (skip) cache — a recent timeout/failure suppresses the re-race.
-  if (await readNegative(redis, model, text)) {
+  //    A TTL of 0 disables this branch entirely (kill switch).
+  if (await readNegative(redis, model, text, negCacheTtl)) {
     return { vector: null, source: 'negative_cache' };
   }
 

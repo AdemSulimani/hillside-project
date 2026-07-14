@@ -30,6 +30,8 @@ import {
   normalizeClassifierConfidence,
   passesConfidenceGate,
   resolveEscalationConfidence,
+  resolveEscalationConfidenceDetailed,
+  enforceConfidenceContract,
 } from '../classifierConfidenceContract';
 
 // ---------------------------------------------------------------------------
@@ -301,5 +303,140 @@ describe('isLikelyE164Phone', () => {
     assert.equal(isLikelyE164Phone(undefined), false);
     assert.equal(isLikelyE164Phone(null), false);
     assert.equal(isLikelyE164Phone(38344123456), false); // must be a string
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime contract enforcement (the production wiring of confidenceContractSchema)
+// ---------------------------------------------------------------------------
+describe('enforceConfidenceContract', () => {
+  it('accepts an in-range confidence and hands it back unviolated', () => {
+    const out = enforceConfidenceContract({ is_refund: true, confidence: 0.83 }, 'test');
+    assert.equal(out.contractViolated, false);
+    assert.equal(out.rawConfidence, 0.83);
+  });
+
+  it('accepts the percentage scale (C-63) — 85 is in-contract, normalized downstream', () => {
+    const out = enforceConfidenceContract({ confidence: 85 }, 'test');
+    assert.equal(out.contractViolated, false);
+    assert.equal(normalizeClassifierConfidence(out.rawConfidence), 0.85);
+  });
+
+  it('flags a missing confidence as a violation but still returns the raw value', () => {
+    const out = enforceConfidenceContract({ is_refund: true }, 'test');
+    assert.equal(out.contractViolated, true);
+    assert.equal(out.rawConfidence, undefined);
+  });
+
+  it('flags out-of-range and non-numeric confidences', () => {
+    assert.equal(enforceConfidenceContract({ confidence: -1 }, 'test').contractViolated, true);
+    assert.equal(enforceConfidenceContract({ confidence: 150 }, 'test').contractViolated, true);
+    assert.equal(enforceConfidenceContract({ confidence: 'high' }, 'test').contractViolated, true);
+    assert.equal(enforceConfidenceContract(null, 'test').contractViolated, true);
+  });
+
+  it('a violation never changes the resolve fail-direction (symmetry ON → abstain-level 0)', () => {
+    const out = enforceConfidenceContract({ is_refund: true }, 'test');
+    const resolved = resolveEscalationConfidenceDetailed({
+      raw: out.rawConfidence,
+      intentAsserted: true,
+      legacyBoost: 0.9,
+      applySymmetry: true,
+    });
+    assert.equal(resolved.confidence, 0);
+    assert.equal(resolved.boostApplied, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveEscalationConfidenceDetailed — the boost_applied ledger measurement (RC-07)
+// ---------------------------------------------------------------------------
+describe('resolveEscalationConfidenceDetailed', () => {
+  it('legacy branch: reports boostApplied=true exactly when the boost fires', () => {
+    const boosted = resolveEscalationConfidenceDetailed({
+      raw: undefined,
+      intentAsserted: true,
+      legacyBoost: 0.9,
+      applySymmetry: false,
+    });
+    assert.equal(boosted.confidence, 0.9);
+    assert.equal(boosted.boostApplied, true);
+
+    const realScore = resolveEscalationConfidenceDetailed({
+      raw: 0.86,
+      intentAsserted: true,
+      legacyBoost: 0.9,
+      applySymmetry: false,
+    });
+    assert.equal(realScore.confidence, 0.86);
+    assert.equal(realScore.boostApplied, false);
+
+    const noIntent = resolveEscalationConfidenceDetailed({
+      raw: 0,
+      intentAsserted: false,
+      legacyBoost: 0.9,
+      applySymmetry: false,
+    });
+    assert.equal(noIntent.confidence, 0);
+    assert.equal(noIntent.boostApplied, false);
+  });
+
+  it('symmetry branch: never boosts, always reports boostApplied=false', () => {
+    const out = resolveEscalationConfidenceDetailed({
+      raw: undefined,
+      intentAsserted: true,
+      legacyBoost: 0.9,
+      applySymmetry: true,
+    });
+    assert.equal(out.confidence, 0);
+    assert.equal(out.boostApplied, false);
+  });
+
+  it('stays consistent with the scalar resolveEscalationConfidence', () => {
+    for (const raw of [undefined, 0, 0.5, 85, '0.7']) {
+      for (const intentAsserted of [true, false]) {
+        for (const applySymmetry of [true, false]) {
+          assert.equal(
+            resolveEscalationConfidence({ raw, intentAsserted, legacyBoost: 0.85, applySymmetry }),
+            resolveEscalationConfidenceDetailed({
+              raw,
+              intentAsserted,
+              legacyBoost: 0.85,
+              applySymmetry,
+            }).confidence,
+          );
+        }
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Band cap: threshold + band can never exceed 1 (an over-wide band must not
+// become a silent kill switch on the gated action)
+// ---------------------------------------------------------------------------
+describe('classifyConfidenceGate — band cap', () => {
+  it('a full-confidence score still passes a high-threshold gate under the max band', () => {
+    // threshold 0.85 + band 0.25 would demand >= 1.10 without the cap; capped to 0.15 the
+    // pass bar is exactly 1.0, which a clamped confidence can reach.
+    assert.equal(
+      classifyConfidenceGate({ confidence: 1, threshold: 0.85, band: 0.25, applySymmetry: true }),
+      'pass',
+    );
+  });
+
+  it('the cap leaves normal bands untouched', () => {
+    assert.equal(
+      classifyConfidenceGate({ confidence: 0.9, threshold: 0.8, band: 0.05, applySymmetry: true }),
+      'pass',
+    );
+    assert.equal(
+      classifyConfidenceGate({ confidence: 0.82, threshold: 0.8, band: 0.05, applySymmetry: true }),
+      'abstain',
+    );
+    assert.equal(
+      classifyConfidenceGate({ confidence: 0.7, threshold: 0.8, band: 0.05, applySymmetry: true }),
+      'fail',
+    );
   });
 });

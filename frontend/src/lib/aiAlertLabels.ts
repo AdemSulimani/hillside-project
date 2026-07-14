@@ -18,6 +18,9 @@ const LABELS: Record<string, string> = {
   rate_limit_exceeded: 'AI rate limit exceeded',
   message_send_failed: 'Message sending failed',
   token_refresh_failed: 'Token refresh failed',
+  ai_reply_undelivered: 'AI reply undelivered — needs manual reply',
+  confidence_band_abstain: 'Borderline AI decision — worth a look',
+  multiple_channels_matched: 'Channel connected to more than one business',
 };
 
 export function formatFlagReason(reason: string): string {

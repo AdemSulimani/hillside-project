@@ -4,8 +4,9 @@
  *
  * All pure/in-process (no network/DB/OpenAI): the orchestrator takes an injectable `deps` bag
  * (mirrors `outboundEchoRegistry.ts`'s injected client and `productRetrieval.test.ts`'s injected
- * matcher), so the abort, negative-cache, fail-open, dimension-guard and hysteresis branches are
- * all exercised in one process with hand-rolled stub clients — no mocking framework.
+ * matcher), so the abort, negative-cache (incl. the TTL=0 kill switch), single-flight, fail-open,
+ * dimension-guard and hysteresis branches are all exercised in one process with hand-rolled stub
+ * clients — no mocking framework.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -222,6 +223,22 @@ describe('resolveQueryEmbedding — negative cache', () => {
     assert.equal(second.vector, null);
     assert.equal(counter.calls, 1, 'embed must NOT be invoked again — the skip is cached');
   });
+
+  it('negCacheTtl=0 is the kill switch: no sentinel is written and a second call re-invokes embed', async () => {
+    const redis = makeFakeRedis();
+    const inProcess = createInProcessEmbeddingCache();
+    const counter = { calls: 0 };
+    const embed = hangingEmbed(counter);
+    const deps = { embed, redis, model: MODEL, timeoutMs: 10, inProcess, sharedCache: false, negCacheTtl: 0 };
+
+    const first = await resolveQueryEmbedding('q', deps);
+    assert.equal(first.reason, 'embedding_timeout');
+    assert.ok(!redis.store.has(negativeCacheKey(MODEL, 'q')), 'kill switch must suppress the sentinel write');
+
+    const second = await resolveQueryEmbedding('q', deps);
+    assert.equal(second.reason, 'embedding_timeout');
+    assert.equal(counter.calls, 2, 'with negative caching disabled, embed IS re-invoked');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -359,6 +376,54 @@ describe('resolveQueryEmbedding — positive cache', () => {
     assert.equal(b.source, 'shared');
     assert.equal(b.vector?.length, 1536);
     assert.equal(bCounter.calls, 0, 'worker B must converge on the shared vector, not re-embed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Orchestrator — single-flight (concurrent identical cold queries share one compute).
+// ---------------------------------------------------------------------------
+
+describe('resolveQueryEmbedding — single-flight', () => {
+  it('two concurrent identical cold queries invoke embed exactly once and share the vector', async () => {
+    const counter = { calls: 0 };
+    const embed: EmbedFn = async () => {
+      counter.calls++;
+      await new Promise((resolve) => setImmediate(resolve)); // stay in flight across both calls
+      return vec(1536);
+    };
+    const deps = { ...base(), embed };
+
+    // Launched back-to-back in the same tick — the second must join the first's flight.
+    const [a, b] = await Promise.all([
+      resolveQueryEmbedding('q', deps),
+      resolveQueryEmbedding('q', deps),
+    ]);
+    assert.equal(counter.calls, 1, 'concurrent identical queries must share ONE OpenAI call');
+    assert.equal(a.source, 'computed');
+    assert.equal(a.vector?.length, 1536);
+    assert.equal(a.vector, b.vector, 'both callers must resolve to the same vector');
+  });
+
+  it('removes the in-flight entry after a failure, so a later call re-computes', async () => {
+    const counter = { calls: 0 };
+    const embed: EmbedFn = async () => {
+      counter.calls++;
+      throw new Error('boom');
+    };
+    // redis: null → no negative caching, so a repeat compute proves the MAP entry was removed.
+    const deps = { ...base(), embed, redis: null };
+
+    const [a, b] = await Promise.all([
+      resolveQueryEmbedding('q', deps),
+      resolveQueryEmbedding('q', deps),
+    ]);
+    assert.equal(counter.calls, 1, 'the failing computation is still shared while in flight');
+    assert.equal(a.reason, 'embedding_error');
+    assert.equal(b.reason, 'embedding_error');
+
+    const third = await resolveQueryEmbedding('q', deps);
+    assert.equal(third.reason, 'embedding_error');
+    assert.equal(counter.calls, 2, 'a failed flight must not poison later calls — entry removed in finally');
   });
 });
 

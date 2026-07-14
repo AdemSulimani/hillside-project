@@ -55,6 +55,20 @@ export interface LedgerUsage {
   completion_tokens: number | null;
   total_tokens: number | null;
   usd_cost: number | null;
+  /** P1-5 (C-108): EVERY OpenAI call this reply made (classifiers + embeddings + the main
+   * completion) — model ids and token counts only, no text. `usd_cost` above remains the
+   * main completion's cost; `calls_usd_cost` aggregates the priced calls below. */
+  calls?: Array<{
+    kind: string;
+    requested: string | null;
+    served: string | null;
+    prompt_tokens: number | null;
+    completion_tokens: number | null;
+    total_tokens: number | null;
+    usd_cost: number | null;
+  }> | null;
+  call_count?: number | null;
+  calls_usd_cost?: number | null;
 }
 
 export interface LedgerRetrievalTop {

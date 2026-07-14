@@ -52,16 +52,44 @@ export const CONFIDENCE_HYSTERESIS_BAND = (() => {
 })();
 
 /**
- * The required-`confidence` output contract (DP-GPR-16). `confidence` is a REQUIRED number;
- * a classifier output that omits it fails the contract (`safeParse().success === false`).
- * The intent booleans are optional here because each detector layers its own intent shape
- * on top — the contract's job is solely to make `confidence` a mandatory, typed field.
+ * The required-`confidence` output contract (DP-GPR-16). `confidence` is a REQUIRED,
+ * range-checked number (`[0, 100]` — values in `(1, 100]` are the C-63 percentage scale,
+ * normalized by `/100` downstream; anything outside is a contract violation). A classifier
+ * output that omits it fails the contract (`safeParse().success === false`). The intent
+ * booleans are optional here because each detector layers its own intent shape on top — the
+ * contract's job is solely to make `confidence` a mandatory, typed, bounded field.
  */
 export const confidenceContractSchema = z
   .object({
-    confidence: z.number(),
+    confidence: z.number().min(0).max(100),
   })
   .passthrough();
+
+/**
+ * Runtime enforcement of {@link confidenceContractSchema} on a parsed detector payload —
+ * the production wiring of the contract (previously the schema had no call sites). Emits
+ * the `[CONFIDENCE_CONTRACT]` violation marker so the omission rate is measurable, and
+ * hands the raw `confidence` (usable or not) back to the caller's normalize/resolve path,
+ * whose fail direction is owned by `resolveEscalationConfidence` / the affirmation slot
+ * check — a violation therefore never throws and never silently passes a gate.
+ */
+export function enforceConfidenceContract(
+  payload: unknown,
+  detector: string,
+): { rawConfidence: unknown; contractViolated: boolean } {
+  const result = confidenceContractSchema.safeParse(payload);
+  if (result.success) {
+    return { rawConfidence: result.data.confidence, contractViolated: false };
+  }
+  const rawConfidence =
+    payload && typeof payload === 'object'
+      ? (payload as Record<string, unknown>).confidence
+      : undefined;
+  console.warn(
+    `[CONFIDENCE_CONTRACT] violation detector: ${detector} confidence: ${JSON.stringify(rawConfidence) ?? 'undefined'} — required range-checked field missing/invalid`,
+  );
+  return { rawConfidence, contractViolated: true };
+}
 
 /**
  * Normalizes a raw model `confidence` into `[0, 1]`.
@@ -107,10 +135,26 @@ export function resolveEscalationConfidence(args: {
   legacyBoost: number;
   applySymmetry: boolean;
 }): number {
+  return resolveEscalationConfidenceDetailed(args).confidence;
+}
+
+/**
+ * {@link resolveEscalationConfidence} plus the RC-07 measurement the P1-5 decision ledger
+ * records per gate: whether the legacy missing-confidence boost actually fired for this
+ * decision (`boostApplied` is by construction always false with `applySymmetry` ON).
+ */
+export function resolveEscalationConfidenceDetailed(args: {
+  raw: unknown;
+  intentAsserted: boolean;
+  legacyBoost: number;
+  applySymmetry: boolean;
+}): { confidence: number; boostApplied: boolean } {
   const normalized = normalizeClassifierConfidence(args.raw);
-  if (args.applySymmetry) return normalized;
-  if (args.intentAsserted && normalized === 0) return args.legacyBoost;
-  return normalized;
+  if (args.applySymmetry) return { confidence: normalized, boostApplied: false };
+  if (args.intentAsserted && normalized === 0) {
+    return { confidence: args.legacyBoost, boostApplied: true };
+  }
+  return { confidence: normalized, boostApplied: false };
 }
 
 export type GateVerdict = 'pass' | 'abstain' | 'fail';
@@ -133,8 +177,12 @@ export function classifyConfidenceGate(args: {
   band: number;
   applySymmetry: boolean;
 }): GateVerdict {
-  const { confidence, threshold, band, applySymmetry } = args;
+  const { confidence, threshold, applySymmetry } = args;
   if (!applySymmetry) return confidence > threshold ? 'pass' : 'fail';
+  // Cap the band so `threshold + band` can never exceed 1: confidence is clamped to [0, 1],
+  // so an over-wide band would otherwise make the gate permanently unpassable — a silent
+  // kill switch on the action it protects.
+  const band = Math.max(0, Math.min(args.band, 1 - threshold));
   if (confidence >= threshold + band) return 'pass';
   if (confidence <= threshold - band) return 'fail';
   return 'abstain';
