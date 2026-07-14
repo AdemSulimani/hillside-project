@@ -1,6 +1,7 @@
 import type { Message } from '../db/models/message';
 import { openai, OPENAI_INTENT_MODEL } from './openaiClient';
 import { logSafeStructured } from '../utils/redact';
+import { logger } from '../utils/logger';
 
 export interface IntentResult {
   intent_score: number;
@@ -44,7 +45,7 @@ function parseIntentJson(raw: string): IntentResult {
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    console.warn('[intentDetection] Failed to parse intent JSON response', {
+    logger.warn('[intentDetection] Failed to parse intent JSON response', {
       raw: logSafeStructured(raw),
     });
     return { ...EMPTY_INTENT_RESULT };

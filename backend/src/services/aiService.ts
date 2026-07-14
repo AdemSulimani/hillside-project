@@ -26,6 +26,7 @@ import {
 } from '../db/models/promptBlock';
 import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
 import { logSafe, logSafeStructured, redactPII } from '../utils/redact';
+import { logger } from '../utils/logger';
 import { createHash } from 'node:crypto';
 import { computeCost } from './modelPricing';
 import type {
@@ -754,7 +755,7 @@ export async function matchProductsForCustomerMessage(
 
   // Structured retrieval log — one line per call, easy to grep / ingest into a log
   // aggregator. Captures enough to reconstruct what was retrieved vs. what was correct.
-  console.info('[retrieval]', {
+  logger.info('[retrieval]', {
     tenantId,
     query: logSafe(trimmed),
     categoryIntent,
@@ -767,7 +768,7 @@ export async function matchProductsForCustomerMessage(
   });
 
   if (semanticSkipped && trimmed.length > 0) {
-    console.warn('[retrieval] Semantic path skipped — embedding unavailable or timed out', {
+    logger.warn('[retrieval] Semantic path skipped — embedding unavailable or timed out', {
       tenantId,
       queryLength: trimmed.length,
     });
@@ -3522,8 +3523,10 @@ export async function generateReply(
   attachmentUrlsRaw: unknown = [],
   productCatalogContext?: string,
   precomputedLanguage?: ReplyLocale,
-  // P1-5: correlation id (per-message, = AIReplyJobData.messageExternalId) threaded from the
-  // webhook so the [ai.generation] log and the ledger row are joinable across the fan-out (C-109).
+  // The originating per-webhook trace id, kept only for the legacy `[ai.generation]` log field.
+  // @deprecated P2-4 Part 1 — correlation is now carried ambiently via `runWithLogContext` (ALS),
+  // so `logger` picks up traceId + the per-message correlationId without this param. Retained to
+  // avoid a call-site churn in this pass; remove in a follow-up once the log field is migrated.
   traceId?: string,
 ): Promise<{
   reply: string;
@@ -4249,7 +4252,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
   };
   // Structured cost/telemetry log — observable immediately, before the ledger relay drains
   // (migration-path step 2). No customer text; the query is already redacted in the [retrieval] log.
-  console.info('[ai.generation]', {
+  logger.info('[ai.generation]', {
     conversationId,
     tenantId,
     traceId: traceId ?? null,

@@ -135,6 +135,7 @@ import {
 import { shouldAutoResumeRateLimitPause } from '../services/aiResumePolicy';
 import { getOrComputeClassifierVerdict } from '../services/classifierVerdictStore';
 import { runWithOpenAICallTracking } from '../services/openaiCallTracker';
+import { logger, runWithLogContext } from '../utils/logger';
 import {
   evaluateReply,
   evaluationTriggersAlert,
@@ -1389,12 +1390,29 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // reply — is recorded (model + usage + USD cost, no text) into an AsyncLocalStorage context
   // the ledger writer folds into `usage.calls`, so per-reply COGS covers all ~18–25 calls,
   // not just the main completion.
-  return runWithOpenAICallTracking(() => processAIReplyInner(data));
+  //
+  // P2-4 Part 1 (C-109): nest a log-correlation scope inside the call tracker so every log line
+  // and Sentry event under this job carries the per-message ids without threading them through
+  // any signature. `correlationId` is the per-message key (burst-merge collapses `traceId`), so
+  // grep-by-correlationId reconstructs one reply's whole lifecycle across generateReply + the
+  // classifiers. Both scopes only nest the existing single call — no control-flow change.
+  return runWithOpenAICallTracking(() =>
+    runWithLogContext(
+      {
+        traceId: data.traceId ?? null,
+        correlationId: data.messageExternalId,
+        tenantId: data.tenantId,
+        conversationId: data.conversationId,
+        component: 'processAIReply',
+      },
+      () => processAIReplyInner(data),
+    ),
+  );
 }
 
 async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   const { tenantId, channelId, conversationId, traceId } = data;
-  console.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
+  logger.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
 
   // ---- P1-5: AI decision ledger accumulator -------------------------------
   // Per-classifier decision events, pushed co-located with each gate's existing [X] log. The
@@ -1549,7 +1567,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       } catch {
         /* no active transaction */
       }
-      console.error('[ai.reply] Rate limit pause / alert failed', { conversationId, tenantId, err });
+      logger.error('[ai.reply] Rate limit pause / alert failed', err, { conversationId, tenantId });
     } finally {
       client.release();
     }
@@ -1694,9 +1712,12 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   // post-processing strip helpers, and order-confirmation follow-up). This guarantees the entire
   // reply — including system-inserted lines — is in the same language as the customer's message.
   const replyLanguage = await detectReplyLanguage(inboundText, recentMessages);
-  console.info(
-    `[REPLY_LANGUAGE] tenantId: ${tenantId} conversationId: ${conversationId} language: ${replyLanguage} traceId: ${traceId ?? 'n/a'}`,
-  );
+  logger.info('[REPLY_LANGUAGE]', {
+    tenantId,
+    conversationId,
+    language: replyLanguage,
+    traceId,
+  });
 
   // P0-4 (RC-19): tracks whether the sensitive special-path block has already put an
   // outbound message on the wire. A fail-closed re-throw for a BullMQ retry must never
@@ -1866,10 +1887,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         });
       }
     } catch (bestEffortErr) {
-      console.error('[ai.reply] sensitive-path escalation post-commit step failed', {
+      logger.error('[ai.reply] sensitive-path escalation post-commit step failed', bestEffortErr, {
         conversationId,
         tenantId,
-        err: bestEffortErr,
       });
     }
   };
@@ -2146,10 +2166,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
           await client.query('COMMIT');
         } catch (err) {
           await client.query('ROLLBACK');
-          console.error('[ai.reply] Wrong product escalation transaction failed', {
+          logger.error('[ai.reply] Wrong product escalation transaction failed', err, {
             conversationId,
             tenantId,
-            err,
           });
         } finally {
           client.release();
@@ -2461,10 +2480,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
           await client.query('COMMIT');
         } catch (err) {
           await client.query('ROLLBACK');
-          console.error('[ai.reply] Post-purchase support escalation transaction failed', {
+          logger.error('[ai.reply] Post-purchase support escalation transaction failed', err, {
             conversationId,
             tenantId,
-            err,
           });
         } finally {
           client.release();
@@ -2761,10 +2779,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         // Re-throwing would double-send it on retry (RC-20), and falling through would
         // follow the sensitive ack with a normal sales reply — the exact fail-open this
         // subsystem exists to prevent. End the job here; committed side effects stand.
-        console.error('[ai.reply] escalation path failed after an ack was sent — stopping (fail-closed)', {
+        logger.error('[ai.reply] escalation path failed after an ack was sent — stopping (fail-closed)', err, {
           conversationId,
           tenantId,
-          err,
         });
         return;
       }
@@ -2882,7 +2899,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
           finalReplyText = usageHoldingMessage;
         } catch (err) {
           await client.query('ROLLBACK');
-          console.error('[ai.reply] Usage escalation transaction failed', { conversationId, tenantId, err });
+          logger.error('[ai.reply] Usage escalation transaction failed', err, { conversationId, tenantId });
         } finally {
           client.release();
         }
@@ -2936,10 +2953,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       finalReplyText = usageHoldingMessage;
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[ai.reply] Usage escalation (no usage description) transaction failed', {
+      logger.error('[ai.reply] Usage escalation (no usage description) transaction failed', err, {
         conversationId,
         tenantId,
-        err,
       });
     } finally {
       client.release();
@@ -3003,10 +3019,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
           usageEscalated = true;
         } catch (err) {
           await client.query('ROLLBACK');
-          console.error('[ai.reply] Usage escalation fallback transaction failed', {
+          logger.error('[ai.reply] Usage escalation fallback transaction failed', err, {
             conversationId,
             tenantId,
-            err,
           });
         } finally {
           client.release();
@@ -3044,10 +3059,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       usageEscalated = true;
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[ai.reply] Usage escalation fallback transaction failed', {
+      logger.error('[ai.reply] Usage escalation fallback transaction failed', err, {
         conversationId,
         tenantId,
-        err,
       });
     } finally {
       client.release();
@@ -3113,10 +3127,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   const isProductRecommendationQuestion =
     Boolean(inboundText) && isProductRecommendationOrComparisonQuestion(inboundText);
   if (isProductRecommendationQuestion) {
-    console.info('[ai.reply] Detected recommendation/comparison question — skipping product-information-gap escalation', {
+    logger.info('[ai.reply] Detected recommendation/comparison question — skipping product-information-gap escalation', {
       conversationId,
       tenantId,
-      messagePreview: inboundText.slice(0, 120),
+      messagePreview: logSafe(inboundText),
     });
   }
   const isProductInformationQuestion =
@@ -3326,10 +3340,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
           finalReplyText = escalationReply;
         } catch (err) {
           await client.query('ROLLBACK');
-          console.error('[ai.reply] Product information gap escalation transaction failed', {
+          logger.error('[ai.reply] Product information gap escalation transaction failed', err, {
             conversationId,
             tenantId,
-            err,
           });
         } finally {
           client.release();
@@ -3390,9 +3403,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     );
 
     if (!adviceIsFromCatalog) {
-      console.info(
+      logger.info(
         '[ai.reply] Speculative health advice detected in AI reply — escalating instead of sending',
-        { conversationId, tenantId, replyPreview: finalReplyText.slice(0, 120) },
+        { conversationId, tenantId, replyPreview: logSafeStructured(finalReplyText) },
       );
 
       const speculativeHoldingMessage =
@@ -3417,10 +3430,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         finalReplyText = speculativeHoldingMessage;
       } catch (err) {
         await client.query('ROLLBACK');
-        console.error('[ai.reply] Speculative advice escalation transaction failed', {
+        logger.error('[ai.reply] Speculative advice escalation transaction failed', err, {
           conversationId,
           tenantId,
-          err,
         });
       } finally {
         client.release();
@@ -3712,14 +3724,14 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       branch: hallucinatedPrices.length > 0 ? 'escalate' : 'pass',
     });
     if (hallucinatedPrices.length > 0) {
-      console.warn('[PRICE GUARD] Reply states price(s) not in catalog — escalating to holding message', {
+      logger.warn('[PRICE GUARD] Reply states price(s) not in catalog — escalating to holding message', {
         tenantId,
         conversationId,
         validationScope: priceGuardScope,
         statedPrices: hallucinatedPrices.map((p) => p.raw),
         catalogPrices: catalogPriceSet.prices.slice(0, 100),
         catalogPriceCount: catalogPriceSet.prices.length,
-        replyPreview: finalReplyText.slice(0, 120),
+        replyPreview: logSafeStructured(finalReplyText),
       });
       priceHallucinationDetails = {
         validationScope: priceGuardScope,
@@ -3749,11 +3761,11 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         recentMessages,
       );
       if (crossTurnInconsistencies.length > 0) {
-        console.warn('[PRICE GUARD] Cross-turn price inconsistency detected', {
+        logger.warn('[PRICE GUARD] Cross-turn price inconsistency detected', {
           tenantId,
           conversationId,
           inconsistencies: crossTurnInconsistencies,
-          replyPreview: finalReplyText.slice(0, 120),
+          replyPreview: logSafeStructured(finalReplyText),
         });
       }
     }
@@ -3830,13 +3842,13 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         branch: confirmedNames.length > 0 ? 'escalate' : 'pass',
       });
       if (confirmedNames.length > 0) {
-        console.warn('[PRODUCT NAME GUARD] Reply names product(s) not in catalog — escalating to holding message', {
+        logger.warn('[PRODUCT NAME GUARD] Reply names product(s) not in catalog — escalating to holding message', {
           tenantId,
           conversationId,
           validationScope: GUARD_VALIDATE_AGAINST_FULL_CATALOG ? 'full_catalog' : 'matched_products',
           suspectedNames: confirmedNames,
           catalogNames: referenceNames.slice(0, 50),
-          replyPreview: finalReplyText.slice(0, 120),
+          replyPreview: logSafeStructured(finalReplyText),
         });
         productNameHallucinationDetails = {
           validationScope: GUARD_VALIDATE_AGAINST_FULL_CATALOG ? 'full_catalog' : 'matched_products',
@@ -3885,11 +3897,11 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       hasMatchingProductsInContext: matchedProducts.length > 0,
     })
   ) {
-    console.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {
+    logger.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {
       tenantId,
       conversationId,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
-      replyPreview: finalReplyText.slice(0, 120),
+      replyPreview: logSafeStructured(finalReplyText),
     });
     uncertainAnswerDetails = {
       kind: 'uncertain_answer_fallback',
@@ -4070,20 +4082,18 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
             });
           } else {
             allImagesSent = false;
-            console.error('[ai.reply] Product image send failed', {
+            logger.error('[ai.reply] Product image send failed', imageResult.error, {
               conversationId,
               tenantId,
               productId: imageProduct.id,
-              error: imageResult.error,
             });
           }
         } catch (imgErr) {
           allImagesSent = false;
-          console.error('[ai.reply] Product image send threw unexpectedly', {
+          logger.error('[ai.reply] Product image send threw unexpectedly', imgErr, {
             conversationId,
             tenantId,
             productId: imageProduct.id,
-            error: imgErr instanceof Error ? imgErr.message : String(imgErr),
           });
         }
       }
@@ -4415,7 +4425,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       await markSelfSentMessageEcho(sendResult.graphMessageId);
     }
   } else {
-    console.error('[ai.reply] Contact not found for conversation', {
+    logger.error('[ai.reply] Contact not found for conversation', undefined, {
       contactId: conversation.contact_id,
     });
   }
@@ -4513,13 +4523,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       });
       socketService.emitConversationUpdated(tenantId, conversationId);
     } catch (missingImageAlertErr) {
-      console.error('[ai.reply] Product image unavailable alert creation failed', {
+      logger.error('[ai.reply] Product image unavailable alert creation failed', missingImageAlertErr, {
         conversationId,
         tenantId,
-        error:
-          missingImageAlertErr instanceof Error
-            ? missingImageAlertErr.message
-            : String(missingImageAlertErr),
       });
     }
   }
@@ -4548,10 +4554,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[ai.reply] Price hallucination alert / pause failed', {
+      logger.error('[ai.reply] Price hallucination alert / pause failed', err, {
         conversationId,
         tenantId,
-        err,
       });
     } finally {
       client.release();
@@ -4592,10 +4597,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[ai.reply] Product name hallucination alert / pause failed', {
+      logger.error('[ai.reply] Product name hallucination alert / pause failed', err, {
         conversationId,
         tenantId,
-        err,
       });
     } finally {
       client.release();
@@ -4638,10 +4642,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[ai.reply] Uncertain answer alert / pause failed', {
+      logger.error('[ai.reply] Uncertain answer alert / pause failed', err, {
         conversationId,
         tenantId,
-        err,
       });
     } finally {
       client.release();
@@ -4678,7 +4681,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[ai.reply] Quality alert / pause failed', { conversationId, tenantId, err });
+      logger.error('[ai.reply] Quality alert / pause failed', err, { conversationId, tenantId });
     } finally {
       client.release();
     }
@@ -4762,7 +4765,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   if (!sendResult?.success && !isRetryOfDeliveredReply) {
     const errReason = sendResult?.error ?? 'Contact not found for conversation';
     if (sendResult) {
-      console.error('[ai.reply] Channel send failed', { conversationId, error: errReason });
+      logger.error('[ai.reply] Channel send failed', errReason, { conversationId });
     }
     await updateMessageSendFailure(outboundMessage.id, tenantId, 'failed', errReason);
     socketService.emitMessageSendFailed(tenantId, {
@@ -4781,10 +4784,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
           reason: 'message_send_failed',
         });
       } catch (alertErr) {
-        console.error('[ai.reply] message_send_failed alert insert failed', {
+        logger.error('[ai.reply] message_send_failed alert insert failed', alertErr, {
           conversationId,
           tenantId,
-          err: alertErr,
         });
       }
     }
@@ -5198,10 +5200,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     socketService.emitOrderCreated(tenantId, order);
   } catch (err) {
     orderDetectionTailErrored = true;
-    console.error('[ai.reply] Intent detection or draft order failed', {
+    logger.error('[ai.reply] Intent detection or draft order failed', err, {
       conversationId,
       tenantId,
-      err,
     });
     if (SENSITIVE_PATH_FAIL_CLOSED) {
       // P0-4 (RC-22): this block runs AFTER the reply has been sent, so re-throwing would
@@ -5229,10 +5230,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         });
         socketService.emitConversationUpdated(tenantId, conversationId);
       } catch (alertErr) {
-        console.error('[ai.reply] Failed to raise order_detection_failed alert', {
+        logger.error('[ai.reply] Failed to raise order_detection_failed alert', alertErr, {
           conversationId,
           tenantId,
-          err: alertErr,
         });
       }
     }

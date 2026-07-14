@@ -24,6 +24,7 @@ import {
 } from '../db/models/aiDecisionLedger';
 import type { ReplyTelemetry } from '../services/aiTelemetry';
 import { getTrackedOpenAICalls } from '../services/openaiCallTracker';
+import { logger } from '../utils/logger';
 
 const AI_DECISION_LEDGER_ENABLED =
   (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
@@ -170,11 +171,14 @@ export async function enqueueLedgerViaOutbox(
     await client.query('RELEASE SAVEPOINT ai_ledger');
   } catch (err) {
     await client.query('ROLLBACK TO SAVEPOINT ai_ledger').catch(() => undefined);
-    console.warn('[ai_decision_ledger] outbox enqueue failed inside flip (savepoint rolled back)', {
-      conversationId: record.conversation_id,
-      correlationId: record.correlation_id,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    logger.error(
+      '[ai_decision_ledger] outbox enqueue failed inside flip (savepoint rolled back)',
+      err,
+      {
+        conversationId: record.conversation_id,
+        correlationId: record.correlation_id,
+      },
+    );
   }
 }
 
