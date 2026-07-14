@@ -2,6 +2,44 @@ import type { Message } from '../db/models/message';
 import { openai, OPENAI_INTENT_MODEL } from './openaiClient';
 import { logSafeStructured } from '../utils/redact';
 import { logger } from '../utils/logger';
+import { buildJsonSchema, parseStructuredCompletion, z } from './structuredClassifier';
+
+/**
+ * P2-2 (Slice A): when ON, the purchase-intent detector uses a strict `json_schema`
+ * `response_format` with a Zod-validated payload (the shared structured-output contract) instead
+ * of free-form `json_object` + a fail-open `JSON.parse`. A malformed/truncated structured output
+ * then throws a retryable `StructuredContractError` rather than silently degrading to an all-zero
+ * intent — the RC-22/I8 fail direction. Defaults OFF: the legacy fail-open path is preserved.
+ */
+const INTENT_STRUCTURED_CONTRACT =
+  (process.env.INTENT_STRUCTURED_CONTRACT ?? 'false').trim().toLowerCase() === 'true';
+
+/** Hand-authored strict schema for the purchase-intent completion (mirrors FACTS_USED_JSON_SCHEMA). */
+const INTENT_RESULT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'intent_score',
+    'product_name',
+    'quantity',
+    'delivery_address',
+    'customer_first_name',
+    'is_ready_to_order',
+    'reasoning',
+  ],
+  properties: {
+    intent_score: { type: 'number' },
+    product_name: { type: ['string', 'null'] },
+    quantity: { type: ['integer', 'null'] },
+    delivery_address: { type: ['string', 'null'] },
+    customer_first_name: { type: ['string', 'null'] },
+    is_ready_to_order: { type: 'boolean' },
+    reasoning: { type: 'string' },
+  },
+};
+
+/** Minimal Zod validator; `mapIntentPayload` does the coercion/clamping the legacy parser did. */
+const intentPayloadSchema = z.object({ intent_score: z.number() }).passthrough();
 
 export interface IntentResult {
   intent_score: number;
@@ -40,22 +78,22 @@ const EMPTY_INTENT_RESULT: IntentResult = {
   reasoning: '',
 };
 
-function parseIntentJson(raw: string): IntentResult {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    logger.warn('[intentDetection] Failed to parse intent JSON response', {
-      raw: logSafeStructured(raw),
-    });
-    return { ...EMPTY_INTENT_RESULT };
-  }
-
+/**
+ * Maps a parsed intent payload to the coerced/clamped {@link IntentResult}. Shared by the legacy
+ * fail-open `json_object` path and the strict `json_schema` path so both produce identical results
+ * from identical JSON — the only difference is response_format + the malformed-output fail policy.
+ */
+function mapIntentPayload(parsed: Record<string, unknown>): IntentResult {
+  // Preserve the legacy number-only coercion EXACTLY (a stringified score stays 0) so the flag-off
+  // path is byte-for-byte identical. Strict json_schema guarantees a number on the flag-on path, so
+  // this is equally correct there — deliberately NOT routed through normalizeClassifierConfidence,
+  // whose extra numeric-string parsing would change flag-off order-creation behaviour.
   const intentScoreRaw = parsed.intent_score;
   let intent_score = 0;
   if (typeof intentScoreRaw === 'number' && Number.isFinite(intentScoreRaw)) {
     intent_score = intentScoreRaw > 1 ? intentScoreRaw / 100 : intentScoreRaw;
   }
+  intent_score = Math.min(1, Math.max(0, intent_score));
 
   const product_name =
     typeof parsed.product_name === 'string' && parsed.product_name.trim()
@@ -85,7 +123,7 @@ function parseIntentJson(raw: string): IntentResult {
       : '';
 
   return {
-    intent_score: Math.min(1, Math.max(0, intent_score)),
+    intent_score,
     product_name,
     quantity,
     delivery_address,
@@ -93,6 +131,20 @@ function parseIntentJson(raw: string): IntentResult {
     is_ready_to_order,
     reasoning,
   };
+}
+
+/** Legacy fail-open parse: on invalid JSON returns the all-zero intent (preserved under flag-off). */
+function parseIntentJson(raw: string): IntentResult {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    logger.warn('[intentDetection] Failed to parse intent JSON response', {
+      raw: logSafeStructured(raw),
+    });
+    return { ...EMPTY_INTENT_RESULT };
+  }
+  return mapIntentPayload(parsed);
 }
 
 /**
@@ -150,12 +202,26 @@ Respond with a single JSON object only (no markdown), matching that shape exactl
     // "create order" and "skip" across runs/retries.
     temperature: 0,
     max_tokens: 512,
-    response_format: { type: 'json_object' },
+    response_format: INTENT_STRUCTURED_CONTRACT
+      ? buildJsonSchema('purchase_intent', INTENT_RESULT_SCHEMA)
+      : ({ type: 'json_object' } as const),
   });
 
-  const content = completion.choices[0]?.message?.content;
+  const choice = completion.choices[0];
+  const content = choice?.message?.content;
   if (!content) {
     throw new Error('OpenAI returned an empty intent detection response');
+  }
+
+  if (INTENT_STRUCTURED_CONTRACT) {
+    // Strict json_schema: validate + map. A malformed/truncated payload throws a retryable
+    // StructuredContractError (RC-22/I8 fail-closed) instead of the legacy all-zero fail-open.
+    const payload = parseStructuredCompletion(content.trim(), {
+      schema: intentPayloadSchema,
+      finishReason: choice?.finish_reason,
+      detector: 'purchase_intent',
+    });
+    return mapIntentPayload(payload as Record<string, unknown>);
   }
 
   return parseIntentJson(content.trim());
