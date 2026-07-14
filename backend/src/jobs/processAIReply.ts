@@ -4,11 +4,24 @@ import { logSafe, logSafeStructured } from '../utils/redact';
 import { redisConnection } from './redisConnection';
 import { findChannelById } from '../db/models/channel';
 import {
+  advanceOrderStage,
   findConversationByIdForTenant,
+  markDataConfirmationSent,
+  markOrderClosingAsked,
+  seedOrderStageState,
   setConversationAiPaused,
   setConversationHumanReplied,
+  setStickyReplyLocale,
   touchConversationLastMessageAt,
+  type OrderStage,
 } from '../db/models/conversation';
+import {
+  decideOrderStage,
+  detectNewOrderSignalLexical,
+  detectOrderConsentLexical,
+  normalizeStage,
+} from '../services/orderStageMachine';
+import { buildCommissionWindowQuery } from '../services/commissionWindow';
 import { findContactById } from '../db/models/contact';
 import { findTenantById, type DeliveryTime } from '../db/models/tenant';
 import {
@@ -64,6 +77,7 @@ import {
   isOutOfStockProductReply,
   isUsageQuestionUnanswered,
   resolveProductsFromPersistedContext,
+  STICKY_LOCALE_SLOT,
   HISTORY_FETCH_LIMIT,
   type ReplyLocale,
 } from '../services/aiService';
@@ -189,6 +203,22 @@ function normalizeEscalationMessage(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+/**
+ * P2-2: the order_stage the FSM should evaluate this turn. Trust the persisted column when it has
+ * been set; for a legacy row whose column is still NULL, derive it deterministically from history
+ * (the same signals the legacy gate uses) so the decision is independent of the lazy-seed timing.
+ */
+function deriveEffectiveOrderStage(
+  persisted: string | null | undefined,
+  dataConfirmationSent: boolean,
+  intent: { product_name: string | null; is_ready_to_order: boolean },
+): OrderStage {
+  if (persisted != null) return normalizeStage(persisted);
+  if (dataConfirmationSent) return 'awaiting_confirmation';
+  if (intent.product_name != null || intent.is_ready_to_order === true) return 'collecting';
+  return 'browsing';
 }
 
 function extractPhoneNumberCandidate(text: string): string | null {
@@ -548,42 +578,19 @@ const COMMISSION_SESSION_GAP_HOURS = (() => {
 async function hasHumanParticipationInCurrentOrderWindow(
   conversationId: string,
   tenantId: string,
+  orderEventAt: Date | null = null,
+  anchorOnOrderEvent = false,
 ): Promise<boolean> {
-  const { rows } = await pool.query<{ human_in_window: boolean }>(
-    `WITH recent_messages AS (
-       SELECT created_at, direction, sent_by
-       FROM messages
-       WHERE conversation_id = $1
-         AND tenant_id = $2
-         AND created_at > NOW() - INTERVAL '30 days'
-     ),
-     gaps AS (
-       SELECT created_at,
-              LAG(created_at) OVER (ORDER BY created_at) AS prev_created_at
-       FROM recent_messages
-     ),
-     session_start AS (
-       SELECT COALESCE(MAX(created_at), NOW() - INTERVAL '30 days') AS started_at
-       FROM gaps
-       WHERE prev_created_at IS NULL
-          OR created_at - prev_created_at > ($3::numeric * INTERVAL '1 hour')
-     ),
-     previous_order AS (
-       SELECT MAX(created_at) AS last_order_at
-       FROM orders
-       WHERE conversation_id = $1 AND tenant_id = $2
-     )
-     SELECT EXISTS (
-       SELECT 1
-       FROM recent_messages m
-       CROSS JOIN session_start s
-       CROSS JOIN previous_order p
-       WHERE m.direction = 'outbound'
-         AND m.sent_by = 'human'
-         AND m.created_at >= GREATEST(s.started_at, COALESCE(p.last_order_at, s.started_at))
-     ) AS human_in_window`,
-    [conversationId, tenantId, COMMISSION_SESSION_GAP_HOURS],
-  );
+  // P2-2 (RC-22): the query is built by a pure helper so the anchoring change is unit-testable.
+  // Flag-off reproduces the legacy NOW()-relative query byte-for-byte.
+  const query = buildCommissionWindowQuery({
+    conversationId,
+    tenantId,
+    sessionGapHours: COMMISSION_SESSION_GAP_HOURS,
+    orderEventAt,
+    anchorOnOrderEvent,
+  });
+  const { rows } = await pool.query<{ human_in_window: boolean }>(query.text, query.values);
   return rows[0]?.human_in_window === true;
 }
 
@@ -754,6 +761,33 @@ if (TEST_FORCE_DETECTOR_ERROR) {
  */
 const RATE_LIMIT_COUNT_DELIVERED_ONLY =
   (process.env.RATE_LIMIT_COUNT_DELIVERED_ONLY ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-2 (RC-07/08/22): the deterministic order_stage machine. Tri-state:
+ *  - 'off'   (default): the legacy LLM order-classifiers decide; the FSM never runs; no slot-store
+ *            writes — flag-off preserves the legacy path byte-for-byte.
+ *  - 'shadow': legacy still decides + acts, but the deterministic FSM verdict is computed and any
+ *            divergence is logged ([ORDER_STAGE_DIVERGENCE]) + recorded in the P1-5 ledger; the slot
+ *            store is populated so state accumulates for the next turn (the parity-measurement window).
+ *  - 'on':   the FSM is authoritative for order creation and the three LLM order-classifiers
+ *            (classifyNewOrderSignal, detectOrderAffirmationIntent, the order-closing loop) are
+ *            skipped — RC-07's boost asymmetry and RC-22's 7-conjunct flip vanish (no confidence
+ *            field on the consent path). Flip per environment (staging first, shadow-parity + the
+ *            boundary/determinism corpus as the gate) per the remediation plan.
+ */
+const ORDER_STAGE_MACHINE_MODE = ((): 'off' | 'shadow' | 'on' => {
+  const v = (process.env.ORDER_STAGE_MACHINE ?? 'off').trim().toLowerCase();
+  return v === 'on' || v === 'shadow' ? v : 'off';
+})();
+
+/**
+ * P2-2 (RC-22): when ON, the AI-order commission human-participation check anchors on the stored
+ * consent-inbound timestamp instead of NOW() and bounds the window at that timestamp, so a retry /
+ * late run (or a human reply during retry latency) cannot flip is_commissionable. Defaults OFF:
+ * flag-off preserves the NOW()-relative query byte-for-byte.
+ */
+const COMMISSION_STORED_TIMESTAMP =
+  (process.env.COMMISSION_STORED_TIMESTAMP ?? 'false').trim().toLowerCase() === 'true';
 
 /**
  * P1-1 (RC-20): when the outbox relay owns dispatch (both flags on), the staged reply's
@@ -1739,7 +1773,17 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   // path (cancellation/refund ack, post-purchase support, delivery ETA, AI generation,
   // post-processing strip helpers, and order-confirmation follow-up). This guarantees the entire
   // reply — including system-inserted lines — is in the same language as the customer's message.
-  const replyLanguage = await detectReplyLanguage(inboundText, recentMessages);
+  const replyLanguage = await detectReplyLanguage(
+    inboundText,
+    recentMessages,
+    STICKY_LOCALE_SLOT ? (conversation.reply_locale ?? null) : null,
+  );
+  // P2-2 (RC-10): persist the resolved locale as the sticky slot for subsequent turns.
+  if (STICKY_LOCALE_SLOT && conversation.reply_locale !== replyLanguage) {
+    await setStickyReplyLocale(conversationId, tenantId, replyLanguage).catch((e) =>
+      logger.warn('[STICKY_LOCALE] persist failed', { conversationId, err: String(e) }),
+    );
+  }
   logger.info('[REPLY_LANGUAGE]', {
     tenantId,
     conversationId,
@@ -2268,16 +2312,30 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         return;
       }
 
-      const isLikelyNewOrderSignal = await classifyNewOrderSignal(inboundText);
-      const orderAffirmationIntent = await getOrComputeClassifierVerdict({
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-        detector: 'order_affirmation',
-        compute: () => detectOrderAffirmationIntent(inboundText, recentMessages),
-      });
+      // P2-2: in `on` the FSM path replaces these two LLM classifiers with deterministic lexicons
+      // (used here only to decide whether to skip the post-purchase-support check).
+      const isLikelyNewOrderSignal =
+        ORDER_STAGE_MACHINE_MODE === 'on'
+          ? detectNewOrderSignalLexical(inboundText)
+          : await classifyNewOrderSignal(inboundText);
+      const orderAffirmationIntent =
+        ORDER_STAGE_MACHINE_MODE === 'on'
+          ? {
+              is_order_affirmation: detectOrderConsentLexical(inboundText),
+              confidence: 1,
+              reason: null as string | null,
+            }
+          : await getOrComputeClassifierVerdict({
+              conversationId,
+              inboundExternalId: data.messageExternalId,
+              detector: 'order_affirmation',
+              compute: () => detectOrderAffirmationIntent(inboundText, recentMessages),
+            });
       const isLikelyOrderAffirmation =
-        orderAffirmationIntent.is_order_affirmation &&
-        passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
+        ORDER_STAGE_MACHINE_MODE === 'on'
+          ? orderAffirmationIntent.is_order_affirmation === true
+          : orderAffirmationIntent.is_order_affirmation &&
+            passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
       const shouldCheckPostPurchaseSupport =
         hasPostPurchaseIssueCue(inboundText) && !looksLikeOrderAffirmation(inboundText) && !isLikelyOrderAffirmation;
       const likelyDeliveryEtaOnlyByText = hasDeliveryEtaOnlyCue(inboundText);
@@ -3510,8 +3568,15 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     // Drop any fixed-phrase the model leaked in the OPPOSITE locale before we add the
     // canonical follow-up sentence below — this guarantees no language mixing in the reply.
     finalReplyText = stripFixedPhrasesOfOtherLocale(finalReplyText, replyLocale);
+    // P2-2: in `on` the persisted order_closing_asked marker (+ a deterministic regex scan for the
+    // pre-seed window) replaces the ~40-call order-closing LLM loop.
     const orderClosingAlreadyAskedInConversation =
-      await hasAssistantAskedOrderClosingInConversation(recentMessages);
+      ORDER_STAGE_MACHINE_MODE === 'on'
+        ? conversation.order_closing_asked === true ||
+          recentMessages.some(
+            (m) => m.sent_by !== 'customer' && messageContainsOrderClosingAsk(m.content ?? ''),
+          )
+        : await hasAssistantAskedOrderClosingInConversation(recentMessages);
 
     // Data-confirmation gate: if the AI generated an order-confirmation reply (or the inbound
     // message provides delivery details after the order-closing question was already asked) but
@@ -3600,6 +3665,32 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       finalReplyText,
       !isOrderConfirmationReply,
     );
+
+    // P2-2 (shadow/on): persist the deterministic order_stage markers from the ACTUALLY-SENT reply.
+    // Monotone writes (safe under retry). data_confirmation_sent enters awaiting_confirmation;
+    // order_closing_asked replaces the ~40-call LLM loop with an O(1) persisted boolean.
+    if (ORDER_STAGE_MACHINE_MODE !== 'off') {
+      const currentStage = normalizeStage(conversation.order_stage);
+      if (messageIsDataConfirmationRequest(finalReplyText)) {
+        await markDataConfirmationSent(conversationId, tenantId).catch((e) =>
+          logger.warn('[ORDER_STAGE] data-confirmation marker write failed', { conversationId, err: String(e) }),
+        );
+        await advanceOrderStage(
+          conversationId,
+          tenantId,
+          decideOrderStage(currentStage, { kind: 'assistant_data_confirmation_sent' }).nextStage,
+        ).catch(() => undefined);
+      } else if (messageContainsOrderClosingAsk(finalReplyText)) {
+        await markOrderClosingAsked(conversationId, tenantId).catch((e) =>
+          logger.warn('[ORDER_STAGE] order-closing marker write failed', { conversationId, err: String(e) }),
+        );
+        await advanceOrderStage(
+          conversationId,
+          tenantId,
+          decideOrderStage(currentStage, { kind: 'assistant_order_closing_asked' }).nextStage,
+        ).catch(() => undefined);
+      }
+    }
   }
 
   const qualityThreshold = getQualityThreshold();
@@ -5035,21 +5126,35 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       Number.isFinite(parsedIntentThreshold) && parsedIntentThreshold > 0 && parsedIntentThreshold < 1
         ? parsedIntentThreshold
         : 0.85;
-    const explicitNewOrder = await classifyNewOrderSignal(inboundText);
-    const orderAffirmationIntent = await getOrComputeClassifierVerdict({
-      conversationId,
-      inboundExternalId: data.messageExternalId,
-      detector: 'order_affirmation',
-      compute: () => detectOrderAffirmationIntent(inboundText, messagesForIntent),
-    });
-    logConfidenceGateBoundary('order_affirmation', orderAffirmationIntent.confidence, 0.7, {
-      tenantId,
-      conversationId,
-      inboundExternalId: data.messageExternalId,
-    });
-    const latestMessageAffirmsOrder =
-      orderAffirmationIntent.is_order_affirmation === true &&
-      passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
+    // P2-2: in `on`, the two order-cluster LLM classifiers are replaced by deterministic lexicons —
+    // there is no confidence field on the consent path, so RC-07's boost asymmetry cannot arise.
+    const orderStageOn = ORDER_STAGE_MACHINE_MODE === 'on';
+    const explicitNewOrder = orderStageOn
+      ? detectNewOrderSignalLexical(inboundText)
+      : await classifyNewOrderSignal(inboundText);
+    const orderAffirmationIntent = orderStageOn
+      ? {
+          is_order_affirmation: detectOrderConsentLexical(inboundText),
+          confidence: 1,
+          reason: null as string | null,
+        }
+      : await getOrComputeClassifierVerdict({
+          conversationId,
+          inboundExternalId: data.messageExternalId,
+          detector: 'order_affirmation',
+          compute: () => detectOrderAffirmationIntent(inboundText, messagesForIntent),
+        });
+    if (!orderStageOn) {
+      logConfidenceGateBoundary('order_affirmation', orderAffirmationIntent.confidence, 0.7, {
+        tenantId,
+        conversationId,
+        inboundExternalId: data.messageExternalId,
+      });
+    }
+    const latestMessageAffirmsOrder = orderStageOn
+      ? orderAffirmationIntent.is_order_affirmation === true
+      : orderAffirmationIntent.is_order_affirmation === true &&
+        passesConfidenceGate(orderAffirmationIntent.confidence, 0.7, CONFIDENCE_CONTRACT_SYMMETRY);
 
     const hasDeliveryAddress =
       typeof intent.delivery_address === 'string' && intent.delivery_address.trim().length > 0;
@@ -5100,9 +5205,12 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         looksLikeOrderAffirmation(msg.content),
     );
 
-    const assistantAskedOrderClosingEarlier = await hasAssistantAskedOrderClosingInConversation(
-      messagesForIntent,
-    );
+    const assistantAskedOrderClosingEarlier = orderStageOn
+      ? conversation.order_closing_asked === true ||
+        messagesForIntent.some(
+          (m) => m.sent_by !== 'customer' && messageContainsOrderClosingAsk(m.content ?? ''),
+        )
+      : await hasAssistantAskedOrderClosingInConversation(messagesForIntent);
     const latestMessageProvidesOrderDetails = messageLooksLikeOrderDetailsPayload(inboundText);
 
     // Require the data-confirmation request to have been sent before we register the order.
@@ -5135,7 +5243,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       conversationId,
       inboundExternalId: data.messageExternalId,
     });
-    const passesDraftOrderValidation =
+    const legacyPassesDraftOrderValidation =
       intent.is_ready_to_order === true &&
       passesConfidenceGate(intent.intent_score, intentOrderMinScore, CONFIDENCE_CONTRACT_SYMMETRY) &&
       intent.product_name != null &&
@@ -5143,6 +5251,76 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       hasCustomerPhone &&
       hasCustomerName &&
       shouldAffirmOrder;
+
+    // P2-2 (RC-07/08/22): the deterministic order_stage FSM. In `shadow` it is computed and any
+    // divergence from the legacy gate is logged + recorded in the P1-5 ledger (legacy still
+    // decides); in `on` it is authoritative and the three order-cluster LLM classifiers above were
+    // skipped. The consent path has NO confidence field, so RC-07's asymmetry and RC-22's 7-conjunct
+    // boundary flip vanish by construction.
+    let fsmShouldCreateOrder = false;
+    if (ORDER_STAGE_MACHINE_MODE !== 'off') {
+      const effectiveStage = deriveEffectiveOrderStage(
+        conversation.order_stage,
+        dataConfirmationSentBeforeCurrentTurn,
+        intent,
+      );
+      fsmShouldCreateOrder = decideOrderStage(effectiveStage, {
+        kind: 'inbound',
+        slots: {
+          hasProduct: intent.product_name != null,
+          hasAddress: hasDeliveryAddress,
+          hasPhone: hasCustomerPhone,
+          hasName: hasCustomerName,
+          isReadyToOrder: intent.is_ready_to_order === true,
+          intentScorePasses: passesConfidenceGate(
+            intent.intent_score,
+            intentOrderMinScore,
+            CONFIDENCE_CONTRACT_SYMMETRY,
+          ),
+        },
+        signals: {
+          consentDetected: recentCustomerAffirmation || detectOrderConsentLexical(inboundText),
+          newOrderDetected: detectNewOrderSignalLexical(inboundText),
+          providesOrderDetails: latestMessageProvidesOrderDetails,
+        },
+        orderClosingAsked: assistantAskedOrderClosingEarlier === true,
+      }).shouldCreateOrder;
+
+      // One-time deterministic seed of a legacy NULL row (no-op once order_stage is set).
+      if (conversation.order_stage == null) {
+        await seedOrderStageState(conversationId, tenantId, {
+          stage: effectiveStage,
+          dataConfirmationSent: dataConfirmationSentBeforeCurrentTurn,
+          orderClosingAsked: assistantAskedOrderClosingEarlier === true,
+        }).catch((e) => logger.warn('[ORDER_STAGE] seed failed', { conversationId, err: String(e) }));
+      }
+
+      if (ORDER_STAGE_MACHINE_MODE === 'shadow') {
+        const agree = fsmShouldCreateOrder === legacyPassesDraftOrderValidation;
+        if (!agree) {
+          console.warn('[ORDER_STAGE_DIVERGENCE] deterministic FSM disagrees with legacy gate', {
+            conversationId,
+            tenantId,
+            stage: effectiveStage,
+            legacy: legacyPassesDraftOrderValidation,
+            fsm: fsmShouldCreateOrder,
+          });
+        }
+        recordDecision({
+          classifier: 'order_stage',
+          raw_score: null,
+          threshold: null,
+          boost_applied: false,
+          passed: fsmShouldCreateOrder,
+          branch: agree
+            ? `agree:${fsmShouldCreateOrder}:stage=${effectiveStage}`
+            : `diverge:legacy=${legacyPassesDraftOrderValidation}:det=${fsmShouldCreateOrder}:stage=${effectiveStage}`,
+        });
+      }
+    }
+
+    const passesDraftOrderValidation =
+      ORDER_STAGE_MACHINE_MODE === 'on' ? fsmShouldCreateOrder : legacyPassesDraftOrderValidation;
 
     if (!passesDraftOrderValidation) {
       console.info('[ai.reply] Skipping draft order creation due to failed validation', {
@@ -5348,6 +5526,8 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     const humanInOrderWindow = await hasHumanParticipationInCurrentOrderWindow(
       conversationId,
       tenantId,
+      COMMISSION_STORED_TIMESTAMP ? (lastInbound?.created_at ?? null) : null,
+      COMMISSION_STORED_TIMESTAMP,
     );
     const isCommissionable = !humanInOrderWindow;
     const commissionAmount = isCommissionable
@@ -5388,6 +5568,16 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     });
 
     socketService.emitOrderCreated(tenantId, order);
+
+    // P2-2 (shadow/on): advance the FSM to `confirmed` and stamp the RC-22 commission anchor (the
+    // consent-inbound timestamp + its external id). COALESCE-keep writers make this idempotent under
+    // the crash-resumable tail; the existing-order dedupe above prevents a duplicate order.
+    if (ORDER_STAGE_MACHINE_MODE !== 'off') {
+      await advanceOrderStage(conversationId, tenantId, 'confirmed', {
+        consentAt: lastInbound?.created_at ?? null,
+        consentInboundId: data.messageExternalId,
+      }).catch((e) => logger.warn('[ORDER_STAGE] confirm write failed', { conversationId, err: String(e) }));
+    }
   } catch (err) {
     orderDetectionTailErrored = true;
     logger.error('[ai.reply] Intent detection or draft order failed', err, {

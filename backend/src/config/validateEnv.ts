@@ -153,6 +153,25 @@ export function validateRequiredEnv(): void {
       `${factsContract && !groundingGate ? ' [SHADOW: declared facts logged, legacy guards decide]' : ''}`,
   );
 
+  // P2-2: surface the classifier-consolidation posture at boot. Purely informational — never fatal.
+  const orderStageMode = (process.env.ORDER_STAGE_MACHINE ?? 'off').trim().toLowerCase();
+  const stickyLocale = (process.env.STICKY_LOCALE_SLOT ?? 'false').trim().toLowerCase() === 'true';
+  const intentStructured =
+    (process.env.INTENT_STRUCTURED_CONTRACT ?? 'false').trim().toLowerCase() === 'true';
+  const commissionStored =
+    (process.env.COMMISSION_STORED_TIMESTAMP ?? 'false').trim().toLowerCase() === 'true';
+  console.info(
+    `[classifiers] ORDER_STAGE_MACHINE=${
+      orderStageMode === 'on'
+        ? 'on (deterministic FSM authoritative; order LLM classifiers skipped)'
+        : orderStageMode === 'shadow'
+          ? 'shadow (FSM computed + divergence logged; legacy decides)'
+          : 'off (legacy LLM order-classifiers)'
+    }; STICKY_LOCALE_SLOT=${stickyLocale ? 'on' : 'off'}; ` +
+      `INTENT_STRUCTURED_CONTRACT=${intentStructured ? 'on' : 'off'}; ` +
+      `COMMISSION_STORED_TIMESTAMP=${commissionStored ? 'on' : 'off'}`,
+  );
+
   if (warnings.length > 0) {
     console.warn('[env] Security warnings:\n' + warnings.join('\n'));
   }

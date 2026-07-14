@@ -93,6 +93,7 @@ import {
   normalizeClassifierConfidence,
   resolveEscalationConfidenceDetailed,
 } from './classifierConfidenceContract';
+import { resolveStickyLocale } from './stickyLocale';
 
 export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeyword, containsSpeculativeHealthAdvice };
 
@@ -120,6 +121,18 @@ const FOCUSED_PRODUCT_MATCH_LIMIT = 10;
 export type ReplyLocale = 'sq' | 'en';
 
 export const DEFAULT_REPLY_LOCALE: ReplyLocale = 'sq';
+
+/**
+ * P2-2 (RC-10): when ON, the resolved reply locale is a sticky per-conversation slot —
+ * `detectReplyLanguage` reuses the persisted locale unless THIS turn carries a high-confidence
+ * unambiguous opposite-language marker (hysteresis), so ambiguous turns (ok/po/yes/emoji) can't
+ * flip the language mid-thread and the stochastic LLM language call is skipped entirely. The hard
+ * `'sq'` default is then reached only when both the sticky slot and fresh detection are unknown.
+ * Defaults OFF: flag-off preserves the per-turn detection byte-for-byte. The caller persists the
+ * resolved locale.
+ */
+export const STICKY_LOCALE_SLOT =
+  (process.env.STICKY_LOCALE_SLOT ?? 'false').trim().toLowerCase() === 'true';
 
 const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   const raw = process.env.CONTEXT_MAX_HISTORY_TOKENS;
@@ -1890,8 +1903,17 @@ function heuristicallyDetectLanguage(text: string): ReplyLocale | null {
 export async function detectReplyLanguage(
   inboundMessage: string,
   conversationHistory: Message[] = [],
+  stickyLocale: ReplyLocale | null = null,
 ): Promise<ReplyLocale> {
   const inbound = inboundMessage.trim();
+
+  // P2-2 (RC-10) sticky-locale slot: reuse the conversation's resolved locale unless THIS turn
+  // carries a high-confidence unambiguous opposite-language marker (hysteresis allowing a genuine
+  // mid-conversation switch). Skips the stochastic LLM language call and stops ambiguous turns
+  // from flipping the language.
+  if (STICKY_LOCALE_SLOT && stickyLocale) {
+    return resolveStickyLocale(stickyLocale, heuristicallyDetectLanguage(inbound));
+  }
 
   const customerHistory = conversationHistory
     .filter((msg) => msg.sent_by === 'customer')
@@ -2462,55 +2484,10 @@ Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
   }
 }
 
-export async function classifyProductKnowledgeQuestionIntent(message: string): Promise<boolean> {
-  const intent = await classifyProductAttributeIntent(message);
-  return intent.is_product_knowledge_question;
-}
-
+// P2-2 (Phase 6 "Remove 1"): the dead `classifyProductKnowledgeQuestionIntent` +
+// `isProductKnowledgeQuestionUnanswered` pair (zero call sites, fail-closed-by-default) was
+// deleted here — carrying it invited accidental future wiring with the RC-01 fail-closed semantics.
 export { classifyProductAttributeIntent, type ProductAttributeIntentResult };
-
-export async function isProductKnowledgeQuestionUnanswered(
-  inboundMessage: string,
-  catalogKnowledgeContext: string,
-  options?: { failClosed?: boolean },
-): Promise<boolean> {
-  const failClosed = options?.failClosed !== false;
-  if (!catalogKnowledgeContext.trim()) return true;
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content: `You are a semantic classifier. Determine whether the provided catalog knowledge contains enough information to answer the customer's product question with HIGH confidence.
-
-The text may be in Albanian or English.
-
-Return {"is_unanswered": false} when the catalog knowledge contains information that directly answers the question — even across multiple products in a group.
-Return {"is_unanswered": true} when the catalog knowledge lacks the requested attribute/spec/detail, is ambiguous, or would require guessing.
-
-Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
-        },
-        {
-          role: 'user',
-          content: `Customer message:\n${inboundMessage}\n\nCatalog knowledge:\n${catalogKnowledgeContext}`,
-        },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0,
-      max_tokens: 64,
-    });
-
-    const raw = completion.choices[0]?.message?.content;
-    if (!raw?.trim()) return failClosed;
-
-    const parsed = JSON.parse(raw) as { is_unanswered?: boolean };
-    return parsed.is_unanswered === true;
-  } catch {
-    return failClosed;
-  }
-}
 
 export async function detectCancellationOrRefundIntent(
   inboundMessage: string,

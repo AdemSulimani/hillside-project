@@ -2,6 +2,9 @@ import type { PoolClient } from 'pg';
 import pool from '../pool';
 import type { ChannelType } from './channel';
 
+/** P2-2 (RC-07/08/22): the deterministic order-lifecycle stage persisted per conversation. */
+export type OrderStage = 'browsing' | 'collecting' | 'awaiting_confirmation' | 'confirmed';
+
 export interface Conversation {
   id: string;
   tenant_id: string;
@@ -15,6 +18,21 @@ export interface Conversation {
   ai_paused_at: Date | null;
   fully_ai_handled: boolean;
   human_replied: boolean;
+  // P2-2 (migration 077) — order_stage FSM + slot store. Populated by SELECT * loads; OPTIONAL
+  // because the explicit-column UI projections (ConversationDetail, findPausedConversationsByTenant,
+  // listConversationsForContact*) legitimately omit them. The AI order path reads them from a
+  // SELECT * load and guards with `normalizeStage(...)` / `?? false`, so absence is safe.
+  order_stage?: OrderStage | null;
+  order_stage_updated_at?: Date | null;
+  data_confirmation_sent?: boolean;
+  order_closing_asked?: boolean;
+  order_consent_at?: Date | null;
+  order_consent_inbound_id?: string | null;
+  slot_customer_name?: string | null;
+  slot_customer_phone?: string | null;
+  slot_delivery_address?: string | null;
+  reply_locale?: 'sq' | 'en' | null;
+  reply_locale_updated_at?: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -155,6 +173,121 @@ export async function setConversationFullyAiHandled(
      SET fully_ai_handled = true, updated_at = now()
      WHERE id = $1 AND tenant_id = $2`,
     [conversationId, tenantId],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// P2-2 (RC-07/08/22/10) — order_stage FSM + slot store writers.
+//
+// Every writer is monotone/idempotent so it is safe under BullMQ retries: markers only flip
+// false -> true; slot writes COALESCE-keep (never null a known value); the stage seed only fires
+// when order_stage IS NULL. Consumers stay behind the ORDER_STAGE_MACHINE flag.
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist the FSM's decided stage. On the transition to `confirmed`, pass `consentAt` (the stored
+ * consent-inbound timestamp — the RC-22 commission anchor) and `consentInboundId` (the
+ * retry-idempotency anchor); both COALESCE so a non-null value overwrites and an omitted one keeps.
+ */
+export async function advanceOrderStage(
+  id: string,
+  tenantId: string,
+  nextStage: OrderStage,
+  opts: { consentAt?: Date | null; consentInboundId?: string | null } = {},
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET order_stage = $3,
+         order_stage_updated_at = now(),
+         order_consent_at = COALESCE($4, order_consent_at),
+         order_consent_inbound_id = COALESCE($5, order_consent_inbound_id),
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [id, tenantId, nextStage, opts.consentAt ?? null, opts.consentInboundId ?? null],
+  );
+}
+
+/** Sticky marker: the assistant has sent the data-confirmation request (enters awaiting_confirmation). */
+export async function markDataConfirmationSent(
+  id: string,
+  tenantId: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations SET data_confirmation_sent = TRUE, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND data_confirmation_sent IS DISTINCT FROM TRUE`,
+    [id, tenantId],
+  );
+}
+
+/** Sticky marker: the assistant has asked the order-closing question (replaces the ~40-call LLM loop). */
+export async function markOrderClosingAsked(
+  id: string,
+  tenantId: string,
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations SET order_closing_asked = TRUE, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND order_closing_asked IS DISTINCT FROM TRUE`,
+    [id, tenantId],
+  );
+}
+
+/** COALESCE-keep slot cache write: only fills a slot, never nulls a previously-known value. */
+export async function persistOrderSlots(
+  id: string,
+  tenantId: string,
+  slots: { name?: string | null; phone?: string | null; address?: string | null },
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET slot_customer_name = COALESCE($3, slot_customer_name),
+         slot_customer_phone = COALESCE($4, slot_customer_phone),
+         slot_delivery_address = COALESCE($5, slot_delivery_address),
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [id, tenantId, slots.name ?? null, slots.phone ?? null, slots.address ?? null],
+  );
+}
+
+/** RC-10 sticky locale write; stamps reply_locale_updated_at as the hysteresis anchor. */
+export async function setStickyReplyLocale(
+  id: string,
+  tenantId: string,
+  locale: 'sq' | 'en',
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET reply_locale = $3, reply_locale_updated_at = now(), updated_at = now()
+     WHERE id = $1 AND tenant_id = $2`,
+    [id, tenantId, locale],
+  );
+}
+
+/**
+ * One-time deterministic seed for a legacy conversation whose order_stage IS NULL (e.g. mid-flow at
+ * cutover). Reconstructs the sticky markers + stage from regex scans over existing history. The
+ * `order_stage IS NULL` guard makes it fire at most once — thereafter the incremental writers own
+ * the state.
+ */
+export async function seedOrderStageState(
+  id: string,
+  tenantId: string,
+  seed: { stage: OrderStage; dataConfirmationSent: boolean; orderClosingAsked: boolean },
+  client: PoolClient | typeof pool = pool,
+): Promise<void> {
+  await client.query(
+    `UPDATE conversations
+     SET order_stage = $3,
+         order_stage_updated_at = now(),
+         data_confirmation_sent = $4,
+         order_closing_asked = $5,
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND order_stage IS NULL`,
+    [id, tenantId, seed.stage, seed.dataConfirmationSent, seed.orderClosingAsked],
   );
 }
 
