@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import pool from '../db/pool';
-import { ensureAIConfigForTenant, updateAIConfig } from '../db/models/aiConfig';
+import { ensureAIConfigForTenant, findAIConfigByTenant, updateAIConfig } from '../db/models/aiConfig';
 import {
   deleteCustomTenantPromptBlock,
   findTenantPromptBlockForAdmin,
@@ -17,6 +17,7 @@ import {
   updateTenantPromptBlock,
 } from '../db/models/promptBlock';
 import { invalidateTenantAiCaches } from '../services/invalidateTenantAiCaches';
+import { writeThroughAiConfig } from '../services/aiConfigCache';
 import { sendSuccess, sendError } from '../utils/response';
 import type { TenantAiSnapshot } from '../validators/adminAi';
 import { findAIConfigVersion, insertAIConfigVersion, listAIConfigVersions } from '../db/models/aiConfigVersion';
@@ -94,6 +95,9 @@ export async function updateTenantAiConfig(req: Request, res: Response): Promise
       return;
     }
     await invalidateTenantAiCaches(tenantId);
+    // P2-3 (RC-17): write-through the fresh row so the edit propagates fleet-wide within one request
+    // (no-op when the versioned-cache flag is off).
+    await writeThroughAiConfig(tenantId, updated);
     await recordAiVersion(tenantId, req.admin?.email);
     sendSuccess(res, updated, 'AI configuration updated');
   } catch (err) {
@@ -282,6 +286,9 @@ export async function postRestoreTenantAiVersion(req: Request, res: Response): P
 
     await client.query('COMMIT');
     await invalidateTenantAiCaches(tenantId);
+    // P2-3 (RC-17): write-through the restored row (re-fetched post-commit) so the restore propagates
+    // fleet-wide within one request (no-op when the versioned-cache flag is off).
+    await writeThroughAiConfig(tenantId, await findAIConfigByTenant(tenantId));
     await recordAiVersion(tenantId, req.admin?.email, `restore:${versionId}`);
     sendSuccess(res, { restored_from: versionId }, 'Configuration restored');
   } catch (err) {

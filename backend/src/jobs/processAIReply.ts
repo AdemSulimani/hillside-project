@@ -8,6 +8,8 @@ import {
   findConversationByIdForTenant,
   markDataConfirmationSent,
   markOrderClosingAsked,
+  persistLastRecommendedProductIds,
+  persistOrderSlots,
   seedOrderStageState,
   setConversationAiPaused,
   setConversationHumanReplied,
@@ -22,6 +24,11 @@ import {
   normalizeStage,
 } from '../services/orderStageMachine';
 import { buildCommissionWindowQuery } from '../services/commissionWindow';
+import {
+  DATA_CONFIRMATION_MESSAGES,
+  HOLDING_MESSAGES,
+  MISSING_CUSTOMER_NAME_MESSAGES,
+} from '../services/cannedReplyText';
 import { findContactById } from '../db/models/contact';
 import { findTenantById, type DeliveryTime } from '../db/models/tenant';
 import {
@@ -78,6 +85,7 @@ import {
   isUsageQuestionUnanswered,
   resolveProductsFromPersistedContext,
   STICKY_LOCALE_SLOT,
+  SUMMARY_SLOT_BACKED,
   HISTORY_FETCH_LIMIT,
   type ReplyLocale,
 } from '../services/aiService';
@@ -621,41 +629,12 @@ function isUsageEscalationHoldingMessage(value: string): boolean {
 }
 
 // LOCALE EXTENSION: to support a new reply locale, add an entry to ALL of the
-// following Record<ReplyLocale, …> tables in this file:
-//   HOLDING_MESSAGES, DATA_CONFIRMATION_MESSAGES, MISSING_CUSTOMER_NAME_MESSAGES,
-//   ORDER_CONFIRMATION_FOLLOW_UP, VARIANT_CLARIFICATION_LEAD_IN.
+// following Record<ReplyLocale, …> tables:
+//   HOLDING_MESSAGES, DATA_CONFIRMATION_MESSAGES, MISSING_CUSTOMER_NAME_MESSAGES  — now the
+//     shared source of truth in services/cannedReplyText.ts (re-imported above; P2-3), and
+//   ORDER_CONFIRMATION_FOLLOW_UP, VARIANT_CLARIFICATION_LEAD_IN below in this file.
 // Also update productInformationGapHelpers.ts (see its InfoGapLocale checklist) and
 // aiService.ts (ReplyLocale union + locale-dispatch tables there).
-const HOLDING_MESSAGES: Record<
-  ReplyLocale,
-  {
-    postPurchaseSupport: string;
-    usageEscalation: string;
-    productKnowledgeEscalation: string;
-    orderInfoUpdated: string;
-  }
-> = {
-  sq: {
-    postPurchaseSupport:
-      'Na vjen keq për problemin. Një anëtar i ekipit tonë do t’ju përgjigjet së shpejti.',
-    usageEscalation:
-      'Së shpejti do t’ju kontaktojë një specialist për këtë çështje.',
-    productKnowledgeEscalation:
-      'Së shpejti do t’ju kontaktojë një specialist me informacion të saktë për produktin.',
-    orderInfoUpdated:
-      'Informacioni i porosisë suaj u përditësua. Faleminderit!',
-  },
-  en: {
-    postPurchaseSupport:
-      'Sorry about the issue. A team member will get back to you shortly.',
-    usageEscalation:
-      'A specialist will contact you shortly about this matter.',
-    productKnowledgeEscalation:
-      'A product specialist will contact you shortly with accurate details.',
-    orderInfoUpdated:
-      'Your order info has been updated. Thank you!',
-  },
-};
 
 /**
  * Master switch for the additive uncertain-answer fallback layer (defaults ON).
@@ -900,26 +879,6 @@ type HoldingMessageLocale = ReplyLocale;
 const ORDER_CONFIRMATION_FOLLOW_UP: Record<ReplyLocale, string> = {
   sq: 'Nëse keni pyetje të tjera ose doni të porosisni sërish, jam këtu për t’ju ndihmuar.',
   en: 'I’m here if you have other questions or want to order again.',
-};
-
-/**
- * Sent after all order details have been collected, asking the customer to verify
- * their name, phone, and address before the order is registered. Must match verbatim so
- * messageIsDataConfirmationRequest can identify it in conversation history.
- */
-const DATA_CONFIRMATION_MESSAGES: Record<ReplyLocale, string> = {
-  sq: 'Faleminderit për porosinë! A mund të konfirmoni që të dhënat që keni dhënë janë korrekte?',
-  en: 'Thank you for your order! Please confirm the information you provided is correct.',
-};
-
-/**
- * Sent when the customer has provided phone and delivery address but has not yet given
- * their first name. Overrides any AI-generated reply (which might incorrectly confirm the
- * order) to ensure the name is explicitly collected before the data-confirmation step.
- */
-const MISSING_CUSTOMER_NAME_MESSAGES: Record<ReplyLocale, string> = {
-  sq: 'Faleminderit për të dhënat! Për të plotësuar porosinë, na tregoni edhe emrin tuaj.',
-  en: 'Thanks for your details! To complete your order, please share your first name.',
 };
 
 /**
@@ -4267,6 +4226,19 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     uncertainAnswerEscalated;
   const persistedProductIds = replyWasHoldingOrEscalation ? [] : matchedProducts.map((p) => p.id);
 
+  // P2-3 (RC-13): persist the last-recommended product anchor so the slot-backed summary can
+  // re-inject a still-in-stock prior recommendation even after it slides past the 40-row window. The
+  // writer REPLACES on a non-empty list and skips empty (holding/escalation), so a later holding turn
+  // never wipes a real prior anchor. Computed here → covers both the staged and legacy persist paths.
+  if (SUMMARY_SLOT_BACKED && persistedProductIds.length > 0) {
+    await persistLastRecommendedProductIds(conversationId, tenantId, persistedProductIds).catch((e) =>
+      logger.warn('[P2-3] persistLastRecommendedProductIds failed', {
+        conversationId,
+        err: String(e),
+      }),
+    );
+  }
+
   // Product image send (idempotent via the ai_img_sent marker). Extracted so both the staged
   // (P1-1) and legacy reply paths deliver images identically.
   const sendProductImagesForReply = async (): Promise<void> => {
@@ -5184,6 +5156,22 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       conversationMessages: messagesForIntent,
     });
     const hasCustomerName = resolvedCustomerName.firstName !== null;
+
+    // P2-3 (RC-13): persist the resolved order slots (name/phone/address) so the slot-backed summary
+    // can always re-inject them, even after they slide out of the 40-row history window. COALESCE-keep
+    // (never nulls a previously-known value); best-effort — a write blip must not break the reply.
+    if (SUMMARY_SLOT_BACKED) {
+      await persistOrderSlots(conversationId, tenantId, {
+        name: resolvedCustomerName.firstName,
+        phone: customerPhone,
+        address:
+          typeof intent.delivery_address === 'string' && intent.delivery_address.trim()
+            ? intent.delivery_address.trim()
+            : null,
+      }).catch((e) =>
+        logger.warn('[P2-3] persistOrderSlots failed', { conversationId, err: String(e) }),
+      );
+    }
 
     // Only treat a customer message as an order affirmation when it came AFTER the
     // data-confirmation request was sent. Scanning all recent messages broadly risks

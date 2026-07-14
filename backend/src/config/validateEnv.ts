@@ -172,6 +172,23 @@ export function validateRequiredEnv(): void {
       `COMMISSION_STORED_TIMESTAMP=${commissionStored ? 'on' : 'off'}`,
   );
 
+  // P2-3: surface the memory/history redesign posture at boot. Purely informational — never fatal.
+  const historyFiltered =
+    (process.env.HISTORY_DELIVERY_FILTERED ?? 'false').trim().toLowerCase() === 'true';
+  const summarySlotBacked =
+    (process.env.SUMMARY_SLOT_BACKED ?? 'false').trim().toLowerCase() === 'true';
+  const versionedCache =
+    (process.env.AI_CONFIG_VERSIONED_CACHE ?? 'false').trim().toLowerCase() === 'true';
+  console.info(
+    `[memory] HISTORY_DELIVERY_FILTERED=${
+      historyFiltered ? 'on (drop send-failed; flagged/holding→system)' : 'off (legacy binary role map)'
+    }; SUMMARY_SLOT_BACKED=${
+      summarySlotBacked ? 'on (slot-backed summary + slot writes)' : 'off (customer-only summarizer)'
+    }; AI_CONFIG_VERSIONED_CACHE=${
+      versionedCache ? 'on (CAS/versioned + write-through; C-55 healed)' : 'off (EX900 delete-only)'
+    }`,
+  );
+
   if (warnings.length > 0) {
     console.warn('[env] Security warnings:\n' + warnings.join('\n'));
   }
