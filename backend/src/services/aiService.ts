@@ -49,7 +49,12 @@ import {
   listTenantPromptBlocksRuntime,
   seedTenantPromptBlocksFromCatalog,
 } from '../db/models/promptBlock';
-import { assembleGuidelinesFromBlocks } from './promptAssemblyService';
+import {
+  PROMPT_ALLOWLIST_BUDGET,
+  PROMPT_ASSEMBLY_MAX_CHARS,
+  assembleGuidelinesFromBlocks,
+  assertRequiredSections,
+} from './promptAssemblyService';
 import { logSafe, logSafeStructured, redactPII } from '../utils/redact';
 import { logger } from '../utils/logger';
 import { createHash } from 'node:crypto';
@@ -113,6 +118,14 @@ import {
   normalizeClassifierConfidence,
   resolveEscalationConfidenceDetailed,
 } from './classifierConfidenceContract';
+import {
+  DIALECT_NORMALIZATION,
+  extractDialectKeywords,
+  foldDialect,
+} from './dialectNormalization';
+import { GHEG_ALBANIAN_MARKERS, GHEG_LEXICONS, withGhegMarkers } from './ghegLexicons';
+import { applyHistoryBudget } from './historyBudget';
+import { RESTRICTIONS_FOOTER_ALL_TENANTS, buildRestrictionsFooter } from './platformPolicy';
 import { resolveStickyLocale } from './stickyLocale';
 
 export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeyword, containsSpeculativeHealthAdvice };
@@ -287,12 +300,24 @@ function logMissingConfidenceContract(
   );
 }
 
-/** Matches normalized inbound text from webhookNormalizer (Feature 22). */
-const SHARED_CONTENT_SYSTEM_APPEND =
-  '\n\nKlienti ka ndare permbajtje me ju. Përdor kontekstin qe jepet per te dhene pergjigjen e pershtatshme dhe lidhe me produktet nga katalogu kur eshte relevante.';
+/**
+ * Matches normalized inbound text from webhookNormalizer (Feature 22).
+ *
+ * P2-5 (RC-26/DP-pc-18): this append was hardcoded Albanian regardless of the resolved reply
+ * locale, so an English conversation got an Albanian instruction injected into its prompt —
+ * violating the `guidelines.language` LANGUAGE LOCK the very same prompt carries. It is now
+ * locale-selected like every other fixed phrase. (The Albanian copy is kept byte-identical,
+ * mixed diacritics and all, so flag-off/sq output is unchanged.)
+ */
+const SHARED_CONTENT_SYSTEM_APPEND_BY_LOCALE: Record<ReplyLocale, string> = {
+  sq: '\n\nKlienti ka ndare permbajtje me ju. Përdor kontekstin qe jepet per te dhene pergjigjen e pershtatshme dhe lidhe me produktet nga katalogu kur eshte relevante.',
+  en: '\n\nThe customer has shared content with you. Use the context provided to give a suitable reply and relate it to the catalog products where relevant.',
+};
 
-const SHARED_POST_VISION_APPEND =
-  ' Per postimet e Instagram-it (shares), mbeshtetu kryesisht te pamjet/parapamjet e bashkengjitura.';
+const SHARED_POST_VISION_APPEND_BY_LOCALE: Record<ReplyLocale, string> = {
+  sq: ' Per postimet e Instagram-it (shares), mbeshtetu kryesisht te pamjet/parapamjet e bashkengjitura.',
+  en: ' For Instagram post shares, rely primarily on the attached images/previews.',
+};
 
 function inboundTextIsPostShare(content: string): boolean {
   return content.trimStart().startsWith('Customer shared a post');
@@ -498,6 +523,12 @@ async function loadProductCatalog(tenantId: string): Promise<Product[]> {
 }
 
 export function extractKeywords(text: string): string[] {
+  // P2-5 (RC-25): the dialect-normalized path folds diacritics + Gheg function words and uses
+  // the single unified stopword list, so this arm finally agrees with its sibling
+  // `extractCatalogSearchPhrases` below — today one searches `%çokollatë%` while the other
+  // searches `%cokollate%`, from the same message, in the same call.
+  if (DIALECT_NORMALIZATION) return extractDialectKeywords(text);
+
   const stopWords = new Set([
     // English
     'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they',
@@ -533,13 +564,19 @@ export function extractKeywords(text: string): string[] {
 
 /** Multi-word phrases and known category/tag labels extracted for catalog lookup. */
 export function extractCatalogSearchPhrases(text: string): string[] {
-  const normalized = text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // P2-5 (RC-25): this arm already folds diacritics, so normalization only adds the Gheg
+  // function-word rewrite — which is what lets the known-pattern table below see a Gheg query
+  // at all ("naj produkt tmir per shtim peshe" folds to "ndonje produkt te mire per shtim
+  // peshe" and reaches the 'shtim peshe' pattern).
+  const normalized = DIALECT_NORMALIZATION
+    ? foldDialect(text)
+    : text
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/\p{M}/gu, '')
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 
   if (!normalized) return [];
 
@@ -1981,8 +2018,19 @@ function heuristicallyDetectLanguage(text: string): ReplyLocale | null {
     'discount', 'cheaper', 'refund', 'cancel',
   ];
 
-  const albanianHits = ALBANIAN_MARKERS.filter((needle) => normalized.includes(needle)).length;
-  const englishHits = ENGLISH_MARKERS.filter((needle) => normalized.includes(needle)).length;
+  // P2-5 (RC-10/RC-25): the marker list is Tosk-leaning, so a pure-Gheg turn ("Qysh o moti
+  // sot", "O shef qa bone") hits nothing and returns null — which costs a paid LLM language
+  // call, and under P2-2's STICKY_LOCALE_SLOT this heuristic is the SOLE inbound-marker
+  // source (the LLM call is skipped), so a null silently keeps the previous locale instead
+  // of steering it. Some Gheg markers must be space-padded (' ma ' — bare 'ma' is a
+  // substring of countless product names), so the haystack is padded to let them match at
+  // the string boundaries. That padding is a provable no-op for the legacy needles: none of
+  // them starts or ends with a space. Flag-off is byte-identical.
+  const albanianMarkers = withGhegMarkers(ALBANIAN_MARKERS, GHEG_ALBANIAN_MARKERS);
+  const haystack = GHEG_LEXICONS ? ` ${normalized} ` : normalized;
+
+  const albanianHits = albanianMarkers.filter((needle) => haystack.includes(needle)).length;
+  const englishHits = ENGLISH_MARKERS.filter((needle) => haystack.includes(needle)).length;
 
   if (albanianHits >= 1 && albanianHits > englishHits) return 'sq';
   if (englishHits >= 1 && englishHits > albanianHits) return 'en';
@@ -2493,34 +2541,11 @@ export function buildRetailAISystemPrompt(
 }
 
 /**
- * Builds the operator restrictions footer that must be appended LAST to every
- * system prompt. Placing these after all other content (product catalog, guidelines,
- * and runtime appends) ensures the model treats them as the highest-priority
- * instructions and does not let earlier prompt sections dilute them.
+ * P2-5: the footer builder moved to `platformPolicy.ts` so it stays pure and unit-testable
+ * (importing aiService pulls in the OpenAI client). Re-exported here to keep the existing
+ * import sites working.
  */
-export function buildRestrictionsFooter(
-  config: Pick<typeof DEFAULT_AI_CONFIG, 'restrictions' | 'platform_restrictions'>,
-): string {
-  const parts: string[] = [];
-
-  const restrictions = Array.isArray(config.restrictions) ? config.restrictions : [];
-  if (restrictions.length > 0) {
-    parts.push(
-      `\n\nOPERATOR BUSINESS RULES — you MUST follow:\n${restrictions.map((r) => `- ${r}`).join('\n')}`,
-    );
-  }
-
-  const platformRestrictions = Array.isArray(config.platform_restrictions)
-    ? config.platform_restrictions
-    : [];
-  if (platformRestrictions.length > 0) {
-    parts.push(
-      `\n\nPLATFORM POLICY — follow strictly:\n${platformRestrictions.map((r) => `- ${r}`).join('\n')}`,
-    );
-  }
-
-  return parts.join('');
-}
+export { buildRestrictionsFooter };
 
 export async function isUsageQuestionUnanswered(
   inboundMessage: string,
@@ -4202,7 +4227,25 @@ export async function generateReply(
 
   await ensureTenantPromptBlocksSeeded(tenantId);
   const tenantPromptBlocks = await loadTenantPromptBlocksCached(tenantId);
-  const assembledGuidelines = assembleGuidelinesFromBlocks(tenantPromptBlocks, { language }, { hasImages });
+  // P2-5 (RC-26): drops are reported, never silent — a truncated or filtered prompt that looks
+  // complete is exactly how the orphan block survived unnoticed in 6/6 tenants.
+  const droppedBlocks: Array<{ key: string; reason: string }> = [];
+  const unknownTokens: string[] = [];
+  const assembledGuidelines = assembleGuidelinesFromBlocks(
+    tenantPromptBlocks,
+    { language },
+    {
+      hasImages,
+      onDropped: (key, reason) => droppedBlocks.push({ key, reason }),
+      onUnknownToken: (token) => unknownTokens.push(token),
+    },
+  );
+  if (droppedBlocks.length > 0 || unknownTokens.length > 0) {
+    console.warn(
+      '[aiService] Prompt block assembly dropped content',
+      JSON.stringify({ tenantId, conversationId, droppedBlocks, unknownTokens }),
+    );
+  }
 
   let systemPrompt = buildRetailAISystemPrompt(
     tenant.name,
@@ -4215,9 +4258,11 @@ export async function generateReply(
   );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
-    systemPrompt += SHARED_CONTENT_SYSTEM_APPEND;
+    // P2-5 (DP-pc-18): locale-selected — this used to inject Albanian into English prompts,
+    // contradicting the language lock carried by the same prompt.
+    systemPrompt += SHARED_CONTENT_SYSTEM_APPEND_BY_LOCALE[language];
     if (inboundTextIsPostShare(inboundMessage)) {
-      systemPrompt += SHARED_POST_VISION_APPEND;
+      systemPrompt += SHARED_POST_VISION_APPEND_BY_LOCALE[language];
     }
   }
 
@@ -4300,15 +4345,29 @@ Using packaging-derived details (IMPORTANT — source precedence):
   );
 
   const originalHistoryCount = conversationHistory.length;
-  let historyForPrompt = conversationHistory;
-  let historyTokenTotal =
-    historyMessageTokenEstimates.reduce((sum, t) => sum + t, 0) + olderHistorySummaryTokens;
 
-  while (historyTokenTotal > CONTEXT_MAX_HISTORY_TOKENS && historyForPrompt.length > 3) {
-    const [removed, ...rest] = historyForPrompt;
-    historyForPrompt = rest;
-    historyTokenTotal -= estimateTokens((removed.content ?? '').trim());
-  }
+  // P2-5 (RC-26): the eviction loop moved to the pure `applyHistoryBudget` so its two accounting
+  // defects are testable and explicit. `reserveSummary` gates both fixes together:
+  //   (b) the total is decremented with the SAME estimates that seeded it (legacy subtracted the
+  //       raw content while seeding with the formatted form — the totals drifted apart);
+  //   (c) the un-evictable older-summary weight is RESERVED out of the budget instead of being
+  //       added to a total the loop can never reduce (which pinned it at the 4-message floor).
+  // Flag-off reproduces the legacy arithmetic byte-for-byte.
+  const historyBudgetResult = applyHistoryBudget({
+    items: conversationHistory,
+    itemTokens: historyMessageTokenEstimates,
+    // Only the legacy branch reads these (it subtracted raw-content estimates while seeding with
+    // the formatted form — defect b). Built lazily so the fixed path does not map + trim the whole
+    // history on every reply for a result it discards.
+    evictionTokens: PROMPT_ALLOWLIST_BUDGET
+      ? historyMessageTokenEstimates
+      : conversationHistory.map((msg) => estimateTokens((msg.content ?? '').trim())),
+    summaryTokens: olderHistorySummaryTokens,
+    maxTokens: CONTEXT_MAX_HISTORY_TOKENS,
+    reserveSummary: PROMPT_ALLOWLIST_BUDGET,
+  });
+  const historyForPrompt = historyBudgetResult.kept;
+  const historyTokenTotal = historyBudgetResult.total;
 
   if (historyForPrompt.length !== originalHistoryCount) {
     console.warn(
@@ -4321,6 +4380,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
         originalMessageCount: originalHistoryCount,
         truncatedMessageCount: historyForPrompt.length,
         estimatedTokenCount: historyTokenTotal,
+        summaryTokensReserved: PROMPT_ALLOWLIST_BUDGET ? Math.ceil(olderHistorySummaryTokens) : 0,
       }),
     );
   }
@@ -4371,10 +4431,17 @@ Using packaging-derived details (IMPORTANT — source precedence):
     systemPrompt += `\n\n${closingAppend}`;
   }
 
-  // Operator restrictions and platform policy are always appended last so they are
-  // the highest-priority instructions — after all product, guideline, and runtime
-  // appends that could otherwise dilute them.
-  const restrictionsFooter = buildRestrictionsFooter(config);
+  // Operator restrictions and platform policy are appended after all product, guideline and
+  // runtime appends that could otherwise dilute them. P2-5: the locale is threaded through so
+  // the platform rulebook renders in the customer's language rather than always in Albanian
+  // (the mistake SHARED_CONTENT_SYSTEM_APPEND makes — DP-pc-18).
+  //
+  // PRIORITY LADDER (P2-5, RC-26) — the prompt now states one order and renders in it:
+  //   grounding contract > platform policy > operator rules > brevity > guidelines
+  // Only the P2-1 grounding directive is appended after this footer, and deliberately so: it
+  // constrains the OUTPUT CONTRACT (what may be asserted and how the reply is shaped), not the
+  // business policy, so it cannot dilute operator or platform rules.
+  const restrictionsFooter = buildRestrictionsFooter(config, language);
   if (restrictionsFooter) {
     systemPrompt += restrictionsFooter;
   }
@@ -4387,6 +4454,40 @@ Using packaging-derived details (IMPORTANT — source precedence):
   const useFactsContract = FACTS_USED_CONTRACT && !hasImages && !config.custom_model_id;
   if (useFactsContract) {
     systemPrompt += GROUNDING_DIRECTIVE;
+  }
+
+  // P2-5 (RC-26) defect (a): `systemPromptTokenEstimate` / `inboundTokenEstimate` were computed
+  // mid-assembly and NEVER read — dead assignments measuring an INCOMPLETE prompt (the footer and
+  // grounding directive are appended after them). The system prompt was therefore never budgeted
+  // at all: the 6000-token cap applied to history only while the unbudgeted 26–33K-char system
+  // prompt sat beside it, competing for attention. This is the first point at which the prompt is
+  // actually complete, so the assertion belongs here.
+  //
+  // Reports; never throws and never truncates here. Block-level budgeting happens inside
+  // `assembleGuidelinesFromBlocks`, which knows the priority order and can protect the footer —
+  // an over-budget prompt is a degradation, a prompt missing platform policy is a policy breach.
+  if (PROMPT_ALLOWLIST_BUDGET) {
+    const promptViolations = assertRequiredSections(systemPrompt, {
+      expectPlatformPolicy: RESTRICTIONS_FOOTER_ALL_TENANTS,
+      expectGroundingDirective: useFactsContract,
+      maxChars: PROMPT_ASSEMBLY_MAX_CHARS,
+      // Scope the phantom-section scan to the guideline blocks: the full prompt also carries the
+      // product catalog and tenant-authored rules, where "Active offers" could legitimately occur.
+      guidelines: assembledGuidelines,
+    });
+    if (promptViolations.length > 0) {
+      console.warn(
+        '[aiService] System prompt assembly violations',
+        JSON.stringify({
+          tenantId,
+          conversationId,
+          violations: promptViolations,
+          systemPromptChars: systemPrompt.length,
+          systemPromptTokenEstimate: Math.ceil(systemPromptTokenEstimate),
+          inboundTokenEstimate: Math.ceil(inboundTokenEstimate),
+        }),
+      );
+    }
   }
 
   // Story mention/reply preview URLs are stored on the inbound message as `attachment_urls` (same as

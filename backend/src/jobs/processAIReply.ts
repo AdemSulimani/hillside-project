@@ -23,6 +23,7 @@ import {
   detectOrderConsentLexical,
   normalizeStage,
 } from '../services/orderStageMachine';
+import { GHEG_LEXICONS, GHEG_POST_PURCHASE_EXTRA_PATTERNS } from '../services/ghegLexicons';
 import { buildCommissionWindowQuery } from '../services/commissionWindow';
 import {
   DATA_CONFIRMATION_MESSAGES,
@@ -112,6 +113,7 @@ import {
   buildProductKnowledgeContext,
   detectRequestedAttributes,
   getProductInferredAttributes,
+  isOtherOptionsFollowUp,
 } from '../services/productRetrievalService';
 import { getProductImageDerivedContext } from '../services/productImageAttributeService';
 import { detectSpecifiedAttributes } from '../services/productAttributeAvailabilityService';
@@ -1259,7 +1261,11 @@ function hasPostPurchaseIssueCue(text: string): boolean {
     /(nuk me ka ardh|nuk ka ardh|nuk ka mberrit|still havent received|still haven't received|not delivered)/.test(normalized) ||
     /(produkt.*gabuar|artikull.*gabuar|gabuar.*produkt|gabuar.*artikull|wrong item|wrong product|wrong order|received.*wrong|got.*wrong|sent.*wrong|shipped.*wrong|wrong.*one|different.*product|different.*item|not what i ordered)/.test(normalized) ||
     /(tjeter.*produkt|produkt.*tjeter|tjeter.*artikull|artikull.*tjeter|derguat.*tjeter|derguan.*tjeter|erdhi.*tjeter|ka ardh.*tjeter|nuk eshte.*produkt|nuk eshte.*artikull)/.test(normalized) ||
-    /(defekt|prish|problem me produkt|damaged|broken|faulty|defective)/.test(normalized)
+    /(defekt|prish|problem me produkt|damaged|broken|faulty|defective)/.test(normalized) ||
+    // P2-5 (RC-25): Gheg negation/copula parity with hasDeliveryEtaOnlyCue below, which
+    // already accepts ska|s'ka. Two cues reading the same message disagreed on dialect:
+    // a Gheg "ska ardh" was a complaint to one and invisible to the other.
+    (GHEG_LEXICONS && GHEG_POST_PURCHASE_EXTRA_PATTERNS.some((re) => re.test(normalized)))
   );
 }
 
@@ -3264,9 +3270,28 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       messagePreview: logSafe(inboundText),
     });
   }
+  // P2-5 (RC-25): an inventory-browsing question ("do you have more, or only these?") is not a
+  // product-information request — the catalog either holds more items or it doesn't, and the gap
+  // assessor has no "more" fact to look up. EV-010 (alert d3db5dac) is the canonical failure:
+  // Gheg "A keni ma shum a veq aito / Qito" slipped every deterministic net ('ma shum' missed
+  // `me shum[eë]`; 'aito'/'Qito' missed the deictic list), reached the English-prompted assessor,
+  // and came back as `missing_info: ["ma shum"]` — the word "more" filed to a specialist as an
+  // unavailable catalog attribute. This exclusion mirrors isProductRecommendationQuestion above;
+  // the lexicon that powers it is Gheg-extended in ghegLexicons.ts.
+  const isOtherOptionsBrowsingQuestion =
+    GHEG_LEXICONS && Boolean(inboundText) && isOtherOptionsFollowUp(inboundText);
+  if (isOtherOptionsBrowsingQuestion) {
+    logger.info('[ai.reply] Detected other-options browsing question — skipping product-information-gap escalation', {
+      conversationId,
+      tenantId,
+      messagePreview: logSafe(inboundText),
+    });
+  }
+
   const isProductInformationQuestion =
     Boolean(inboundText) &&
     !isProductRecommendationQuestion &&
+    !isOtherOptionsBrowsingQuestion &&
     (attributeIntent.is_product_knowledge_question || requestedStructuredAttributes.length > 0);
 
   // P2-1: the consolidated gate subsumes the gap assessor's structured decision, so it forces the
@@ -3293,6 +3318,29 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         tenantId,
       });
     } else {
+      // P2-5 (RC-25): the curation loop, recorded HERE — at the only point the fail-closed gap
+      // assessor genuinely runs, after the usage/OOS/vision/no-match guards above have all
+      // declined to skip it. Recording earlier (on `isProductInformationQuestion` alone) would
+      // claim a fall-through for photo questions and zero-match turns that never reach the
+      // assessor at all, burying the real signal.
+      //
+      // Every routing lexicon returns a bare `false` on a miss with no log, no metric and no
+      // ledger row, so a dialect-coverage effort has nothing to measure against. This records
+      // each message the deterministic routers declined to claim before it hit the assessor —
+      // that set IS the list of uncovered Gheg forms to curate. Gated on GHEG_LEXICONS so the
+      // ledger is not filled with rows the curation loop cannot act on. `classifier`/`branch`
+      // are free-form on LedgerDecisionEvent, so this needs no schema change.
+      if (GHEG_LEXICONS) {
+        recordDecision({
+          classifier: 'gheg_lexicon',
+          raw_score: null,
+          threshold: null,
+          boost_applied: false,
+          passed: false,
+          branch: `fall_through:gap_assessor:attrs=${requestedStructuredAttributes.length}:matched=${matchedProducts.length}`,
+        });
+      }
+
       // Build the knowledge a human/LLM can answer from: structured catalog facts plus
       // high-confidence packaging details read from the product's own images.
       let knowledgeContext = buildProductKnowledgeContext(matchedProducts);

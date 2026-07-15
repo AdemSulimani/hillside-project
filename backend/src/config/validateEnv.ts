@@ -221,6 +221,36 @@ export function validateRequiredEnv(): void {
     }`,
   );
 
+  // P2-5: surface the Albanian/Gheg + prompt-hygiene posture at boot. Informational — never fatal.
+  const ghegLexicons = (process.env.GHEG_LEXICONS ?? 'false').trim().toLowerCase() === 'true';
+  const dialectNormalization =
+    (process.env.DIALECT_NORMALIZATION ?? 'false').trim().toLowerCase() === 'true';
+  const footerAllTenants =
+    (process.env.RESTRICTIONS_FOOTER_ALL_TENANTS ?? 'false').trim().toLowerCase() === 'true';
+  const promptAllowlistBudget =
+    (process.env.PROMPT_ALLOWLIST_BUDGET ?? 'false').trim().toLowerCase() === 'true';
+  console.info(
+    `[albanian] GHEG_LEXICONS=${
+      ghegLexicons ? 'on (Gheg forms appended; EV-010 routed as other-options)' : 'off (Tosk-only lexicons)'
+    }; DIALECT_NORMALIZATION=${
+      dialectNormalization
+        ? 'on (lexical arm folded + unified stopwords)'
+        : 'off (keyword/phrase arms disagree on diacritics)'
+    }; RESTRICTIONS_FOOTER_ALL_TENANTS=${
+      footerAllTenants ? 'on (platform rulebook renders for every tenant)' : 'off (footer reaches 1/6 tenants)'
+    }; PROMPT_ALLOWLIST_BUDGET=${
+      promptAllowlistBudget
+        ? `on (orphan blocks rejected; guidelines<=${process.env.PROMPT_GUIDELINES_MAX_CHARS ?? '20000'} chars, prompt reported >${process.env.PROMPT_ASSEMBLY_MAX_CHARS ?? '34000'})`
+        : 'off (orphan offers_promotions renders; prompt unbudgeted)'
+    }`,
+  );
+  if (footerAllTenants && promptAllowlistBudget) {
+    console.info(
+      '[albanian] NOTE: the platform footer (+~2.2K chars/tenant) and the prompt budget are BOTH on — ' +
+        'the interaction the P2-5 plan flags as its top risk. The footer is never truncated by design.',
+    );
+  }
+
   if (warnings.length > 0) {
     console.warn('[env] Security warnings:\n' + warnings.join('\n'));
   }

@@ -27,7 +27,10 @@ import { findImageUrlsWithoutFingerprints } from '../db/models/productImageFinge
 import { defaultQueue } from '../jobs/queues';
 import { openai, OPENAI_CHAT_MODEL } from '../services/openaiClient';
 import { buildRestrictionsFooter, buildRetailAISystemPrompt, formatProductCatalog } from '../services/aiService';
-import { SHORTEST_ANSWER_APPEND } from '../services/productDescriptionPromptService';
+import {
+  PRODUCT_DESCRIPTION_CONCISE_APPEND,
+  SHORTEST_ANSWER_APPEND,
+} from '../services/productDescriptionPromptService';
 import { assembleGuidelinesFromBlocks } from '../services/promptAssemblyService';
 
 async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot> {
@@ -335,11 +338,16 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
     );
 
     // Mirror the production reply path: the platform-enforced brevity rule is appended
-    // before the restrictions footer.
+    // before the restrictions footer. P2-5: production appends PRODUCT_DESCRIPTION_CONCISE_APPEND
+    // immediately after SHORTEST_ANSWER_APPEND (aiService, the always-on pair) — the preview
+    // omitted it and so did not actually mirror the prompt it claimed to preview.
     systemPrompt += SHORTEST_ANSWER_APPEND;
+    systemPrompt += PRODUCT_DESCRIPTION_CONCISE_APPEND;
 
-    // Restrictions are always appended last so the test prompt mirrors production behaviour.
-    const restrictionsFooter = buildRestrictionsFooter(config);
+    // Restrictions are appended last so the test prompt mirrors production behaviour. P2-5:
+    // the locale is threaded through, so the preview shows the same platform rulebook the
+    // customer would actually receive.
+    const restrictionsFooter = buildRestrictionsFooter(config, lang);
     if (restrictionsFooter) {
       systemPrompt += restrictionsFooter;
     }
