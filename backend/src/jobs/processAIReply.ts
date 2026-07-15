@@ -1,3 +1,4 @@
+import { knobNumber } from '../config/knobs';
 ﻿import crypto from 'crypto';
 import pool from '../db/pool';
 import { logSafe, logSafeStructured } from '../utils/redact';
@@ -569,10 +570,7 @@ async function rescheduleReplyAfterHumanHold(
  * Hours of message inactivity that mark the start of a new conversation session.
  * Used only for the commission decision on AI-created orders.
  */
-const COMMISSION_SESSION_GAP_HOURS = (() => {
-  const parsed = Number(process.env.COMMISSION_SESSION_GAP_HOURS ?? '3');
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
-})();
+const COMMISSION_SESSION_GAP_HOURS = knobNumber('COMMISSION_SESSION_GAP_HOURS');
 
 /**
  * Decides whether a human agent participated in the conversation window that led to the
@@ -1340,8 +1338,7 @@ function isEmojiOnlyText(text: string): boolean {
 // early — no work is lost, the job just waits its turn.
 // ---------------------------------------------------------------------------
 const AI_MAX_CONCURRENT_PER_TENANT = (() => {
-  const n = parseInt(process.env.AI_MAX_CONCURRENT_PER_TENANT ?? '8', 10);
-  return Number.isFinite(n) && n > 0 ? n : 8;
+  return knobNumber('AI_MAX_CONCURRENT_PER_TENANT');
 })();
 /** How long (ms) a job backs off before retrying when the tenant is at capacity. */
 const AI_FAIRNESS_BACKOFF_MS = 3000;
@@ -1404,8 +1401,7 @@ async function countDeliveredReplyOnce(
 // so a job can never delete a lock that a later job acquired after TTL expiry.
 // ---------------------------------------------------------------------------
 const CONVERSATION_LOCK_TTL_MS = (() => {
-  const n = parseInt(process.env.AI_CONVERSATION_LOCK_TTL_MS ?? '300000', 10);
-  return Number.isFinite(n) && n > 0 ? n : 300000;
+  return knobNumber('AI_CONVERSATION_LOCK_TTL_MS');
 })();
 
 const CONVERSATION_LOCK_RELEASE_SCRIPT = `
@@ -1576,9 +1572,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   try {
 
   // ---- Per-conversation rate limit (atomic) --------------------------------
-  const parsedMax = parseInt(process.env.AI_MAX_REPLIES_PER_HOUR ?? '25', 10);
-  const aiMaxRepliesPerHour =
-    Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 25;
+  const aiMaxRepliesPerHour = knobNumber('AI_MAX_REPLIES_PER_HOUR');
   const rateLimitKey = `ai_rate_limit:${conversationId}`;
   let overLimit = false;
   if (RATE_LIMIT_COUNT_DELIVERED_ONLY) {
@@ -5251,11 +5245,12 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       `[INTENT DETECTION] tenantId: ${tenantId} conversationId: ${conversationId} score: ${intent.intent_score} is_ready: ${intent.is_ready_to_order} product_name: ${logJsonStringOrNull(intent.product_name)} quantity: ${qtyDisplay} delivery_address: ${logJsonStringOrNull(intent.delivery_address)} reasoning: ${JSON.stringify(intent.reasoning)}`,
     );
 
-    const parsedIntentThreshold = parseFloat(process.env.INTENT_THRESHOLD ?? '0.85');
-    const intentOrderMinScore =
-      Number.isFinite(parsedIntentThreshold) && parsedIntentThreshold > 0 && parsedIntentThreshold < 1
-        ? parsedIntentThreshold
-        : 0.85;
+    // P2-7 (I6/RC-06): read through the manifest so an out-of-band value is REPORTED at boot rather
+    // than silently reverting. This gate previously accepted only `>0 && <1` and fell back to 0.85
+    // with no log at all — so `INTENT_THRESHOLD=1`, a plausible way to express "never auto-create
+    // orders", quietly became 0.85 and created orders aggressively: the exact opposite of the
+    // operator's intent, invisibly. The manifest's [0,1] band + the boot warning make it loud.
+    const intentOrderMinScore = knobNumber('INTENT_THRESHOLD');
     // P2-2: in `on`, the two order-cluster LLM classifiers are replaced by deterministic lexicons —
     // there is no confidence field on the consent path, so RC-07's boost asymmetry cannot arise.
     const orderStageOn = ORDER_STAGE_MACHINE_MODE === 'on';

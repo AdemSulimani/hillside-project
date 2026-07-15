@@ -21,7 +21,7 @@ export async function startFinetuningJob(params: {
   });
 
   const fineTune = await openai.fineTuning.jobs.create({
-    model: process.env.OPENAI_FINETUNING_BASE_MODEL?.trim() || OPENAI_FINETUNING_BASE_MODEL,
+    model: OPENAI_FINETUNING_BASE_MODEL,
     training_file: file.id,
     suffix: `tenant-${params.tenantId.slice(0, 8)}`,
   });

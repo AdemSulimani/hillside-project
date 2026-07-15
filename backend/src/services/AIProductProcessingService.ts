@@ -1,5 +1,7 @@
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
+import { resolveModel } from '../config/models';
 import type { ExtractedProductData } from './documents/AttachDocumentService';
+import { openai } from './openaiClient';
 import { parsePrice } from './documents/priceParsing';
 
 const SYSTEM_PROMPT = `You are a product data extraction assistant. Given raw text extracted from a document or image, identify and structure product information.
@@ -27,12 +29,23 @@ export class AIProductProcessingService {
   private model: string;
 
   constructor() {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new Error('OPENAI_API_KEY environment variable is required');
-    }
-    this.client = new OpenAI({ apiKey });
-    this.model = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
+    /**
+     * P2-7 (RC-17 / P1-5): use the SHARED client, not a private one.
+     *
+     * This class used to build its own `new OpenAI({ apiKey })`, which meant its product-extraction
+     * calls ran with none of the shared resilience config (OPENAI_MAX_RETRIES / OPENAI_TIMEOUT_MS)
+     * and — worse — were never passed through `instrumentOpenAIClient`, so every token they burned
+     * was INVISIBLE to the P1-5 cost ledger. It also read OPENAI_CHAT_MODEL with a *different*
+     * default (`gpt-4o-mini`) than openaiClient gives the same variable (`gpt-4o`): one var, two
+     * defaults, which is model-config drift in miniature.
+     *
+     * The model resolution below preserves the historical behaviour EXACTLY — see the
+     * `product_processing` role in config/models.ts, whose terminal default is deliberately
+     * `gpt-4o-mini`, not `gpt-4o`. The API-key presence check is now openaiClient's module-load
+     * guard, which throws the same way.
+     */
+    this.client = openai;
+    this.model = resolveModel('product_processing');
   }
 
   async extractProducts(rawText: string): Promise<ExtractedProductData[]> {

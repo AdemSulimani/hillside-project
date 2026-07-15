@@ -22,7 +22,7 @@
  * fail-closed escalation guarantee for genuinely-missing attributes.
  */
 import type { Product } from '../db/models/product';
-import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
+import { openai, OPENAI_CLASSIFIER_MODEL } from './openaiClient';
 import {
   buildAvailabilityCacheKey,
   buildProductAvailabilityBlock,
@@ -93,7 +93,7 @@ export async function detectSpecifiedAttributes(
 
     const completion = await openai.chat.completions.create(
       {
-        model: OPENAI_CHAT_MODEL,
+        model: OPENAI_CLASSIFIER_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: userContent },

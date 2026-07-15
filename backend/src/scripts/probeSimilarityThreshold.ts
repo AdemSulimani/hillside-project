@@ -1,3 +1,4 @@
+import { knobNumber } from '../config/knobs';
 /**
  * P2-5 workstream 3 (RC-25/EV-043): the zero-cost retrieval-threshold probe.
  *
@@ -66,7 +67,7 @@ async function main(): Promise<void> {
   console.info(`[probe] tenant ${tenantId} — ${embedded} active embedded products`);
   if (embedded === 0) return;
 
-  const configured = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.65');
+  const configured = knobNumber('SIMILARITY_THRESHOLD');
   console.info(`[probe] SIMILARITY_THRESHOLD in effect: ${configured}`);
 
   // Probe vectors: products spread evenly across the catalog, each queried with its OWN stored

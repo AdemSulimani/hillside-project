@@ -16,12 +16,13 @@
  * large backlog drains steadily instead of in one long transaction. Never throws — a retention blip
  * must not affect request handling.
  */
+import { knobNumber } from '../config/knobs';
 import { pruneLedger } from '../db/models/aiDecisionLedger';
 
-const RETENTION_DAYS = (() => {
-  const n = parseInt(process.env.LEDGER_RETENTION_DAYS ?? '90', 10);
-  return Number.isFinite(n) && n > 0 ? n : 90;
-})();
+// P2-7: read through the manifest. `LEDGER_RETENTION_DAYS`'s default was written here AND again as
+// a literal inside validateEnv's boot log, so the two could disagree about what retention actually
+// is — the drift class this item exists to remove.
+const RETENTION_DAYS = knobNumber('LEDGER_RETENTION_DAYS');
 
 const SWEEP_INTERVAL_MS = (() => {
   const n = parseInt(process.env.LEDGER_RETENTION_INTERVAL_MS ?? '3600000', 10);

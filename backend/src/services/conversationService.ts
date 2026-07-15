@@ -1,3 +1,4 @@
+import { knobNumber } from '../config/knobs';
 import pool from '../db/pool';
 import type { ChannelType } from '../db/models/channel';
 import type { Conversation } from '../db/models/conversation';
@@ -354,8 +355,7 @@ const DEFAULT_HUMAN_HOLD_MINUTES = 10;
  * manually reactivate the AI after stepping into a chat.
  */
 export function getHumanHoldMinutes(): number {
-  const parsed = Number(process.env.HUMAN_HOLD_MINUTES ?? DEFAULT_HUMAN_HOLD_MINUTES);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_HUMAN_HOLD_MINUTES;
+  return knobNumber('HUMAN_HOLD_MINUTES');
 }
 
 /**

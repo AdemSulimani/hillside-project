@@ -1,4 +1,4 @@
-import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
+import { openai, OPENAI_CLASSIFIER_MODEL } from './openaiClient';
 import {
   detectAttributeIntentFromKeywords,
   type ProductAttributeIntentResult,
@@ -100,7 +100,7 @@ export async function classifyProductAttributeIntent(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',

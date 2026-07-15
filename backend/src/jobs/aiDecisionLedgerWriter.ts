@@ -23,6 +23,7 @@ import {
   type LedgerReceiptSnapshot,
   type LedgerRecord,
 } from '../db/models/aiDecisionLedger';
+import { fingerprint, fingerprintRef } from '../config/knobs';
 import type { ReplyTelemetry } from '../services/aiTelemetry';
 import type { DeclaredFact } from '../services/groundingGate';
 import { getTrackedOpenAICalls } from '../services/openaiCallTracker';
@@ -30,6 +31,16 @@ import { logger } from '../utils/logger';
 
 const AI_DECISION_LEDGER_ENABLED =
   (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-7 (RC-06): this process's config fingerprint, computed ONCE at module load.
+ *
+ * Once per process is not an optimisation — it is the contract. The fingerprint covers only the
+ * `frozen` knobs (read into module-load consts), which by definition cannot change without a
+ * restart, so recomputing per reply could only ever produce the same value while implying the
+ * opposite. Every ledger row therefore carries a pointer to the exact config that produced it.
+ */
+const PROCESS_CONFIG_FINGERPRINT = fingerprintRef(fingerprint(process.env));
 
 // The relay actually performs outbox effects only when BOTH flags are on. In shadow mode
 // (relay on, dispatch off) the relay claims rows and marks them done WITHOUT effect — safe for
@@ -159,6 +170,11 @@ export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
     // P2-4 Part 2 (RC-06): receipt-vs-live gate state + divergence. Null when the flag is off or
     // the job predates the snapshot (outbox rows pending at deploy).
     receipt_snapshot: input.receiptSnapshot ?? null,
+    // P2-7 (RC-06): which instance's config produced this reply. Computed once per process (the
+    // frozen knobs cannot change without a restart) and attached to every row, so that once
+    // `config_fingerprints` reveals a drifted fleet, the replies served by the bad config are a
+    // single indexed lookup away.
+    config_fingerprint: PROCESS_CONFIG_FINGERPRINT,
   };
 }
 

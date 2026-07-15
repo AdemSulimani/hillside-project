@@ -140,12 +140,19 @@ describe('cache keys', () => {
 });
 
 describe('activeEmbeddingModel', () => {
-  it('prefers the env var, falls back otherwise', () => {
+  it('uses the env var, and has NO fallback when unset (P2-7: the RC-04 landmine is disarmed at source)', () => {
     const prev = process.env.OPENAI_EMBEDDING_MODEL;
     process.env.OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
     assert.equal(activeEmbeddingModel(), 'text-embedding-3-small');
+
+    // Before P2-7 this fell back to the literal 'text-embedding-3-large' — 3072-dim against a
+    // vector(1536) column, i.e. every similarity query errors and semantic retrieval dies silently.
+    // The fallback WAS the landmine, so `config/models.ts` gives the embedding role no terminal
+    // default at all: a wrong default is more dangerous than no default. `validateEnv` fatals on
+    // the unset case instead of letting a guess reach the database.
     delete process.env.OPENAI_EMBEDDING_MODEL;
-    assert.ok(activeEmbeddingModel().length > 0); // documented literal fallback
+    assert.equal(activeEmbeddingModel(), '');
+
     if (prev !== undefined) process.env.OPENAI_EMBEDDING_MODEL = prev;
   });
 });

@@ -143,6 +143,22 @@ export interface LedgerRecord {
    * which is RC-06's stated defect. NULL when RECEIPT_TIME_SNAPSHOT is off or the job predates it.
    */
   receipt_snapshot: LedgerReceiptSnapshot | null;
+  /**
+   * P2-7 (RC-06): which config produced this reply — `{ hash, instance }`, a pointer into the
+   * `config_fingerprints` table (migration 081) that holds the actual knob values.
+   *
+   * Short form on purpose: the fingerprint is a per-PROCESS fact, so carrying the full knob set on
+   * every per-REPLY row would duplicate it thousands of times. Once `config_fingerprints` shows the
+   * fleet disagrees with itself, this column answers the follow-up — "which replies ran on the bad
+   * config" — from the ledger alone. NULL on rows written before P2-7.
+   */
+  config_fingerprint: LedgerConfigFingerprint | null;
+}
+
+/** P2-7: the per-reply pointer into `config_fingerprints`. Scalars only — no PII. */
+export interface LedgerConfigFingerprint {
+  hash: string;
+  instance: string;
 }
 
 /** The transactional_outbox `dedupe_key` for a reply's ledger row (exactly-once per reply slot). */
@@ -175,6 +191,10 @@ export function redactLedgerRecord(record: LedgerRecord): LedgerRecord {
     // risk mangling the epoch-micros config version. Stated explicitly rather than relying on the
     // spread above, so this stays a decision a reviewer can see instead of an invisible omission.
     receipt_snapshot: record.receipt_snapshot ?? null,
+    // P2-7: passed through UNREDACTED for the same reason as receipt_snapshot above — it is a
+    // 16-char hash and a host:pid string, neither of which can carry customer PII, and any
+    // secret-valued knob is already hashed by `config/knobs.fingerprint` before it gets here.
+    config_fingerprint: record.config_fingerprint ?? null,
   };
 }
 
@@ -186,10 +206,10 @@ export function buildLedgerOutboxPayload(record: LedgerRecord): Record<string, u
 const INSERT_SQL = `INSERT INTO ai_decision_ledger
     (tenant_id, conversation_id, message_id, correlation_id, trace_id, idempotency_key,
      reply_slot, decision_kind, prompt, model, usage, retrieval, decision_events,
-     guard_verdicts, facts_used, receipt_snapshot)
+     guard_verdicts, facts_used, receipt_snapshot, config_fingerprint)
   VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
           $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
-          $16::jsonb)
+          $16::jsonb, $17::jsonb)
   ON CONFLICT (idempotency_key) DO NOTHING`;
 
 /**
@@ -215,6 +235,7 @@ export function insertParams(r: LedgerRecord): unknown[] {
     JSON.stringify(r.guard_verdicts ?? {}),
     j(r.facts_used),
     j(r.receipt_snapshot),
+    j(r.config_fingerprint),
   ];
 }
 
