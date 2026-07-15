@@ -20,6 +20,7 @@ import {
   insertLedgerTx,
   ledgerDedupeKey,
   type LedgerDecisionEvent,
+  type LedgerReceiptSnapshot,
   type LedgerRecord,
 } from '../db/models/aiDecisionLedger';
 import type { ReplyTelemetry } from '../services/aiTelemetry';
@@ -63,6 +64,12 @@ export interface BuildLedgerRecordInput {
    * is active; `null`/absent otherwise (byte-for-byte the prior behaviour).
    */
   factsUsed?: DeclaredFact[] | null;
+  /**
+   * P2-4 Part 2 (RC-06): the receipt-time snapshot compared against the live gate state, so a
+   * message discarded (or answered) on a mid-window toggle leaves an artifact. Present only when
+   * RECEIPT_TIME_SNAPSHOT is on AND the job carried a snapshot; `null`/absent otherwise.
+   */
+  receiptSnapshot?: LedgerReceiptSnapshot | null;
 }
 
 /**
@@ -149,6 +156,9 @@ export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
     // P2-1: populate the reserved column with the generation's declared facts (or null when the
     // contract is off) — closes P2-4 Part 2(a).
     facts_used: input.factsUsed ?? null,
+    // P2-4 Part 2 (RC-06): receipt-vs-live gate state + divergence. Null when the flag is off or
+    // the job predates the snapshot (outbox rows pending at deploy).
+    receipt_snapshot: input.receiptSnapshot ?? null,
   };
 }
 

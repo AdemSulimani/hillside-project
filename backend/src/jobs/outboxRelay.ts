@@ -19,7 +19,7 @@
  */
 import pool from '../db/pool';
 import { defaultQueue, aiQueue } from './queues';
-import type { AIReplyJobData } from './processAIReply';
+import { aiReplyJobDataSchema, type AIReplyJobData } from './jobTypes';
 import { socketService } from '../services/socketService';
 import { redisConnection } from './redisConnection';
 import { RATE_LIMIT_DELIVERED_INCR_SCRIPT } from '../services/rateLimitDeliveredCount';
@@ -85,7 +85,22 @@ function futureDate(ms: number): Date {
 async function dispatchRow(row: OutboxRow): Promise<boolean> {
   switch (row.topic) {
     case 'ai.reply': {
-      await aiQueueAdd('ai.reply', row.payload as unknown as AIReplyJobData, {
+      // P2-4 Part 2: parse, do not cast. This payload was written to Postgres JSONB — possibly by a
+      // PREVIOUS deploy, since rows can sit pending across one — so a bare
+      // `as unknown as AIReplyJobData` asserts a shape nothing has ever checked. Dispatching an
+      // off-contract payload would hand the worker fields that read as falsy — i.e. silently
+      // "AI disabled" — so a message would be dropped with no artifact.
+      //
+      // THROW rather than return false: the drain loop discards this function's return value and
+      // routes only thrown errors to `recordFailure`, which is what retries and ultimately
+      // dead-letters the row. Returning false would leave it pending and silently re-claimed
+      // forever. The DLQ is the right destination — an unparseable payload needs an operator.
+      const parsed = aiReplyJobDataSchema.safeParse(row.payload);
+      if (!parsed.success) {
+        const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+        throw new Error(`ai.reply outbox payload failed contract validation (row ${row.id}): ${issues}`);
+      }
+      await aiQueueAdd('ai.reply', parsed.data satisfies AIReplyJobData, {
         jobId: `outbox-ai-reply-${row.id}`,
         delay: 0,
       });

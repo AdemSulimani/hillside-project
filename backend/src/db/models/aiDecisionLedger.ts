@@ -42,7 +42,10 @@ export interface LedgerModelParams {
   /** The DYNAMIC per-reply temperature actually sent (not the AI_REPLY_TEMPERATURE constant). */
   temperature: number | null;
   max_tokens: number | null;
-  /** Never sent today (recorded null) — adding a seed is an RC-03 change, out of P1-5 scope. */
+  /**
+   * The seed actually sent. P2-1 pins AI_REPLY_SEED on the facts_used contract path (RC-03), so
+   * this is populated when FACTS_USED_CONTRACT is on and null otherwise (legacy free-prose path).
+   */
   seed: number | null;
   finish_reason: string | null;
   /** finish_reason === 'length' — the reply was silently truncated at max_tokens (C-97). */
@@ -98,6 +101,25 @@ export interface LedgerDecisionEvent {
   branch: string;
 }
 
+/**
+ * P2-4 Part 2 (RC-06): the ledger's view of the receipt-time snapshot. Deliberately its own shape
+ * rather than the raw job payload: the payload only carries what was captured, while the ledger
+ * additionally records what the LIVE gates read and whether the two diverged — which is the whole
+ * measurement. Scalars only (booleans, epoch micros/ms, a timestamp) — carries no customer PII.
+ */
+export interface LedgerReceiptSnapshot {
+  /** The snapshot as captured at receipt (before the deliberate AI_REPLY_DELAY_MS deferral). */
+  captured: Record<string, unknown>;
+  /** The live values the gates actually evaluated, read ≥8s later. */
+  live: Record<string, unknown>;
+  /** Field names whose captured value differs from live — empty when the window was quiet. */
+  diverged: string[];
+  /** ms between webhook receipt and snapshot capture (the non-deliberate part of the window). */
+  receipt_to_capture_ms: number | null;
+  /** ms between snapshot capture and gate evaluation (the deliberate deferral + backoffs). */
+  capture_to_eval_ms: number | null;
+}
+
 export interface LedgerRecord {
   tenant_id: string;
   conversation_id: string | null;
@@ -114,6 +136,13 @@ export interface LedgerRecord {
   decision_events: LedgerDecisionEvent[];
   guard_verdicts: Record<string, unknown>;
   facts_used: unknown | null;
+  /**
+   * P2-4 Part 2 (RC-06): the enablement/config state captured at RECEIPT, plus how it compared to
+   * the live state the gates actually read ≥8s later. Record-only — the live reads always govern;
+   * this exists so a message discarded (or answered) on a mid-window toggle leaves an artifact,
+   * which is RC-06's stated defect. NULL when RECEIPT_TIME_SNAPSHOT is off or the job predates it.
+   */
+  receipt_snapshot: LedgerReceiptSnapshot | null;
 }
 
 /** The transactional_outbox `dedupe_key` for a reply's ledger row (exactly-once per reply slot). */
@@ -141,6 +170,11 @@ export function redactLedgerRecord(record: LedgerRecord): LedgerRecord {
     decision_events: redactValue(record.decision_events) as LedgerDecisionEvent[],
     guard_verdicts: redactValue(record.guard_verdicts) as Record<string, unknown>,
     facts_used: record.facts_used == null ? null : redactValue(record.facts_used),
+    // P2-4 Part 2: passed through UNREDACTED, deliberately. The snapshot is booleans + epoch
+    // numbers + a hold timestamp — no field can carry customer PII, and redactValue would only
+    // risk mangling the epoch-micros config version. Stated explicitly rather than relying on the
+    // spread above, so this stays a decision a reviewer can see instead of an invisible omission.
+    receipt_snapshot: record.receipt_snapshot ?? null,
   };
 }
 
@@ -152,12 +186,17 @@ export function buildLedgerOutboxPayload(record: LedgerRecord): Record<string, u
 const INSERT_SQL = `INSERT INTO ai_decision_ledger
     (tenant_id, conversation_id, message_id, correlation_id, trace_id, idempotency_key,
      reply_slot, decision_kind, prompt, model, usage, retrieval, decision_events,
-     guard_verdicts, facts_used)
+     guard_verdicts, facts_used, receipt_snapshot)
   VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-          $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb)
+          $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
+          $16::jsonb)
   ON CONFLICT (idempotency_key) DO NOTHING`;
 
-function insertParams(r: LedgerRecord): unknown[] {
+/**
+ * Exported for tests only: the suite has no DB, so asserting a field actually reaches its bind
+ * parameter (rather than being silently dropped by the mapper) is only possible on these params.
+ */
+export function insertParams(r: LedgerRecord): unknown[] {
   const j = (v: unknown): string | null => (v == null ? null : JSON.stringify(v));
   return [
     r.tenant_id,
@@ -175,6 +214,7 @@ function insertParams(r: LedgerRecord): unknown[] {
     JSON.stringify(r.decision_events ?? []),
     JSON.stringify(r.guard_verdicts ?? {}),
     j(r.facts_used),
+    j(r.receipt_snapshot),
   ];
 }
 
@@ -202,4 +242,32 @@ export async function insertLedgerBestEffort(record: LedgerRecord): Promise<void
       err: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * P2-4 Part 2: retention prune — delete ledger rows older than `retentionDays`.
+ *
+ * Mirrors `pruneReplayedDeadLetter`. Unlike the DLQ there is no status to spare: a ledger row is
+ * pure telemetry that no operator actions, so age is the only axis. Every row carries a prompt
+ * preview derived from customer conversation text, so unbounded retention is a GDPR exposure
+ * (P2-4's own listed edge case) as well as unbounded growth.
+ *
+ * Deletes in bounded batches so a first run over a large backlog cannot hold a long transaction or
+ * bloat WAL; the caller ticks repeatedly. Returns rows deleted this call.
+ */
+export async function pruneLedger(
+  retentionDays: number,
+  batchSize = 5_000,
+  client: Db = pool,
+): Promise<number> {
+  const { rowCount } = await client.query(
+    `DELETE FROM ai_decision_ledger
+      WHERE id IN (
+        SELECT id FROM ai_decision_ledger
+         WHERE created_at < now() - make_interval(days => $1)
+         LIMIT $2
+      )`,
+    [retentionDays, batchSize],
+  );
+  return rowCount ?? 0;
 }

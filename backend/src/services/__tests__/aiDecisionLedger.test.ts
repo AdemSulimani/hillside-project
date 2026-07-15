@@ -15,9 +15,11 @@ import type { ReplyTelemetry } from '../aiTelemetry';
 import { buildLedgerRecord } from '../../jobs/aiDecisionLedgerWriter';
 import {
   buildLedgerOutboxPayload,
+  insertParams,
   redactLedgerRecord,
   type LedgerDecisionEvent,
 } from '../../db/models/aiDecisionLedger';
+import type { DeclaredFact } from '../groundingGate';
 
 const PHONE = '+38344123456';
 const EMAIL = 'blerta@example.com';
@@ -211,5 +213,171 @@ describe('aiDecisionLedger — idempotency key', () => {
     assert.equal(r.usage, null);
     assert.equal(r.retrieval, null);
     assert.deepEqual(r.decision_events, []);
+    assert.equal(r.facts_used, null);
+    assert.equal(r.receipt_snapshot, null);
+  });
+});
+
+/**
+ * P2-4 Part 2 (RC-01/RC-02): `facts_used` is what lets a grounding-gate strip be re-judged against
+ * the catalog from the ledger alone. P2-1 built the whole chain but the LEGACY send path — the
+ * default, since AI_REPLY_STAGE_BEFORE_SEND is off — silently omitted the field, so every delivered
+ * reply recorded facts_used NULL despite declared facts existing. There was no test to catch it.
+ *
+ * Asserted on `insertParams` and not just the record: the mapper is only half the trip, and the
+ * question that actually matters is whether the value reaches its bind parameter.
+ */
+describe('aiDecisionLedger — facts_used reaches the DB (P2-4 Part 2)', () => {
+  const FACTS: DeclaredFact[] = [
+    { type: 'price', product_ref: 'Mega Mass 4000', value: '18.00' },
+    { type: 'name', product_ref: 'Serious Mass', value: 'Serious Mass 5.4kg' },
+  ];
+
+  const FACTS_USED_PARAM_INDEX = 14; // $15
+  const RECEIPT_SNAPSHOT_PARAM_INDEX = 15; // $16
+
+  it('binds declared facts to $15', () => {
+    const r = buildLedgerRecord({
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      decisionEvents: [],
+      factsUsed: FACTS,
+    });
+    assert.deepEqual(r.facts_used, FACTS);
+    assert.equal(insertParams(r)[FACTS_USED_PARAM_INDEX], JSON.stringify(FACTS));
+  });
+
+  it('binds null — not the string "null" or undefined — when the contract is off', () => {
+    // Vision replies, custom-model replies, and FACTS_USED_CONTRACT=off legitimately declare no
+    // facts. That must be a SQL NULL, distinguishable from "the contract ran and found nothing".
+    const r = buildLedgerRecord({
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      decisionEvents: [],
+    });
+    assert.equal(r.facts_used, null);
+    assert.equal(insertParams(r)[FACTS_USED_PARAM_INDEX], null);
+  });
+
+  it('distinguishes an empty declaration from an absent one', () => {
+    const r = buildLedgerRecord({
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      decisionEvents: [],
+      factsUsed: [],
+    });
+    // "The contract ran and the model declared zero facts" is a real, different signal from NULL.
+    assert.deepEqual(r.facts_used, []);
+    assert.equal(insertParams(r)[FACTS_USED_PARAM_INDEX], '[]');
+  });
+
+  it('survives redaction with prices and product names intact', () => {
+    // The redaction pass must not eat the very values the reconstruction needs. `PHONE_RE` requires
+    // 7-15 digits, so a price like "18.00" is safe — this pins that rather than assuming it.
+    const r = buildLedgerRecord({
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      decisionEvents: [],
+      factsUsed: FACTS,
+    });
+    const redacted = redactLedgerRecord(r);
+    const json = JSON.stringify(redacted.facts_used);
+    assert.ok(json.includes('18.00'), 'a price must survive redaction');
+    assert.ok(json.includes('Mega Mass 4000'), 'a product name must survive redaction');
+  });
+
+  it('still masks PII that reaches facts_used', () => {
+    const r = buildLedgerRecord({
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      decisionEvents: [],
+      factsUsed: [
+        { type: 'attribute', product_ref: `call ${PHONE}`, value: EMAIL },
+      ] satisfies DeclaredFact[],
+    });
+    const json = JSON.stringify(redactLedgerRecord(r).facts_used);
+    assert.ok(!json.includes(PHONE));
+    assert.ok(!json.includes(EMAIL));
+  });
+
+  it('binds the receipt snapshot to $16 and keeps it queryable', () => {
+    const snapshot = {
+      captured: { aiActive: true, conversationAiPaused: false },
+      live: { aiActive: false, conversationAiPaused: false },
+      diverged: ['aiActive'],
+      receipt_to_capture_ms: 120,
+      capture_to_eval_ms: 8_000,
+    };
+    const r = buildLedgerRecord({
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      replySlot: 'none:gate:ai_globally_disabled',
+      decisionKind: 'no_reply:ai_globally_disabled',
+      decisionEvents: [],
+      receiptSnapshot: snapshot,
+    });
+    assert.deepEqual(r.receipt_snapshot, snapshot);
+    assert.equal(insertParams(r)[RECEIPT_SNAPSHOT_PARAM_INDEX], JSON.stringify(snapshot));
+    // The RC-06 artifact survives the mandatory redaction pass — it carries no PII, only scalars,
+    // and the divergence list is the whole point of the row.
+    assert.deepEqual(redactLedgerRecord(r).receipt_snapshot?.diverged, ['aiActive']);
+  });
+
+  it('gives each gate its own idempotency key so one drop cannot mask another', () => {
+    // The ledger insert is ON CONFLICT (idempotency_key) DO NOTHING and the key is slot-keyed, so a
+    // single shared 'none' slot would let the first drop of an inbound swallow every later one — and
+    // a job re-enqueued by the fairness/lock backoff can legitimately drop at a different gate.
+    const base = {
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      decisionEvents: [] as LedgerDecisionEvent[],
+    };
+    const a = buildLedgerRecord({
+      ...base,
+      replySlot: 'none:gate:ai_paused',
+      decisionKind: 'no_reply:ai_paused',
+    });
+    const b = buildLedgerRecord({
+      ...base,
+      replySlot: 'none:gate:ai_globally_disabled',
+      decisionKind: 'no_reply:ai_globally_disabled',
+    });
+    assert.notEqual(a.idempotency_key, b.idempotency_key);
+  });
+
+  it('keeps a suppressed main reply from masking a later delivered one', () => {
+    // Both rows can occur for one inbound across a retry: attempt 1 generates then gets suppressed
+    // by the pre-send re-validation, attempt 2 delivers. Sharing the 'main' slot would let the
+    // suppressed row win the ON CONFLICT and permanently hide the delivered reply.
+    const base = {
+      tenantId: 't',
+      conversationId: 'c',
+      correlationId: 'm',
+      decisionEvents: [] as LedgerDecisionEvent[],
+    };
+    const suppressed = buildLedgerRecord({
+      ...base,
+      replySlot: 'main:suppressed',
+      decisionKind: 'suppressed:human_outbound_after_inbound',
+    });
+    const delivered = buildLedgerRecord({ ...base, replySlot: 'main', decisionKind: 'reply' });
+    assert.notEqual(suppressed.idempotency_key, delivered.idempotency_key);
   });
 });

@@ -27,6 +27,26 @@ export async function findAIConfigByTenant(tenantId: string): Promise<AIConfig |
   return rows[0] ?? null;
 }
 
+/**
+ * P2-4 Part 2 (RC-06): the two scalars the receipt-time snapshot needs — the global AI toggle and
+ * the row version — without `findAIConfigByTenant`'s `SELECT *`, which would haul `qa_pairs`,
+ * `restrictions`, `platform_restrictions` and the persona prose across the wire on EVERY inbound
+ * message just to read a boolean.
+ *
+ * Deliberately a DB read and NOT the P2-3 cache: snapshotting `is_active` from a possibly-stale
+ * cached blob would let RC-17's drift poison RC-06's measurement. One index hit on the
+ * UNIQUE(tenant_id).
+ */
+export async function findAIConfigGateStateByTenant(
+  tenantId: string,
+): Promise<{ is_active: boolean; updated_at: Date } | null> {
+  const { rows } = await pool.query<{ is_active: boolean; updated_at: Date }>(
+    'SELECT is_active, updated_at FROM ai_configs WHERE tenant_id = $1 LIMIT 1',
+    [tenantId],
+  );
+  return rows[0] ?? null;
+}
+
 /** Tenants created before onboarding seeded ai_configs still need a row. */
 export async function ensureAIConfigForTenant(tenantId: string): Promise<AIConfig> {
   const existing = await findAIConfigByTenant(tenantId);

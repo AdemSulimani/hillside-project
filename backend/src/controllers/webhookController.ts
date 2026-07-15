@@ -4,6 +4,7 @@ import { sendError } from '../utils/response';
 import { webhookQueue } from '../jobs/queues';
 import { redisConnection } from '../jobs/redisConnection';
 import { findChannelByTypeAndExternalId, updateChannel, type ChannelType } from '../db/models/channel';
+import { deriveDedupeKey, shouldAcceptWebhookDelivery } from '../services/webhookDelivery';
 
 const allowedTypes: ChannelType[] = ['facebook', 'instagram', 'whatsapp'];
 
@@ -35,7 +36,18 @@ function isWebhookDebug(): boolean {
   return v === '1' || v === 'true' || v === 'yes';
 }
 
-const WEBHOOK_TS_MAX_SKEW_MS = 300_000;
+/**
+ * P2-4 Part 2 (RC-11): when true, drop the wall-clock freshness gate and rely on the layers that
+ * actually distinguish a replay from a late delivery — HMAC (verified above this, unchanged), the
+ * `webhook_seen` claim keyed per-message, and the durable DB dedupe in processInboundMessage.
+ *
+ * Requires its prerequisites, which ship alongside: the per-message dedupe key (`deriveDedupeKey`),
+ * the `applyMessageEdit` monotonicity guard, and the message-scoped pending-job removal. Without
+ * those, removing the 403 would open a durable content-rewrite + AI-turn-cancellation primitive.
+ * Defaults OFF: flag-off keeps the legacy skew gate and legacy key byte-for-byte.
+ */
+const WEBHOOK_DEDUPE_REPLAY =
+  (process.env.WEBHOOK_DEDUPE_REPLAY ?? 'false').trim().toLowerCase() === 'true';
 
 /**
  * P1-1 (RC-21): when true, the webhook ACKs 200 only AFTER `webhookQueue.add` has committed the
@@ -242,6 +254,12 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
       ? (req.body as Record<string, unknown>)
       : {};
 
+  // P2-4 Part 2 (RC-06): stamp true receipt time at the earliest point, for the same reason and in
+  // the same spirit as traceId. The snapshot itself is captured downstream (processInboundMessage
+  // is where the conversation row first exists and where the deliberate 8s deferral is applied);
+  // carrying this makes the gap between the two a measured number rather than an assumption.
+  const receivedAtMs = Date.now();
+
   const enqueueInboundPayload = async (): Promise<void> => {
     // Generate a correlation ID here — at the earliest point in the pipeline —
     // so it can be forwarded through every downstream job and log line. A single
@@ -252,6 +270,7 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
         channelType: channelTypeParam,
         payload: parsedPayload,
         traceId,
+        receivedAtMs,
       });
     } catch (err) {
       console.error('[webhook] failed to enqueue inbound payload', { err, traceId });
@@ -313,14 +332,26 @@ export async function ingestWebhook(req: Request, res: Response): Promise<void> 
     }
   }
 
-  const payloadTsMs = extractWebhookPayloadTimestampMs(parsedPayload);
-  const eventEpochMs = payloadTsMs ?? Date.now();
-  if (Math.abs(Date.now() - eventEpochMs) > WEBHOOK_TS_MAX_SKEW_MS) {
+  // P2-4 Part 2 (RC-11): with WEBHOOK_DEDUPE_REPLAY on, accept late-but-valid deliveries and let
+  // the dedupe key + the durable DB dedupe distinguish a replay from a late delivery — which is
+  // the only thing that actually can. The skew gate could not: a payload with NO timestamp scored
+  // |now-now|=0 and always passed however old, while a payload WITH an old timestamp was 403'd
+  // forever (Meta redelivers the same stale timestamp), silently dropping valid customer messages.
+  // It also 403s Meta's retry of a delivery WE asked to be retried via WEBHOOK_ACK_AFTER_ENQUEUE's
+  // 500, defeating that RC-21 recovery. Signature verification above is unaffected and still first.
+  const delivery = shouldAcceptWebhookDelivery({
+    payloadTsMs: extractWebhookPayloadTimestampMs(parsedPayload),
+    nowMs: Date.now(),
+    dedupeReplayEnabled: WEBHOOK_DEDUPE_REPLAY,
+  });
+  if (!delivery.accept) {
     res.status(403).json({ error: 'Webhook timestamp out of acceptable range' });
     return;
   }
 
-  const messageId = extractWebhookMessageIdForDedupe(parsedPayload, rawBody);
+  const messageId = WEBHOOK_DEDUPE_REPLAY
+    ? deriveDedupeKey(parsedPayload, rawBody)
+    : extractWebhookMessageIdForDedupe(parsedPayload, rawBody);
   const seenKey = `webhook_seen:${messageId}`;
   const dedupeSet = await redisConnection.set(seenKey, '1', 'EX', 86400, 'NX');
   if (dedupeSet !== 'OK') {
