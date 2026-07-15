@@ -17,6 +17,7 @@
  * `classifierConfidenceContract.ts` / `groundingGate.ts`.
  */
 import type { OrderStage } from '../db/models/conversation';
+import { GHEG_LEXICONS, GHEG_ORDER_CONSENT_EXTRA_PATTERNS } from './ghegLexicons';
 import { includesAnyKeyword } from './usageSuitabilityHelpers';
 
 export type { OrderStage };
@@ -76,7 +77,7 @@ export function detectNewOrderSignalLexical(message: string): boolean {
  * asymmetry cannot arise. The FSM honors it ONLY in `awaiting_confirmation` (the `po`-in-a-complaint
  * guard), so a stray affirmation in open conversation can never create an order.
  */
-export function detectOrderConsentLexical(text: string): boolean {
+export function detectOrderConsentLexical(text: string, ghegEnabled: boolean = GHEG_LEXICONS): boolean {
   const normalized = normalizeLexical(text ?? '');
   if (!normalized) return false;
   return (
@@ -89,7 +90,11 @@ export function detectOrderConsentLexical(text: string): boolean {
     /(can|could|may|i want to|i'd like to|i would like to|wish to|how (do|can) i).*(order|porosi)/.test(normalized) ||
     /(a mund|mund ta|a mund ta).*(porosi|order)/.test(normalized) ||
     /(want|dua|deshiroj).*(order|porosi)/.test(normalized) ||
-    /(order|porosi).*(this|kete|product|produkt|it|ate)/.test(normalized)
+    /(order|porosi).*(this|kete|product|produkt|it|ate)/.test(normalized) ||
+    // P2-5 (RC-25): Gheg consent forms. Safe to widen here and ONLY here — the FSM honors
+    // this lexicon exclusively in `awaiting_confirmation`. The legacy
+    // `looksLikeOrderAffirmation` is NOT stage-gated and is deliberately left untouched.
+    (ghegEnabled && GHEG_ORDER_CONSENT_EXTRA_PATTERNS.some((re) => re.test(normalized)))
   );
 }
 

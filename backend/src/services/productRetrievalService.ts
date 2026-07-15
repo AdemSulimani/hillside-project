@@ -3,6 +3,12 @@ import {
   findVariantSiblingProducts,
   type Product,
 } from '../db/models/product';
+import { DIALECT_NORMALIZATION, extractDialectKeywords } from './dialectNormalization';
+import {
+  GHEG_ATTRIBUTE_FOLLOW_UP_EXTRA_PATTERNS,
+  GHEG_OTHER_OPTIONS_EXTRA_PATTERNS,
+  withGhegPatterns,
+} from './ghegLexicons';
 
 export interface AttributeQueryIntentHint {
   is_attribute_question?: boolean;
@@ -77,11 +83,20 @@ function normalizeMessageText(message: string): string {
     .trim();
 }
 
+/**
+ * P2-5 (RC-25): the Gheg extras are concatenated, never substituted — flag-off resolves to
+ * the legacy array itself, so behaviour is byte-identical.
+ */
+const ATTRIBUTE_FOLLOW_UP_PATTERNS_EFFECTIVE = withGhegPatterns(
+  ATTRIBUTE_FOLLOW_UP_PATTERNS,
+  GHEG_ATTRIBUTE_FOLLOW_UP_EXTRA_PATTERNS,
+);
+
 /** Whether the customer is asking about an attribute across a product group (e.g. "What flavors?"). */
 export function isCategoryAttributeFollowUp(message: string, maxLength = 250): boolean {
   const t = normalizeMessageText(message);
   if (!t || t.length > maxLength) return false;
-  return ATTRIBUTE_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
+  return ATTRIBUTE_FOLLOW_UP_PATTERNS_EFFECTIVE.some((re) => re.test(t));
 }
 
 export function isContextOnlyFollowUp(message: string): boolean {
@@ -133,7 +148,7 @@ function isNaturalLanguageAttributeFollowUp(message: string): boolean {
  * itself. Without this, searching "a keni tjera a veq qita" returns irrelevant
  * products and causes the AI to lose the original category context.
  */
-const OTHER_OPTIONS_FOLLOW_UP_PATTERNS: RegExp[] = [
+export const OTHER_OPTIONS_FOLLOW_UP_PATTERNS: RegExp[] = [
   // Albanian plural "tjera" / "tjetra" (plural of "tjetër" = others)
   // "a keni tjera", "keni tjera", "a ka tjera" — do you have others / are there others
   /\b(a\s+keni|keni|a\s+ka|ka)\s+(tjera|tjetra)\b/i,
@@ -156,13 +171,28 @@ const OTHER_OPTIONS_FOLLOW_UP_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * P2-5 (RC-25): the Gheg extras are concatenated, never substituted — flag-off resolves to
+ * the legacy array itself, so behaviour is byte-identical. Flag-on adds the EV-010 forms
+ * ('ma shum', 'qito'/'aito', bare deictics, clitic 'a e keni').
+ */
+const OTHER_OPTIONS_FOLLOW_UP_PATTERNS_EFFECTIVE = withGhegPatterns(
+  OTHER_OPTIONS_FOLLOW_UP_PATTERNS,
+  GHEG_OTHER_OPTIONS_EXTRA_PATTERNS,
+);
+
+/**
  * Whether the message is asking for more / other / different products beyond what was
  * already shown. Used in anchor extraction to skip these messages so the prior
  * substantive product query — not the follow-up itself — is used as the search anchor.
  *
- * Exported so tests can verify coverage for newly-added dialect patterns.
+ * Exported so tests can verify coverage for newly-added dialect patterns. `patterns` is an
+ * explicit parameter (defaulting to the flag-resolved list) so the Gheg-on composition is
+ * testable without toggling a module-scope flag — see `ghegLexicons.withGhegPatterns`.
  */
-export function isOtherOptionsFollowUp(message: string): boolean {
+export function isOtherOptionsFollowUp(
+  message: string,
+  patterns: RegExp[] = OTHER_OPTIONS_FOLLOW_UP_PATTERNS_EFFECTIVE,
+): boolean {
   const t = message
     .trim()
     .toLowerCase()
@@ -172,10 +202,16 @@ export function isOtherOptionsFollowUp(message: string): boolean {
     .replace(/\s+/g, ' ')
     .trim();
   if (!t || t.length > 300) return false;
-  return OTHER_OPTIONS_FOLLOW_UP_PATTERNS.some((re) => re.test(t));
+  return patterns.some((re) => re.test(t));
 }
 
 function extractKeywords(text: string): string[] {
+  // P2-5 (RC-25): the second, divergent copy of the keyword extractor. It had drifted from
+  // aiService's — missing the whole Albanian tail ('mund', 'nuk', 'shume', 'tani', …) while
+  // adding 'produkt'/'produkte' that aiService lacks — so the two disagreed about what counts
+  // as a content word. Under the flag both resolve to the single unified list.
+  if (DIALECT_NORMALIZATION) return extractDialectKeywords(text);
+
   const stopWords = new Set([
     'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'it', 'they',
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',

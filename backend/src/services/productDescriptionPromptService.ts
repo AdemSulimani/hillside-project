@@ -1,3 +1,6 @@
+import { GHEG_RECOMMENDATION_EXTRA_PATTERNS, withGhegPatterns } from './ghegLexicons';
+import { PROMPT_ALLOWLIST_BUDGET } from './promptAssemblyService';
+
 /** Max characters for brief catalog description lines (~1–2 lines in chat). */
 export const CATALOG_DESCRIPTION_BRIEF_MAX_CHARS = 200;
 
@@ -134,6 +137,18 @@ const RECOMMENDATION_COMPARISON_PATTERNS: RegExp[] = [
   /\b(krahaso\s+[cq]mimet?|krahasim\s+[cq]mimesh?)\b/i,
 ];
 
+/**
+ * P2-5 (RC-25): the Gheg extras are concatenated, never substituted — flag-off resolves to
+ * the legacy array itself, so behaviour is byte-identical. Flag-on closes this list's one
+ * dialect gap: the copula. The comment at the `(me|ma)` patterns above claims
+ * "cila osht ma e lira" is detected, but the "which is more ..." frame requires the
+ * literal Tosk 'eshte', so Gheg 'osht'/'asht' reach it and miss.
+ */
+const RECOMMENDATION_COMPARISON_PATTERNS_EFFECTIVE = withGhegPatterns(
+  RECOMMENDATION_COMPARISON_PATTERNS,
+  GHEG_RECOMMENDATION_EXTRA_PATTERNS,
+);
+
 function normalizeForDescriptionIntent(message: string): string {
   return message
     .trim()
@@ -165,7 +180,7 @@ function normalizeForRecommendationIntent(message: string): string {
 export function isProductRecommendationOrComparisonQuestion(message: string): boolean {
   const t = normalizeForRecommendationIntent(message);
   if (!t || t.length > 300) return false;
-  return RECOMMENDATION_COMPARISON_PATTERNS.some((re) => re.test(t));
+  return RECOMMENDATION_COMPARISON_PATTERNS_EFFECTIVE.some((re) => re.test(t));
 }
 
 /** Customer wants product facts from the description, not a recommendation list. */
@@ -191,9 +206,24 @@ export function isProductDescriptionQuestion(message: string): boolean {
  * `guidelines.messaging_style` block. Kept short and example-driven because the
  * model follows concrete examples far more reliably than abstract instructions.
  */
+/**
+ * P2-5 (RC-26): the prompt carried THREE competing "HIGHEST PRIORITY" claims — this append, the
+ * restrictions footer's docstring, and `guidelines.messaging_style`'s "Brevity (HIGHEST
+ * PRIORITY)" — so the model was told three different things were the single top rule. P2-5
+ * establishes one ladder and makes the text match the render order:
+ *
+ *   grounding contract > platform policy > operator rules > brevity > guidelines
+ *
+ * Brevity is demoted from "highest" to "high" and told what outranks it. The claim in
+ * `guidelines.messaging_style` is block content and needs a migration/admin edit — deferred.
+ */
+const SHORTEST_ANSWER_PRIORITY_CLAUSE = PROMPT_ALLOWLIST_BUDGET
+  ? 'HIGH PRIORITY — this overrides any tone or sales-strategy nudge toward longer replies, but the platform policy and operator business rules at the end of this prompt override it'
+  : 'HIGHEST PRIORITY — this overrides any tone or sales-strategy nudge toward longer replies';
+
 export const SHORTEST_ANSWER_APPEND = `
 
-Answer length (HIGHEST PRIORITY — this overrides any tone or sales-strategy nudge toward longer replies):
+Answer length (${SHORTEST_ANSWER_PRIORITY_CLAUSE}):
 - Give the SHORTEST reply that fully and correctly answers the customer's current message. Brevity is the default; every extra word must earn its place.
 - A one-word or single-line answer is correct and preferred when it fully answers — it does not need to be a complete sentence. Examples:
   - "Do you have this product?" -> "Yes."
