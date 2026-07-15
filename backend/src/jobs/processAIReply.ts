@@ -48,6 +48,13 @@ import {
   enqueueLedgerViaOutbox,
   writeLedgerBestEffort,
 } from './aiDecisionLedgerWriter';
+import {
+  compareSnapshotToLive,
+  runWithReceiptSnapshot,
+  type LiveGateState,
+} from '../services/receiptSnapshot';
+import { aiConfigVersion } from '../services/aiConfigCache';
+import type { AIReplyJobData } from './jobTypes';
 import { insertOutboxTx } from '../db/models/outbox';
 import { deriveReplyIdempotencyKey, type ReplySlot } from '../services/replyIdempotency';
 import {
@@ -177,14 +184,10 @@ import { logEvent } from '../services/analyticsService';
 import { getHumanHoldMinutes } from '../services/conversationService';
 import { aiQueue } from './queues';
 
-export interface AIReplyJobData {
-  tenantId: string;
-  channelId: string;
-  conversationId: string;
-  messageExternalId: string;
-  /** Correlation ID from the originating webhook — see InboundWebhookJobData.traceId. */
-  traceId?: string;
-}
+// P2-4 Part 2: the ai.reply payload contract moved to `jobTypes` (alongside InboundWebhookJobData)
+// so the producers can import it without pulling this 4700-line module in at runtime. Re-exported
+// here because aiQueue/outboxRelay/workers already import it from this path.
+export type { AIReplyJobData } from './jobTypes';
 
 function normalizeLooseText(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
@@ -1417,6 +1420,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // any signature. `correlationId` is the per-message key (burst-merge collapses `traceId`), so
   // grep-by-correlationId reconstructs one reply's whole lifecycle across generateReply + the
   // classifiers. Both scopes only nest the existing single call — no control-flow change.
+  //
+  // P2-4 Part 2 (RC-17): a third scope, same rationale — it carries the receipt snapshot down to
+  // `loadAIConfig` (six frames below) as a cache staleness floor, without a `generateReply`
+  // signature change. Undefined snapshot → every consumer behaves exactly as before.
   return runWithOpenAICallTracking(() =>
     runWithLogContext(
       {
@@ -1426,7 +1433,7 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         conversationId: data.conversationId,
         component: 'processAIReply',
       },
-      () => processAIReplyInner(data),
+      () => runWithReceiptSnapshot(data.receiptSnapshot, () => processAIReplyInner(data)),
     ),
   );
 }
@@ -1444,6 +1451,49 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     decisionEvents.push(event);
   };
   const ledgerCorrelationId = data.messageExternalId;
+
+  /**
+   * P2-4 Part 2 (RC-06): leave an artifact when this job DROPS a received message.
+   *
+   * Every gate below is `console.info` + bare `return`, and the file's first ledger write is ~500
+   * lines further down — so a dropped message produced no queryable record at all. That is RC-06's
+   * literal complaint ("no artifact that a received message was discarded"), and it is the half the
+   * receipt snapshot exists to close: the gates keep reading LIVE state (see
+   * services/receiptSnapshot.ts for why snapshot-governance is unsafe), and this records what the
+   * state was at receipt, what it was at evaluation, and whether the two disagree.
+   *
+   * A `diverged` entry means the outcome turned on a mid-window toggle rather than on content —
+   * exactly the identical-messages-diverge signal RC-06 describes and nothing could previously see.
+   *
+   * Per-gate reply slot: `deriveReplyIdempotencyKey` is slot-keyed and the insert is ON CONFLICT DO
+   * NOTHING, so a single `'none'` slot would let the first drop of an inbound mask every later one
+   * (a job re-enqueued by the fairness/lock backoff can legitimately drop at a different gate).
+   * Fire-and-forget: a telemetry write must never affect the drop itself.
+   */
+  const recordGateDrop = (
+    gate: string,
+    live: Partial<LiveGateState>,
+    // 'dropped' — the message is discarded, permanently. 'deferred' — rescheduled, will still be
+    // answered. Distinguishing them matters: a deferral is not a lost message, and conflating the
+    // two would make the RC-06 drop-rate metric read high for turns that were merely delayed.
+    outcome: 'dropped' | 'deferred' = 'dropped',
+  ): void => {
+    const comparison = compareSnapshotToLive(data.receiptSnapshot, live, Date.now());
+    void writeLedgerBestEffort(
+      buildLedgerRecord({
+        tenantId,
+        conversationId,
+        correlationId: ledgerCorrelationId,
+        traceId,
+        replySlot: `none:gate:${gate}`,
+        decisionKind: `no_reply:${gate}`,
+        messageId: null,
+        decisionEvents,
+        guardVerdicts: { gate, outcome },
+        receiptSnapshot: comparison,
+      }),
+    );
+  };
 
   // ---- Per-tenant fairness ------------------------------------------------
   const tenantActiveKey = `ai_active_jobs:${tenantId}`;
@@ -1610,6 +1660,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       }
     }
     console.warn('[ai.reply] AI rate limit exceeded for conversation', { conversationId, tenantId });
+    recordGateDrop('rate_limit', {});
     return;
   }
 
@@ -1617,6 +1668,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   const aiConfig = await findAIConfigByTenant(tenantId);
   if (!aiConfig?.is_active) {
     console.info('[ai.reply] AI globally disabled for tenant, skipping', { tenantId });
+    recordGateDrop('ai_globally_disabled', {
+      aiActive: aiConfig?.is_active ?? false,
+      aiConfigVersion: aiConfigVersion(aiConfig?.updated_at ?? null),
+    });
     return;
   }
 
@@ -1624,11 +1679,17 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   const channel = await findChannelById(channelId, tenantId);
   if (!channel) {
     console.warn('[ai.reply] Channel not found, skipping', { channelId, tenantId });
+    recordGateDrop('channel_not_found', { aiActive: aiConfig.is_active });
     return;
   }
 
   if (!channel.ai_enabled) {
     console.info('[ai.reply] AI disabled for channel, skipping', { channelId });
+    recordGateDrop('ai_disabled_for_channel', {
+      aiActive: aiConfig.is_active,
+      aiConfigVersion: aiConfigVersion(aiConfig.updated_at),
+      channelAiEnabled: channel.ai_enabled,
+    });
     return;
   }
 
@@ -1636,8 +1697,23 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   const conversation = await findConversationByIdForTenant(conversationId, tenantId);
   if (!conversation) {
     console.warn('[ai.reply] Conversation not found, skipping', { conversationId });
+    recordGateDrop('conversation_not_found', {
+      aiActive: aiConfig.is_active,
+      channelAiEnabled: channel.ai_enabled,
+    });
     return;
   }
+
+  /** The live gate state this job evaluated — the RC-06 comparison target for the drops below. */
+  const liveGateState = (): Partial<LiveGateState> => ({
+    aiActive: aiConfig.is_active,
+    aiConfigVersion: aiConfigVersion(aiConfig.updated_at),
+    channelAiEnabled: channel.ai_enabled,
+    conversationAiPaused: conversation.ai_paused,
+    humanOverrideUntil: conversation.human_override_until
+      ? new Date(conversation.human_override_until).toISOString()
+      : null,
+  });
 
   if (conversation.ai_paused) {
     // P0-5 (RC-14) part 3: a rate_limit_exceeded pause auto-expires once the delivered-only
@@ -1682,6 +1758,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     }
     if (!autoResumed) {
       console.info('[ai.reply] AI paused for conversation, skipping', { conversationId });
+      // Note the gate above is deliberately still the LIVE row: the auto-resume block is nested
+      // inside it and holds this job's only pause-clearing write, so a snapshot-governed gate would
+      // skip the resume and strand the conversation — the RC-14 dead-end P0-5 closed.
+      recordGateDrop('ai_paused', liveGateState());
       return;
     }
   }
@@ -1693,6 +1773,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     });
     // The hold auto-releases shortly; make sure the customer's latest message still gets a
     // reply afterwards instead of leaving the conversation silent.
+    // The hold is the ONE gate with a genuine backstop — it is only ever written atomically
+    // alongside a human message — and it DEFERS rather than drops, so it stays live and keeps the
+    // reschedule. Recorded as 'deferred': the turn is delayed, not lost.
+    recordGateDrop('human_override_active', liveGateState(), 'deferred');
     await rescheduleReplyAfterHumanHold(data, new Date(conversation.human_override_until));
     return;
   }
@@ -4615,6 +4699,28 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       reason: mainSendPrecheck.reason,
       ...('logPayload' in mainSendPrecheck ? mainSendPrecheck.logPayload : {}),
     });
+    // P2-4 Part 2 (RC-17): a reply that was GENERATED (tokens already spent, every guard already
+    // run) and then suppressed by the pre-send re-validation used to leave zero ledger rows — the
+    // one decision the rest of P2-4 exists to make observable. Record it.
+    //
+    // Distinct slot: `deriveReplyIdempotencyKey` is slot-keyed and the insert is
+    // ON CONFLICT (idempotency_key) DO NOTHING, so reusing 'main' would let this suppressed row
+    // permanently mask the delivered row a later retry writes.
+    void writeLedgerBestEffort(
+      buildLedgerRecord({
+        tenantId,
+        conversationId,
+        correlationId: ledgerCorrelationId,
+        traceId,
+        replySlot: 'main:suppressed',
+        decisionKind: `suppressed:${mainSendPrecheck.reason}`,
+        messageId: null,
+        telemetry: replyTelemetry,
+        decisionEvents,
+        guardVerdicts: ledgerGuardVerdicts,
+        factsUsed,
+      }),
+    );
     return;
   }
   if (alreadySent) {
@@ -4676,6 +4782,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         telemetry: replyTelemetry,
         decisionEvents,
         guardVerdicts: ledgerGuardVerdicts,
+        // P2-4 Part 2 (RC-01/RC-02): mirror the staged path — without this the LEGACY path
+        // (the default, AI_REPLY_STAGE_BEFORE_SEND=false) writes facts_used NULL on every
+        // delivered reply, so a grounding-gate strip cannot be re-judged from the ledger.
+        factsUsed,
       }),
     );
   }

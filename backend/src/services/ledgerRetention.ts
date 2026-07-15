@@ -1,0 +1,77 @@
+/**
+ * P2-4 Part 2: retention sweep for `ai_decision_ledger`.
+ *
+ * P2-4's own Edge-cases line names "Retention/sampling + GDPR", and Part 2 is the last part — so
+ * this is where it lands or it never does. The ledger writes a row per reply carrying a size-capped
+ * preview derived from a 26–33K-char system prompt (i.e. customer conversation text, redacted but
+ * still customer-derived), and had no prune path of any kind: `DELETE FROM ai_decision_ledger`
+ * appeared nowhere in the codebase. For an EU-registered company that is a retention exposure, not
+ * merely unbounded growth.
+ *
+ * Deliberately its OWN scheduler rather than a line in `deadLetterMonitor.tick`: that monitor is
+ * gated behind DLQ_METRICS_ENABLED, and retention must not silently depend on whether someone
+ * enabled DLQ metrics. Same shape, independent lifecycle.
+ *
+ * Prunes in bounded batches and re-ticks while a sweep is still deleting, so the first run over a
+ * large backlog drains steadily instead of in one long transaction. Never throws — a retention blip
+ * must not affect request handling.
+ */
+import { pruneLedger } from '../db/models/aiDecisionLedger';
+
+const RETENTION_DAYS = (() => {
+  const n = parseInt(process.env.LEDGER_RETENTION_DAYS ?? '90', 10);
+  return Number.isFinite(n) && n > 0 ? n : 90;
+})();
+
+const SWEEP_INTERVAL_MS = (() => {
+  const n = parseInt(process.env.LEDGER_RETENTION_INTERVAL_MS ?? '3600000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 3_600_000;
+})();
+
+/** Batch size per DELETE. Bounded so a backlog sweep never holds a long transaction. */
+const BATCH_SIZE = 5_000;
+
+/** Max batches per tick, so a huge backlog cannot monopolise the pool in one pass. */
+const MAX_BATCHES_PER_TICK = 10;
+
+export async function runLedgerRetentionSweep(): Promise<number> {
+  let total = 0;
+  try {
+    for (let i = 0; i < MAX_BATCHES_PER_TICK; i++) {
+      const deleted = await pruneLedger(RETENTION_DAYS, BATCH_SIZE);
+      total += deleted;
+      // A short batch means the backlog is drained; wait for the next tick.
+      if (deleted < BATCH_SIZE) break;
+    }
+    if (total > 0) {
+      console.info('[ledger-retention] pruned ai_decision_ledger rows', {
+        pruned: total,
+        retentionDays: RETENTION_DAYS,
+      });
+    }
+  } catch (err) {
+    console.warn('[ledger-retention] sweep failed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return total;
+}
+
+let sweepInterval: ReturnType<typeof setInterval> | null = null;
+
+export function startLedgerRetention(): void {
+  if (sweepInterval) return;
+  void runLedgerRetentionSweep();
+  sweepInterval = setInterval(() => void runLedgerRetentionSweep(), SWEEP_INTERVAL_MS);
+  console.info('[ledger-retention] Started', {
+    retentionDays: RETENTION_DAYS,
+    intervalMs: SWEEP_INTERVAL_MS,
+  });
+}
+
+export function stopLedgerRetention(): void {
+  if (sweepInterval) {
+    clearInterval(sweepInterval);
+    sweepInterval = null;
+  }
+}

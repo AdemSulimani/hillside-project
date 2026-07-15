@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS ai_decision_ledger (
   -- The guard outcomes carried on the staging row (knowledgeGap/price/name/uncertain escalated).
   guard_verdicts   JSONB NOT NULL DEFAULT '{}'::jsonb,
   -- The generation's declared facts_used (Phase 12 contract) so a guard strip can be re-judged
-  -- against the catalog. NULL until the facts_used contract lands (P2-1).
+  -- against the catalog. Populated since P2-1 landed the contract; NULL when FACTS_USED_CONTRACT
+  -- is off, on vision/custom-model replies (which never run the contract), and on the no-LLM
+  -- early-return paths.
   facts_used       JSONB,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );

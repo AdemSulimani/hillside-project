@@ -8,6 +8,7 @@ import {
 } from '../db/models/channel';
 import { findContactByExternalIdForTenantChannel, upsertContact } from '../db/models/contact';
 import {
+  findConversationByIdForTenant,
   upsertConversation,
   touchConversationLastMessageAt,
   markConversationHumanReplied,
@@ -56,7 +57,10 @@ import { uploadFile } from '../services/backblazeService';
 import { aiQueue } from './queues';
 import { logEvent } from '../services/analyticsService';
 import { reportChannelBindingConflict } from '../services/channelIsolationService';
-import type { InboundWebhookJobData } from './jobTypes';
+import { findAIConfigGateStateByTenant } from '../db/models/aiConfig';
+import { aiConfigVersion } from '../services/aiConfigCache';
+import { buildReceiptSnapshot, type ReceiptSnapshot } from '../services/receiptSnapshot';
+import { buildAIReplyJobData, type InboundWebhookJobData } from './jobTypes';
 
 export type { InboundWebhookJobData } from './jobTypes';
 
@@ -127,6 +131,72 @@ const OUTBOX_DISPATCH_ENABLED =
 const MESSAGES_SCOPED_UNIQUE_READ =
   (process.env.MESSAGES_SCOPED_UNIQUE_READ ?? 'false').trim().toLowerCase() === 'true';
 
+/**
+ * P2-4 Part 2 (RC-06): capture the enablement/config state at RECEIPT into the ai.reply payload.
+ *
+ * This function — not the webhook controller — is the receipt boundary that matters, because the
+ * DELIBERATE deferral is added HERE (`AI_REPLY_DELAY_MS`, default 8s, on both enqueue paths). The
+ * webhookQueue hop before it carries no delay. RC-06's mechanism is literally "received → queued
+ * with 8s delay (+fairness/lock/hold reschedules)", all of which is downstream of this point.
+ * The controller also cannot capture: `upsertConversation` below is what CREATES the conversation
+ * row, so at controller time `ai_paused` does not yet exist to read.
+ *
+ * RECORD-ONLY (see services/receiptSnapshot.ts for why governing the gates is unsafe). Defaults
+ * OFF: flag-off skips the capture read entirely, so it costs zero.
+ */
+const RECEIPT_TIME_SNAPSHOT =
+  (process.env.RECEIPT_TIME_SNAPSHOT ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-4 Part 2 (RC-06): the impure half of the receipt-time snapshot — load what the pure
+ * `buildReceiptSnapshot` needs. Returns undefined when the flag is off (zero cost) or when any
+ * read fails: an absent snapshot is a first-class case that every consumer treats as "fall back to
+ * live, record nothing", so capture must NEVER be able to fail an inbound message.
+ *
+ * Cost is honest, not free: `channel.ai_enabled` / `conversation.ai_paused` / `human_override_until`
+ * are already in memory on the hot path, so it is +1 narrow SELECT (the ai_config gate state). The
+ * two cold paths (edit, RC-21 recovery) hold only a conversation id, so they pay +2 — acceptable
+ * given both are rare/recovery-only.
+ */
+async function captureReceiptSnapshot(args: {
+  tenantId: string;
+  channelAiEnabled: boolean;
+  matchCount: number | null;
+  receivedAtMs: number | null;
+  conversation?: { ai_paused: boolean; human_override_until?: Date | null };
+  conversationId?: string;
+}): Promise<ReceiptSnapshot | undefined> {
+  if (!RECEIPT_TIME_SNAPSHOT) return undefined;
+  try {
+    const conversation =
+      args.conversation ??
+      (args.conversationId
+        ? await findConversationByIdForTenant(args.conversationId, args.tenantId)
+        : null);
+    if (!conversation) return undefined;
+
+    const gate = await findAIConfigGateStateByTenant(args.tenantId);
+    return buildReceiptSnapshot({
+      nowMs: Date.now(),
+      receivedAtMs: args.receivedAtMs,
+      // No ai_config row means the tenant has no AI configured — the gate reads falsy either way.
+      aiActive: gate?.is_active ?? false,
+      aiConfigVersion: aiConfigVersion(gate?.updated_at ?? null),
+      channelAiEnabled: args.channelAiEnabled,
+      conversationAiPaused: conversation.ai_paused,
+      humanOverrideUntil: conversation.human_override_until ?? null,
+      matchCount: args.matchCount,
+    });
+  } catch (err) {
+    // Telemetry must never break delivery. Absent snapshot → the job runs on live reads as always.
+    console.warn('[inbound] receipt snapshot capture failed (ignored)', {
+      tenantId: args.tenantId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
 const CONTENT_TYPE_TO_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
@@ -165,7 +235,10 @@ function normalize(channelType: ChannelType, payload: Record<string, unknown>): 
  * an outbound (AI/human) reply after it, we re-enqueue an AI job so the assistant can correct
  * itself with the updated context.
  */
-async function processInboundEdit(edit: InboundEditDTO): Promise<void> {
+async function processInboundEdit(
+  edit: InboundEditDTO,
+  jobContext: { traceId?: string; receivedAtMs?: number } = {},
+): Promise<void> {
   const channel = await findChannelByTypeAndExternalId(edit.channelType, edit.channelExternalId);
   if (!channel) {
     console.warn('[inbound] Edit ignored — channel not found for edited message', {
@@ -247,20 +320,41 @@ async function processInboundEdit(edit: InboundEditDTO): Promise<void> {
 
   const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
   const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
+  // P2-4 Part 2 (RC-11 prerequisite): match the message too, not just the conversation. Matching on
+  // conversationId ALONE removes whatever ai.reply happens to be pending — including one belonging
+  // to a NEWER, unrelated turn — and replaces it with a job keyed to this older message. That is a
+  // turn-cancellation primitive reachable from a replayed edit body, and the skew gate we are
+  // removing was the only thing bounding it.
   const existingJob = pendingAiReplyJobs.find(
-    (job) => job.name === 'ai.reply' && job.data?.conversationId === existing.conversation_id,
+    (job) =>
+      job.name === 'ai.reply' &&
+      job.data?.conversationId === existing.conversation_id &&
+      job.data?.messageExternalId === existing.external_message_id,
   );
   if (existingJob) {
     await existingJob.remove();
   }
   await aiQueue.add(
     'ai.reply',
-    {
+    buildAIReplyJobData({
       tenantId: channel.tenant_id,
       channelId: channel.id,
       conversationId: existing.conversation_id,
       messageExternalId: existing.external_message_id,
-    },
+      // P2-4 Part 2: the edit path never carried the correlation id — a pre-existing drift the
+      // shared factory now makes structural rather than per-site discipline.
+      traceId: jobContext.traceId,
+      receiptSnapshot: await captureReceiptSnapshot({
+        tenantId: channel.tenant_id,
+        channelAiEnabled: channel.ai_enabled,
+        // Cold path: no conversation row in scope, so the snapshot pays a second read.
+        conversationId: existing.conversation_id,
+        // Genuinely unobservable here — findChannelByTypeAndExternalId collapses the count. null,
+        // not 1: this is the field that exists to reveal a dual binding, so guessing defeats it.
+        matchCount: null,
+        receivedAtMs: jobContext.receivedAtMs ?? null,
+      }),
+    }),
     {
       delay: Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000,
     },
@@ -527,7 +621,10 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   }
 
   if (event.kind === 'edit') {
-    await processInboundEdit(event);
+    await processInboundEdit(event, {
+      traceId: data.traceId,
+      receivedAtMs: data.receivedAtMs,
+    });
     return;
   }
   const normalized: InboundMessageDTO = event;
@@ -595,6 +692,18 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
         !(await existsOutboundAfter(existing.conversation_id, channel.tenant_id, existing.created_at)) &&
         !(await hasLiveAiReply(existing.conversation_id))
       ) {
+        // Capture BEFORE `pool.connect()`. The snapshot's reads take their own client from the
+        // same pool, so running them inside the transaction below would hold one client while
+        // waiting for another — with PG_POOL_MAX and WEBHOOK_WORKER_CONCURRENCY both defaulting
+        // to 10, enough concurrent recoveries would each hold a client and wait forever.
+        const recoverySnapshot = await captureReceiptSnapshot({
+          tenantId: channel.tenant_id,
+          channelAiEnabled: channel.ai_enabled,
+          // Cold path: recovery only, no conversation row in scope → +2 reads, acceptable.
+          conversationId: existing.conversation_id,
+          matchCount,
+          receivedAtMs: data.receivedAtMs ?? null,
+        });
         const client = await pool.connect();
         try {
           await client.query('BEGIN');
@@ -602,13 +711,16 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
             tenant_id: channel.tenant_id,
             conversation_id: existing.conversation_id,
             dedupe_key: aiReplyDedupeKey(existing.conversation_id, normalized.externalMessageId),
-            payload: {
+            // P2-4 Part 2: `payload` is Record<string, unknown>, so this literal is NOT type-checked
+            // against AIReplyJobData — the factory is what keeps it in contract.
+            payload: buildAIReplyJobData({
               tenantId: channel.tenant_id,
               channelId: channel.id,
               conversationId: existing.conversation_id,
               messageExternalId: normalized.externalMessageId,
-              traceId: (data as { traceId?: string }).traceId,
-            },
+              traceId: data.traceId,
+              receiptSnapshot: recoverySnapshot,
+            }) as unknown as Record<string, unknown>,
             available_at: new Date(),
           });
           await client.query('COMMIT');
@@ -743,6 +855,19 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
     contact_id: contact.id,
     channel_id: channel.id,
     status: 'open',
+  });
+
+  // P2-4 Part 2 (RC-06): capture HERE — the first point tenant + channel + conversation + config
+  // are all resolvable, and BEFORE the attachment download/re-upload below, which can burn seconds
+  // on media turns and would otherwise age the "receipt" state before it is even read.
+  // `channel.ai_enabled` and the conversation's pause/hold are already in memory (free); only the
+  // ai_config gate state costs a read, and only when the flag is on.
+  const receiptSnapshot = await captureReceiptSnapshot({
+    tenantId: channel.tenant_id,
+    channelAiEnabled: channel.ai_enabled,
+    conversation,
+    matchCount,
+    receivedAtMs: data.receivedAtMs ?? null,
   });
 
   let permanentAttachmentUrls = normalized.attachmentUrls;
@@ -1047,13 +1172,17 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
           tenant_id: channel.tenant_id,
           conversation_id: conversation.id,
           dedupe_key: aiReplyDedupeKey(conversation.id, normalized.externalMessageId),
-          payload: {
+          // P2-4 Part 2: `payload` is Record<string, unknown> and the relay re-hydrates it through
+          // an `unknown` cast, so neither end type-checks this. Once the outbox owns delivery this
+          // is the ONLY live producer — the factory is what keeps it in contract.
+          payload: buildAIReplyJobData({
             tenantId: channel.tenant_id,
             channelId: channel.id,
             conversationId: conversation.id,
             messageExternalId: normalized.externalMessageId,
-            traceId: (data as { traceId?: string }).traceId,
-          },
+            traceId: data.traceId,
+            receiptSnapshot,
+          }) as unknown as Record<string, unknown>,
           // Debounce: the intent becomes eligible to drain AI_REPLY_DELAY_MS after this inbound.
           available_at: new Date(Date.now() + delayMs),
         });
@@ -1134,14 +1263,15 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
       await existingJob.remove();
     }
 
-    await aiQueue.add('ai.reply', {
+    await aiQueue.add('ai.reply', buildAIReplyJobData({
       tenantId: channel.tenant_id,
       channelId: channel.id,
       conversationId: conversation.id,
       messageExternalId: normalized.externalMessageId,
       // Carry the originating webhook's traceId so processAIReply can log it.
-      traceId: (data as { traceId?: string }).traceId,
-    }, {
+      traceId: data.traceId,
+      receiptSnapshot,
+    }), {
       delay: Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000,
     });
   }

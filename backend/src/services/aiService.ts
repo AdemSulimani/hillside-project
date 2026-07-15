@@ -31,9 +31,11 @@ import {
   normalizeAiConfig,
   promptBlocksVersion,
   readVersionedCache,
+  readVersionedCacheWithVersion,
   versionedAiConfigKey,
   versionedPromptBlocksKey,
 } from './aiConfigCache';
+import { getReceiptSnapshot, isCachedConfigStale } from './receiptSnapshot';
 import { isCannedHoldingCopy } from './cannedReplyText';
 import { historyRoleFor, keepMessageInHistory } from './historyTranscript';
 import {
@@ -350,8 +352,20 @@ async function loadAIConfig(tenantId: string) {
   // feedback_count → updated_at bump).
   if (AI_CONFIG_VERSIONED_CACHE) {
     const versionedKey = versionedAiConfigKey(tenantId);
-    const hit = await readVersionedCache<AIConfig>(versionedKey);
-    if (hit) return normalizeAiConfig(hit);
+    const hit = await readVersionedCacheWithVersion<AIConfig>(versionedKey);
+    // P2-4 Part 2 (RC-17): the receipt-time staleness FLOOR. A cache hit is trusted on its TTL,
+    // which is what leaves the 900s per-worker drift window: worker A can serve a persona/model
+    // that was already superseded when this message arrived. If the cached version predates the
+    // config in force AT RECEIPT, treat the hit as a miss and read through.
+    //
+    // Safe in one direction only, by construction: the version is `updated_at` as epoch micros off
+    // a single DB clock and monotonic, so this can only force a FRESHER read, never pin a staler
+    // one. A version at-or-above the floor is always acceptable — config edited after receipt is
+    // fine to answer WITH; it is the GATE decision that must not move, and the gates are live.
+    // Ambient (no snapshot in scope, flag off, or an older job) → unchanged legacy behaviour.
+    if (hit && !isCachedConfigStale(hit.v, getReceiptSnapshot()?.aiConfigVersion ?? 0)) {
+      return normalizeAiConfig(hit.data);
+    }
 
     const config = await findAIConfigByTenant(tenantId);
     if (!config) return normalizeAiConfig(DEFAULT_AI_CONFIG);

@@ -12,11 +12,20 @@ import {
 import { initSocketServer } from './sockets';
 import { startRedisMemoryMonitor, stopRedisMemoryMonitor } from './services/redisMemoryMonitor';
 import { startDeadLetterMonitor, stopDeadLetterMonitor } from './services/deadLetterMonitor';
+import { startLedgerRetention, stopLedgerRetention } from './services/ledgerRetention';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
 /** P1-2 step 5: dead-letter growth monitor (off by default). */
 const DLQ_METRICS_ENABLED = (process.env.DLQ_METRICS_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-4 Part 2: ledger retention sweep. Tied to the ledger's OWN flag, not a metrics flag — if the
+ * ledger is recording, its rows must also expire. Off by default, exactly like the ledger itself,
+ * so this is inert until someone turns recording on (nothing to prune before then anyway).
+ */
+const AI_DECISION_LEDGER_ENABLED =
+  (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
 
 const httpServer = http.createServer(app);
 initSocketServer(httpServer);
@@ -26,6 +35,7 @@ httpServer.listen(PORT, () => {
   console.log(`[server] Listening on http://localhost:${PORT}`);
   startRedisMemoryMonitor();
   if (DLQ_METRICS_ENABLED) startDeadLetterMonitor();
+  if (AI_DECISION_LEDGER_ENABLED) startLedgerRetention();
 });
 
 // ---------------------------------------------------------------------------
@@ -52,6 +62,7 @@ async function shutdown(signal: string): Promise<void> {
 
   stopRedisMemoryMonitor();
   stopDeadLetterMonitor();
+  stopLedgerRetention();
 
   // Stop the HTTP server from accepting new connections. Existing requests
   // will finish, then the server closes. The deploy health check stops polling

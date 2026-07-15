@@ -137,8 +137,40 @@ export function validateRequiredEnv(): void {
     (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
   console.info(
     `[observability] STRUCTURED_LOGGING=${structuredLogging ? 'on (JSON, correlation-keyed)' : 'off (legacy console)'}; ` +
-      `AI_DECISION_LEDGER_ENABLED=${decisionLedger ? 'on' : 'off'}; ` +
+      `AI_DECISION_LEDGER_ENABLED=${
+        decisionLedger
+          ? `on (retention ${process.env.LEDGER_RETENTION_DAYS ?? '90'}d)`
+          : 'off (no rows written; retention sweep idle)'
+      }; ` +
       `REDACT_PII=${REDACT_PII ? 'on' : 'off'}`,
+  );
+
+  // P2-4 Part 2: surface the receipt-snapshot + dedupe-replay posture. Purely informational —
+  // never fatal.
+  const receiptSnapshot =
+    (process.env.RECEIPT_TIME_SNAPSHOT ?? 'false').trim().toLowerCase() === 'true';
+  const dedupeReplay =
+    (process.env.WEBHOOK_DEDUPE_REPLAY ?? 'false').trim().toLowerCase() === 'true';
+  const versionedCacheForSnapshot =
+    (process.env.AI_CONFIG_VERSIONED_CACHE ?? 'false').trim().toLowerCase() === 'true';
+  console.info(
+    `[receipt] RECEIPT_TIME_SNAPSHOT=${
+      receiptSnapshot
+        ? 'on (captured at receipt; gates stay LIVE — record-only)'
+        : 'off (no capture; gates live as always)'
+    }; WEBHOOK_DEDUPE_REPLAY=${
+      dedupeReplay
+        ? 'on (late deliveries accepted; replay = per-message key + DB dedupe)'
+        : 'off (legacy 300s skew 403)'
+    }; AI_REPLY_DELAY_MS=${process.env.AI_REPLY_DELAY_MS ?? '8000'}` +
+      // The RC-17 staleness floor is the snapshot's only GOVERNING use, and it can only act on the
+      // versioned cache — the legacy EX900 value carries no version to compare. Say so, rather than
+      // letting an operator believe RC-17 is covered when the floor is silently inert.
+      `${
+        receiptSnapshot && !versionedCacheForSnapshot
+          ? ' [RC-17 staleness floor INERT: needs AI_CONFIG_VERSIONED_CACHE=true]'
+          : ''
+      }`,
   );
 
   // P2-1: surface the grounding-gate posture at boot so operators know whether the deterministic

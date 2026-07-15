@@ -6,8 +6,11 @@ import { updateChannel } from '../db/models/channel';
 import { cryptoService } from '../services/cryptoService';
 import { webhookQueue } from '../jobs/queues';
 import { redisConnection } from '../jobs/redisConnection';
+import { shouldAcceptWebhookDelivery } from '../services/webhookDelivery';
 
-const WEBHOOK_TS_MAX_SKEW_MS = 300_000;
+/** P2-4 Part 2 (RC-11) — see webhookController's twin. Read per-file, one shared decision fn. */
+const WEBHOOK_DEDUPE_REPLAY =
+  (process.env.WEBHOOK_DEDUPE_REPLAY ?? 'false').trim().toLowerCase() === 'true';
 
 function isWebhookDebug(): boolean {
   const v = process.env.WEBHOOK_DEBUG?.trim().toLowerCase();
@@ -164,9 +167,15 @@ export async function ingestViberWebhook(req: Request, res: Response): Promise<v
     return;
   }
 
-  // Freshness check using Viber's top-level timestamp (milliseconds).
-  const eventTsMs = parseViberTimestampMs(parsedPayload) ?? Date.now();
-  if (Math.abs(Date.now() - eventTsMs) > WEBHOOK_TS_MAX_SKEW_MS) {
+  // P2-4 Part 2 (RC-11): see the twin in webhookController. Same `?? Date.now()` defect, same fix,
+  // via the shared decision fn so the two controllers cannot drift (the skew constant was already
+  // duplicated verbatim in both). The signature check above this is unaffected and still first.
+  const delivery = shouldAcceptWebhookDelivery({
+    payloadTsMs: parseViberTimestampMs(parsedPayload),
+    nowMs: Date.now(),
+    dedupeReplayEnabled: WEBHOOK_DEDUPE_REPLAY,
+  });
+  if (!delivery.accept) {
     res.status(403).json({ error: 'Webhook timestamp out of acceptable range' });
     return;
   }
@@ -183,6 +192,7 @@ export async function ingestViberWebhook(req: Request, res: Response): Promise<v
   res.sendStatus(200);
 
   const traceId = crypto.randomUUID();
+  const receivedAtMs = Date.now();
   try {
     // Attach the bot's external_id into the payload so the normalizer can resolve the channel
     // without an additional DB round-trip. Viber payloads don't include the bot's own id,
@@ -196,6 +206,8 @@ export async function ingestViberWebhook(req: Request, res: Response): Promise<v
       channelType: 'viber',
       payload: enrichedPayload,
       traceId,
+      // P2-4 Part 2 (RC-06): true receipt time — see the twin in webhookController.
+      receivedAtMs,
     });
 
     console.info('[viber-webhook] enqueued inbound message', {

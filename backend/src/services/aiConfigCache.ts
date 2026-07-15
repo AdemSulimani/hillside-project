@@ -104,11 +104,26 @@ export async function cacheSetIfNewer(
 
 /** Read a versioned key; returns the wrapped `data` on a hit, or null on miss / legacy-shape / error. */
 export async function readVersionedCache<T>(key: string): Promise<T | null> {
+  return (await readVersionedCacheWithVersion<T>(key))?.data ?? null;
+}
+
+/**
+ * P2-4 Part 2 (RC-17): the same read, but KEEPING the version.
+ *
+ * `readVersionedCache` validates `v` and then discards it, so a caller cannot ask "is this entry
+ * older than the config that was in force when the message arrived?". That question is the whole
+ * of the receipt snapshot's RC-17 use — see `isCachedConfigStale` in services/receiptSnapshot.ts.
+ */
+export async function readVersionedCacheWithVersion<T>(
+  key: string,
+): Promise<{ data: T; v: number } | null> {
   const raw = await redisConnection.get(key);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as VersionedPayload<T>;
-    if (parsed && typeof parsed.v === 'number' && 'data' in parsed) return parsed.data;
+    if (parsed && typeof parsed.v === 'number' && 'data' in parsed) {
+      return { data: parsed.data, v: parsed.v };
+    }
     return null;
   } catch {
     return null;

@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import pool from '../pool';
+import { isStaleMessageEdit } from '../../services/webhookDelivery';
 
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageType = 'text' | 'image' | 'audio' | 'video' | 'document';
@@ -547,6 +548,16 @@ export interface ApplyMessageEditInput {
  *
  * Idempotency: if the new content equals the current content AND no new attachments,
  * we skip the update so duplicate webhook deliveries don't pollute history.
+ *
+ * Ordering (P2-4 Part 2, RC-11 prerequisite): a STALE revision is rejected. Same-content was
+ * previously the ONLY idempotency here — the UPDATE was otherwise unconditional and compared
+ * neither `num_edit` nor `edited_at` against the stored row — so replaying an OLDER edit body
+ * rewound `content` to a previous revision, incremented `edit_count`, appended a bogus history
+ * entry, and emitted message_edited to the merchant's inbox. Reachable from one captured signed
+ * body, because the HMAC carries no timestamp; the wall-clock skew gate that WEBHOOK_DEDUPE_REPLAY
+ * removes was the only thing bounding it, and the edit path returns before both inbound dedupe
+ * blocks, so it has no other durable backstop. Unconditional — not flag-gated — because a stale
+ * edit is never legitimate regardless of how the delivery arrived.
  */
 export async function applyMessageEdit(
   input: ApplyMessageEditInput,
@@ -564,6 +575,18 @@ export async function applyMessageEdit(
       return null;
     }
     const mapped = mapMessageRow(row);
+
+    // Read under the FOR UPDATE above, so two concurrent deliveries of the same revision serialize
+    // and the second sees the first's increment. The predicate itself is pure and unit-tested.
+    if (
+      isStaleMessageEdit(
+        { numEdit: input.numEdit, editedAt: input.editedAt },
+        { editCount: mapped.edit_count, editedAt: mapped.edited_at },
+      )
+    ) {
+      await client.query('ROLLBACK');
+      return { message: mapped, changed: false };
+    }
 
     const currentContent = mapped.content ?? null;
     const currentAttachments = Array.isArray(mapped.attachment_urls) ? mapped.attachment_urls : [];
