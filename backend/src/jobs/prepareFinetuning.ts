@@ -13,7 +13,7 @@ import {
   type Message,
 } from '../db/models/message';
 import { finetuningQueue } from './queues';
-import { openai } from '../services/openaiClient';
+import { openai, OPENAI_FINETUNING_BASE_MODEL } from '../services/openaiClient';
 import { uploadFile } from '../services/backblazeService';
 
 export type PrepareFinetuningJobData = Record<string, never>;
@@ -194,9 +194,16 @@ export async function processPrepareFinetuning(): Promise<void> {
       file: await toFile(fileBuffer, filename, { type: 'application/jsonl' }),
       purpose: 'fine-tune',
     });
+    // P2-7 (M8/guard 5): resolve the base model through the single chain instead of hardcoding it.
+    //
+    // This site hardcoded `'gpt-4o'` while `startFinetuningJob` (checkFinetuningStatus.ts) used
+    // OPENAI_FINETUNING_BASE_MODEL — two fine-tuning entry points training on two different base
+    // models, with the env var silently ignored by THIS one, which is the path that actually runs
+    // on the nightly schedule. Setting OPENAI_FINETUNING_BASE_MODEL therefore appeared to work
+    // while changing nothing about the job that fires automatically.
     await openai.fineTuning.jobs.create({
       training_file: uploadedFile.id,
-      model: 'gpt-4o',
+      model: OPENAI_FINETUNING_BASE_MODEL,
     });
 
     const client = await pool.connect();

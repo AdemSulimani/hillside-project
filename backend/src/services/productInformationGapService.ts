@@ -15,7 +15,7 @@
  * Kept separate from the pure helpers (productInformationGapHelpers.ts) because it
  * imports the OpenAI client, which is not import-safe in unit tests.
  */
-import { openai, OPENAI_CHAT_MODEL } from './openaiClient';
+import { openai, OPENAI_CLASSIFIER_MODEL } from './openaiClient';
 import { logger } from '../utils/logger';
 
 export interface ProductInfoAssessment {
@@ -86,7 +86,7 @@ export async function assessProductInformationRequest(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         {

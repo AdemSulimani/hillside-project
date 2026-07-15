@@ -1,4 +1,5 @@
-import { openai, OPENAI_CHAT_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
+import { knobNumber } from '../config/knobs';
+import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import type { ProductImageRef } from './productImageRequestService';
 import {
   FACTS_USED_JSON_SCHEMA,
@@ -135,7 +136,12 @@ export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeywor
 // default caused too many false-negatives: correct products scored 0.70–0.74
 // and were silently discarded, pushing execution into the 5-product fallback.
 // Operators can override this via the SIMILARITY_THRESHOLD env variable.
-const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.65');
+//
+// P2-7: read through the manifest, which supplies the NaN guard this line lacked. It was a bare
+// `parseFloat(process.env.SIMILARITY_THRESHOLD || '0.65')`, so `SIMILARITY_THRESHOLD=o.65` (an easy
+// typo) produced NaN — and since every `similarity >= NaN` is false, semantic retrieval went
+// silently dead fleet-wide with no error. The band + boot warning now make that loud.
+const SIMILARITY_THRESHOLD = knobNumber('SIMILARITY_THRESHOLD');
 // P1-5: cap on the masked system-prompt copy stored in the decision ledger. Enough to see the
 // persona/blocks/footer/injected directives without persisting the full 26–33K-char prompt.
 const LEDGER_PROMPT_PREVIEW_MAX_CHARS = 12000;
@@ -213,25 +219,29 @@ const RECENT_RAW_HISTORY_MESSAGES = 10;
  * than the generator that writes the reply, which previously produced contradictory
  * handling within a single turn. Configurable via env so it can be tuned without a deploy.
  */
-export const HISTORY_FETCH_LIMIT = (() => {
-  const raw = process.env.AI_HISTORY_FETCH_LIMIT;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 40;
-})();
+export const HISTORY_FETCH_LIMIT = knobNumber('AI_HISTORY_FETCH_LIMIT');
 
 /**
- * Sampling temperature for the customer-facing reply. A LOW default makes the assistant
- * resolve the prompt (and any overlapping guideline rules) the SAME way every time, which
- * is the single biggest lever against "different answers to the same question" and against
- * inconsistent resolution of layered instructions. It does NOT change the assistant's
- * personality, tone, or any business rule — only the run-to-run randomness. Tunable via
- * AI_REPLY_TEMPERATURE so it can be adjusted without a deploy.
+ * Sampling temperature for the customer-facing reply.
+ *
+ * ⚠️ A LOW temperature REDUCES run-to-run variation. It does NOT eliminate it, and this default
+ * (0.3) is NOT deterministic. P2-7 (RC-03) corrected this comment, which previously asserted that a
+ * low default "makes the assistant resolve the prompt the SAME way every time" — the audit's
+ * live-replay disproved that directly at this exact setting: replaying one fixed prompt 8× produced
+ * `distinctRepliesPerInput=[1,3,8]` for three inputs, and several of the 8 variants of one reply
+ * fabricated product claims that passed the name guard and the quality eval (EV-044). The old
+ * wording is how a reader concludes determinism is handled here when it is not.
+ *
+ * Actual determinism comes from the P2-1 facts_used contract (temperature 0 + a fixed AI_REPLY_SEED
+ * + a json_schema response_format), which is gated behind FACTS_USED_CONTRACT and is DEFAULT OFF —
+ * so the production reply path is still stochastic. `validateEnv` says so at boot rather than
+ * leaving it to be inferred.
+ *
+ * Tunable via AI_REPLY_TEMPERATURE without a deploy. Banded [0,1] by the manifest: the API accepts
+ * up to 2, but a customer-facing reply above ~1 is unusable prose, so the band is deliberately
+ * tighter than the API's.
  */
-const AI_REPLY_TEMPERATURE = (() => {
-  const raw = process.env.AI_REPLY_TEMPERATURE;
-  const n = raw ? parseFloat(raw) : NaN;
-  return Number.isFinite(n) && n >= 0 && n <= 2 ? n : 0.3;
-})();
+const AI_REPLY_TEMPERATURE = knobNumber('AI_REPLY_TEMPERATURE');
 
 /**
  * P2-1 (RC-03) — the `facts_used` generation contract. When ON, the customer reply is produced
@@ -246,11 +256,13 @@ const AI_REPLY_TEMPERATURE = (() => {
 const FACTS_USED_CONTRACT =
   (process.env.FACTS_USED_CONTRACT ?? 'false').trim().toLowerCase() === 'true';
 
-/** Fixed seed for the deterministic reply completion (RC-03). Env-overridable. */
-const AI_REPLY_SEED = (() => {
-  const n = parseInt(process.env.AI_REPLY_SEED || '7', 10);
-  return Number.isFinite(n) ? n : 7;
-})();
+/**
+ * Fixed seed for the deterministic reply completion (RC-03). Env-overridable.
+ *
+ * NOTE this seed reaches the API on exactly ONE path — the facts_used contract below. On the
+ * default (flag-off) path no seed is sent at all.
+ */
+const AI_REPLY_SEED = knobNumber('AI_REPLY_SEED');
 
 /**
  * max_tokens for the contract completion: the 768-token prose budget plus headroom for the
@@ -1229,7 +1241,7 @@ export async function classifyUsageQuestionIntent(message: string): Promise<bool
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1272,7 +1284,7 @@ export async function classifyNewOrderSignal(message: string): Promise<boolean> 
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1308,7 +1320,7 @@ export async function classifyNegativeAvailabilityReply(message: string): Promis
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1348,7 +1360,7 @@ export async function classifyOrderConfirmationReplyIntent(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1399,7 +1411,7 @@ export async function classifyOrderDetailsCollectionReplyIntent(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1436,7 +1448,7 @@ export async function classifyOrderClosingQuestionReplyIntent(message: string): 
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1473,7 +1485,7 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1588,7 +1600,7 @@ export async function customerAskedAboutDiscount(message: string): Promise<boole
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1647,7 +1659,7 @@ export async function classifySpeculativeHealthAdvice(text: string): Promise<boo
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1723,7 +1735,7 @@ export async function classifyFollowUpInvitationInReply(reply: string): Promise<
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1787,7 +1799,7 @@ export async function classifyContextualProductFollowUp(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -1915,7 +1927,7 @@ export async function classifyOtherProductOptionsIntent(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -2078,7 +2090,7 @@ export async function detectReplyLanguage(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -2552,7 +2564,7 @@ export async function isUsageQuestionUnanswered(
   productUsageDescription: string,
 ): Promise<boolean> {
   const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
+    model: OPENAI_CLASSIFIER_MODEL,
     messages: [
       {
         role: 'system',
@@ -2631,7 +2643,7 @@ export async function detectCancellationOrRefundIntent(
     .join('\n');
 
   const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
+    model: OPENAI_CLASSIFIER_MODEL,
     messages: [
       {
         role: 'system',
@@ -2725,7 +2737,7 @@ export async function detectWrongProductIntent(
     .join('\n');
 
   const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
+    model: OPENAI_CLASSIFIER_MODEL,
     messages: [
       {
         role: 'system',
@@ -2808,7 +2820,7 @@ export async function detectPostPurchaseSupportIntent(
     .join('\n');
 
   const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
+    model: OPENAI_CLASSIFIER_MODEL,
     messages: [
       {
         role: 'system',
@@ -2920,7 +2932,7 @@ export async function detectOrderAffirmationIntent(
     .join('\n');
 
   const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
+    model: OPENAI_CLASSIFIER_MODEL,
     messages: [
       {
         role: 'system',
@@ -3023,7 +3035,7 @@ export async function detectOrderInfoUpdateIntent(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -3612,7 +3624,7 @@ async function isConversationEnding(
   const userText = `Last few messages of conversation:\n${formattedLastFew || '(none)'}\n\nLatest customer message: ${messageContent}`;
 
   const completion = await openai.chat.completions.create({
-    model: OPENAI_CHAT_MODEL,
+    model: OPENAI_CLASSIFIER_MODEL,
     messages: [
       { role: 'system', content: CONVERSATION_ENDING_ANALYST_SYSTEM },
       { role: 'user', content: userText },
@@ -3672,7 +3684,7 @@ export async function filterHallucinatedProductNames(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',
@@ -4502,9 +4514,23 @@ Using packaging-derived details (IMPORTANT — source precedence):
     olderHistorySummary,
   );
 
+  // P2-7 (M8/guard 5): both branches now resolve through the single chain in config/models.ts —
+  // OPENAI_VISION_MODEL and OPENAI_CHAT_MODEL are `resolveModel(...)` evaluated once at module load.
+  //
+  // This also collapses the last per-call model read. The text branch used to re-read
+  // `process.env.OPENAI_CHAT_MODEL` on every reply while the ~22 classifiers in this same file used
+  // the frozen const, so a mid-process env change would move the REPLY model but not the classifiers
+  // — the reply and the guards judging it could run on different models. Frozen is also what makes
+  // the P2-7 config fingerprint meaningful: it hashes the frozen set at boot, and a knob that is
+  // re-read later would make that hash a lie.
+  //
+  // M1 (the vision branch ignoring `config.custom_model_id`) is DELIBERATE and pre-existing: a
+  // fine-tune of a text model may not serve images. It is a known, separately-owned defect — P2-7
+  // preserves it exactly and only documents it here so the next reader sees a choice rather than an
+  // oversight. A unit test pins both branches.
   const model = hasImages
     ? OPENAI_VISION_MODEL
-    : (config.custom_model_id || process.env.OPENAI_CHAT_MODEL?.trim() || 'gpt-4o');
+    : (config.custom_model_id?.trim() || OPENAI_CHAT_MODEL);
 
   // Keep the "be extra careful when the image match is uncertain" intent: never exceed the
   // already-conservative 0.3 in that case, while the normal path uses the configured low
@@ -4690,7 +4716,7 @@ export async function classifyProductImageRequest(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
+      model: OPENAI_CLASSIFIER_MODEL,
       messages: [
         {
           role: 'system',

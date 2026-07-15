@@ -181,7 +181,7 @@ export async function generateAndStoreProductImageFingerprint(
   }
 
   const inputHash = hashFingerprintInput(fingerprintText);
-  const modelName = process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL;
+  const modelName = OPENAI_EMBEDDING_MODEL;
   const vector = await generateEmbedding(fingerprintText);
 
   const row = await upsertProductImageFingerprint({

@@ -25,6 +25,8 @@
  */
 import { createHash } from 'crypto';
 import * as Sentry from '@sentry/node';
+import { knobNumber } from '../config/knobs';
+import { EXPECTED_EMBEDDING_DIM as COLUMN_EMBEDDING_DIM, resolveModel } from '../config/models';
 import { redisConnection } from '../jobs/redisConnection';
 
 // NOTE: openaiClient and embeddingService are imported LAZILY (dynamic import inside the
@@ -32,6 +34,9 @@ import { redisConnection } from '../jobs/redisConnection';
 // openaiClient throws at load without OPENAI_API_KEY (mirrors the pattern in
 // usageSuitabilityHelpers.ts / conversationProductContext.test.ts). Tests inject their own
 // `embed` and `redis`, so neither dependency is loaded during the suite.
+//
+// `config/models` by contrast is imported STATICALLY and safely: P2-7 made it a leaf module with
+// no module-load side effects precisely so this file no longer has to duplicate model defaults.
 
 // ---------------------------------------------------------------------------
 // Knobs (IIFE + clamp idiom, mirrors classifierConfidenceContract.ts:48-52).
@@ -41,11 +46,13 @@ import { redisConnection } from '../jobs/redisConnection';
  * The embedding dimension the `products.embedding` column is declared with
  * (`migrations/029_products_embedding_1536.sql` → `vector(1536)`). The dimension guard is
  * sourced from the COLUMN contract, not the model, because its job is "does this vector fit
- * the column". The code default model in `openaiClient.ts` is `text-embedding-3-large`
- * (3072 dims) — if `OPENAI_EMBEDDING_MODEL` is ever unset, every query embedding is 3072-dim
- * and must be rejected loudly rather than fed into a 1536-dim similarity search.
+ * the column".
+ *
+ * P2-7: re-exported from `config/models` rather than re-declared — the literal `1536` previously
+ * existed in three places (here, validateEnv, and the migration). `npm run config:check` verifies
+ * the constant still matches what the database actually declares, so it cannot silently rot.
  */
-export const EXPECTED_EMBEDDING_DIM = 1536;
+export const EXPECTED_EMBEDDING_DIM = COLUMN_EMBEDDING_DIM;
 
 /**
  * Timeout for OpenAI query-embedding calls (ms). When OpenAI is slow or rate-limited, the
@@ -53,11 +60,7 @@ export const EXPECTED_EMBEDDING_DIM = 1536;
  * — but only now that the hung request is actually cancelled (AbortController), not merely
  * abandoned by a `Promise.race`. Tunable without a code change.
  */
-export const EMBEDDING_QUERY_TIMEOUT_MS = (() => {
-  const raw = process.env.EMBEDDING_QUERY_TIMEOUT_MS;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 5000;
-})();
+export const EMBEDDING_QUERY_TIMEOUT_MS = knobNumber('EMBEDDING_QUERY_TIMEOUT_MS');
 
 /**
  * When true, POSITIVE query embeddings are shared across workers via Redis (keyed by
@@ -124,16 +127,15 @@ export const SEMANTIC_BAND_EXTRA_DEPTH = (() => {
 })();
 
 /**
- * Default embedding model — MIRRORS `openaiClient.OPENAI_EMBEDDING_MODEL`, duplicated here as a
- * literal (not imported) to keep this module import-safe (see the note at the top). Deployments
- * always set `OPENAI_EMBEDDING_MODEL` (CLAUDE.md), so this fallback is a last resort — and a
- * wrong-dimension model reaching it is caught by the dimension guard.
+ * Active embedding model.
+ *
+ * P2-7 (M8): this used to duplicate `'text-embedding-3-large'` as a literal rather than import it,
+ * because importing `openaiClient` triggers a module-load throw + client construction and would
+ * break this module's import-safety. `config/models.ts` is the side-effect-free home that removed
+ * the need for the copy — one chain, one place, imported by both.
  */
-const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-large';
-
-/** Active embedding model — mirrors embeddingService.generateEmbedding's resolution. */
 export function activeEmbeddingModel(): string {
-  return process.env.OPENAI_EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL;
+  return resolveModel('embedding');
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +222,7 @@ export interface InProcessEmbeddingCache {
 /** Model-scoped LRU (Map insertion-order eviction), capped at {@link QUERY_EMBEDDING_CACHE_MAX}. */
 export function createInProcessEmbeddingCache(max = QUERY_EMBEDDING_CACHE_MAX): InProcessEmbeddingCache {
   const cache = new Map<string, number[]>();
-  const keyOf = (model: string, text: string) => `${model} ${text}`;
+  const keyOf = (model: string, text: string) => `${model}\0${text}`;
   return {
     get(model, text) {
       return cache.get(keyOf(model, text));

@@ -19,7 +19,7 @@ export async function generateEmbedding(
 
   const data = await openai.embeddings.create(
     {
-      model: process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL,
+      model: OPENAI_EMBEDDING_MODEL,
       input,
     },
     options?.signal ? { signal: options.signal } : undefined,

@@ -582,19 +582,29 @@ Products use soft delete (`deleted_at` timestamp). A partial unique index enforc
 
 | Variable | Purpose |
 |----------|---------|
-| `OPENAI_CHAT_MODEL` | Main chat model (e.g. `gpt-4o`) |
-| `OPENAI_VISION_MODEL` | Vision/image analysis model |
-| `OPENAI_EMBEDDING_MODEL` | Embedding model. Deployed value is `text-embedding-3-small` (1536-dim), which matches the `vector(1536)` column. ⚠️ The code fallback default in `openaiClient.ts` is `text-embedding-3-large` (3072-dim) — incompatible with the column, so this env var must stay set to a 1536-dim model. |
-| `OPENAI_INTENT_MODEL` | Purchase intent detection model |
-| `OPENAI_EVAL_MODEL` | Reply quality evaluation model |
+Since P2-7, every knob below is declared once in **`backend/src/config/knobs.ts`** (the manifest: parser, band, default, read-lifetime, rationale) and every model in **`backend/src/config/models.ts`** (the single resolution chain). Do not add a bare `process.env.X` read for a decision knob — declare it in the manifest and use `knobNumber`/`knobBool`/`knobString`, or `resolveModel(role)`. `npm run config:check` fails CI if `.env.example` drifts from the manifest.
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_CHAT_MODEL` | Main chat model (e.g. `gpt-4o`); the fallback for every chat-family role below |
+| `OPENAI_CLASSIFIER_MODEL` | The ~25-site boolean/structured classifier fan-out. Unset → `OPENAI_CHAT_MODEL` |
+| `OPENAI_VISION_MODEL` | Vision/image analysis model. Unset → `OPENAI_CHAT_MODEL` |
+| `OPENAI_EMBEDDING_MODEL` | Embedding model. **Must be 1536-dim** to match the `vector(1536)` columns; deployed value is `text-embedding-3-small`. There is deliberately **no code default** — a wrong default is more dangerous than none (a 3072-dim model makes every similarity query error and silently kills semantic retrieval), so boot fails fast when it is unset or wrong-dimension. |
+| `OPENAI_INTENT_MODEL` | Purchase intent detection model. Unset → `OPENAI_CHAT_MODEL` |
+| `OPENAI_EVAL_MODEL` | Reply quality evaluation model. Unset → `OPENAI_CHAT_MODEL` |
+| `OPENAI_PRODUCT_PROCESSING_MODEL` | Product extraction from documents/images. Unset → `OPENAI_CHAT_MODEL`, else `gpt-4o-mini` |
 | `OPENAI_FINETUNING_BASE_MODEL` | Base model for fine-tuning jobs |
 | `SIMILARITY_THRESHOLD` | Cosine similarity threshold for product retrieval (default `0.65`) |
-| `QUALITY_THRESHOLD` | Quality eval alert floor (default `0.1`) |
-| `INTENT_THRESHOLD` | Min intent score to trigger draft order (default `0.85`) |
+| `QUALITY_THRESHOLD` | Quality eval alert floor (default `0.1`). ⚠️ Do **not** raise to `0.6`: the eval scores order confirmations a systematic ~`0.200` false-low, so a higher floor pauses the AI at checkout. Fix the eval (P3-4), not the floor. |
+| `INTENT_THRESHOLD` | Min intent score to trigger draft order (default `0.85`). Must be strictly `>0` and `<1`; anything else is rejected back to `0.85` (now logged, previously silent) |
+| `AI_REPLY_TEMPERATURE` | Reply sampling temperature (default `0.3`). **Not deterministic** — see §7 |
+| `AI_REPLY_SEED` | Seed for the deterministic reply (default `7`); only sent when `FACTS_USED_CONTRACT=true` |
 | `COMMISSION_SESSION_GAP_HOURS` | Session boundary for commission eligibility (default `3`) |
-| `HUMAN_HOLD_MINUTES` | How long AI holds after a human reply |
+| `HUMAN_HOLD_MINUTES` | How long AI holds after a human reply (default `10`) |
 | `AI_MAX_REPLIES_PER_HOUR` | Per-conversation AI rate limit (default `25`) |
 | `AI_HISTORY_FETCH_LIMIT` | Messages loaded for AI context (default `40`) |
+| `STRICT_CONFIG_VALIDATION` | `off` \| `warn` (default) \| `strict`. Does **not** make a runtime boot fail on band/parse drift — that is `npm run config:check`'s job (see §11) |
+| `CONFIG_FINGERPRINT_REGISTRY` | Record this instance's config fingerprint in `config_fingerprints` at boot (default `false`) |
 
 **Auth and security**
 
@@ -651,7 +661,10 @@ Products use soft delete (`deleted_at` timestamp). A partial unique index enforc
 - **Use-case fee amounts are not stamped at creation.** They are `null` until the monthly snapshot job runs on the 1st of the month. Queries on `fee_amount` before month-end will see nulls.
 - **Channel disconnection preserves history.** `channel_id` on `contacts` and `conversations` is set to NULL when a channel is deleted (not CASCADE). Do not assume `channel_id` is always present.
 - **Products are soft-deleted** (`deleted_at`). Never hard-delete products — orders denormalize `product_name` and set `product_id` to NULL via SET NULL, not CASCADE.
-- **AI models are configurable per role.** There are separate env vars for chat, vision, embedding, intent detection, and quality evaluation — and a per-tenant `custom_model_id` for fine-tuned chat models. Never hardcode model names.
+- **AI models are configurable per role, through one resolver.** `config/models.ts` owns the role taxonomy (chat, classifier, vision, eval, intent, product_processing, embedding, finetune_base) and every fallback chain; each role's env var falls back to `OPENAI_CHAT_MODEL`. Call `resolveModel(role)` — never hardcode a model name, and never add a fourth resolution idiom (before P2-7 there were four, and they could disagree on a partial env). A per-tenant `custom_model_id` overrides the reply model only; the **vision path deliberately drops it** (a fine-tuned text model may not serve images) — that is a known defect, kept intentional and pinned by a test.
+- **Config knobs are declared, not parsed inline.** `config/knobs.ts` is the manifest: one declaration per knob with its parser, band, default, read-lifetime and rationale. Consumers use `knobNumber`/`knobBool`/`knobString`. A bare `parseFloat(process.env.X || '0.65')` is how `SIMILARITY_THRESHOLD` came to accept `NaN` and silently disable semantic retrieval fleet-wide.
+- **Boot warns; CI fails.** `validateEnv` (runtime boot) exits only for a missing required var, a wrong-dimension embedding model, or weak/duplicate production secrets — everything else warns loudly and starts, because a mis-set deploy must not become an outage. The hard gate is a separate program, `npm run config:check`, which CI runs in strict mode. **If you add a new fatal, add its variable to `ci.yml`'s `backend-smoke` env block** or you will break the smoke job.
+- **Two instances with different frozen knobs is a bug, and it is detectable.** Every boot logs `[config] fingerprint=<hash>`; with `CONFIG_FINGERPRINT_REGISTRY=true` it also writes `config_fingerprints`, so `SELECT count(DISTINCT hash) FROM config_fingerprints WHERE last_seen > now() - interval '10 min'` returning `>1` means the fleet disagrees with itself. Ledger rows carry a `{hash, instance}` pointer, so the replies served by a drifted config are one lookup away.
 - **The AI pipeline has strict ordering.** Post-reply guards (hallucination filters, quality eval, knowledge gap detection) run after `generateReply()` but before the message is sent. Changing their order can affect billing (e.g. if a reply is blocked, no `ai_reply_sent` event fires and the use-case eval job may not be enqueued).
 - **Bull Board** is accessible at `/api/admin/queues` with the `X-Admin-Key` header, not with the admin JWT.
 - **Frontend normalizes snake_case → camelCase.** Backend returns snake_case JSON; `frontend/src/api/*.ts` modules normalize to camelCase TypeScript types. If adding a new API field, update both the response and the normalizer function.

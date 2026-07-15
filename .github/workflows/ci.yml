@@ -37,6 +37,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # P2-7: fail the PR if backend/.env.example has drifted from the config manifest
+      # (config/knobs.ts) — a knob read by the code but undocumented, or documented with a value
+      # that disagrees with the code default (the QUALITY_THRESHOLD 0.6-vs-0.1 class of trap).
+      # Offline: no DB, no secrets, no network. The DB-backed half runs in backend-smoke below.
+      - name: Config manifest vs .env.example
+        run: npm run config:check -- --source=env-example
+
       - name: Build
         run: npm run build
 
@@ -113,6 +120,16 @@ jobs:
           # Fail fast on duplicate/out-of-order migration ordinals in CI;
           # plain container boots only warn (see db/migrate.ts).
           MIGRATE_STRICT: "1"
+
+      # P2-7: the STRICT config gate. This is the program that fails on config drift — a runtime
+      # boot deliberately only warns (a mis-set deploy must not become an outage), so this step is
+      # where "a PR reintroducing a drift goes red" actually happens.
+      # Runs after migrations because it probes the REAL embedding-column dimension via
+      # pg_attribute (information_schema does not expose it for pgvector types).
+      - name: Strict config check
+        run: npm run config:check -- --strict
+        env:
+          STRICT_CONFIG_VALIDATION: strict
 
       - name: Start API
         run: node dist/server.js > /tmp/backend.log 2>&1 &

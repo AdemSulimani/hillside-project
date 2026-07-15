@@ -1,3 +1,4 @@
+import { knobNumber } from '../config/knobs';
 import axios from 'axios';
 import crypto from 'crypto';
 import path from 'path';
@@ -318,7 +319,7 @@ async function processInboundEdit(
     return;
   }
 
-  const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
+  const aiReplyDelayMs = knobNumber('AI_REPLY_DELAY_MS');
   const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
   // P2-4 Part 2 (RC-11 prerequisite): match the message too, not just the conversation. Matching on
   // conversationId ALONE removes whatever ai.reply happens to be pending — including one belonging
@@ -1152,7 +1153,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   // debounce: a burst collapses to a single live intent pointing at the latest inbound.
   let inboundMessage;
   if (INBOUND_OUTBOX_ENQUEUE) {
-    const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
+    const aiReplyDelayMs = knobNumber('AI_REPLY_DELAY_MS');
     const delayMs = Number.isFinite(aiReplyDelayMs) ? aiReplyDelayMs : 8000;
     const client = await pool.connect();
     try {
@@ -1253,7 +1254,7 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   // validated; the relay shadow-drains the intent without dispatching, so there is no double job.
   const outboxOwnsDelivery = INBOUND_OUTBOX_ENQUEUE && OUTBOX_DISPATCH_ENABLED;
   if (normalized.skipAiReply !== true && !outboxOwnsDelivery) {
-    const aiReplyDelayMs = Number(process.env.AI_REPLY_DELAY_MS ?? '8000');
+    const aiReplyDelayMs = knobNumber('AI_REPLY_DELAY_MS');
     const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
     const existingJob = pendingAiReplyJobs.find(
       (job) => job.name === 'ai.reply' && job.data?.conversationId === conversation.id,

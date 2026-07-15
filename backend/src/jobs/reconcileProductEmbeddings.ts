@@ -76,7 +76,7 @@ function computeHash(text: string): string {
 }
 
 export async function processReconcileProductEmbeddings(): Promise<void> {
-  const activeModel = process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL;
+  const activeModel = OPENAI_EMBEDDING_MODEL;
 
   // Fetch candidates and re-compute the embedding-input hash in-process (rather than in
   // SQL, to keep the query simple and avoid pgcrypto).

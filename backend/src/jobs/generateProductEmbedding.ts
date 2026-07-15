@@ -49,7 +49,7 @@ export async function processGenerateProductEmbedding(
   );
 
   const inputHash = hashEmbeddingInput(text);
-  const modelName = process.env.OPENAI_EMBEDDING_MODEL?.trim() || OPENAI_EMBEDDING_MODEL;
+  const modelName = OPENAI_EMBEDDING_MODEL;
 
   const vector = await generateEmbedding(text);
 

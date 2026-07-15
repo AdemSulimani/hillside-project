@@ -6,22 +6,20 @@
  * client, no DB pool) so the matching policy can be unit-tested in isolation and the
  * confidence thresholds live in a single, documented place.
  */
+import { knobNumber } from '../config/knobs';
 import type { VisualFingerprintData } from '../db/models/productImageFingerprint';
 
 export type ImageQuality = 'good' | 'fair' | 'poor';
 
-export const IMAGE_SIMILARITY_THRESHOLD = parseFloat(
-  process.env.IMAGE_SIMILARITY_THRESHOLD || '0.62',
-);
-export const IMAGE_MATCH_CONFIDENCE_THRESHOLD = parseFloat(
-  process.env.IMAGE_MATCH_CONFIDENCE_THRESHOLD || '0.55',
-);
-export const VISION_EXTRACTION_CONFIDENCE_MIN = parseFloat(
-  process.env.VISION_EXTRACTION_CONFIDENCE_MIN || '0.35',
-);
-export const IMAGE_MATCH_AMBIGUITY_DELTA = parseFloat(
-  process.env.IMAGE_MATCH_AMBIGUITY_DELTA || '0.04',
-);
+// P2-7: read through the manifest, which supplies the NaN guard + [0,1] band these four lacked.
+// They were bare `parseFloat(process.env.X || '0.62')` — the same defect class as
+// SIMILARITY_THRESHOLD: a typo'd value yields NaN, every comparison against it is false, and image
+// matching silently stops matching anything. `config/knobs` is a leaf module, so importing it keeps
+// this file's no-I/O-no-heavy-imports contract (see the header) intact.
+export const IMAGE_SIMILARITY_THRESHOLD = knobNumber('IMAGE_SIMILARITY_THRESHOLD');
+export const IMAGE_MATCH_CONFIDENCE_THRESHOLD = knobNumber('IMAGE_MATCH_CONFIDENCE_THRESHOLD');
+export const VISION_EXTRACTION_CONFIDENCE_MIN = knobNumber('VISION_EXTRACTION_CONFIDENCE_MIN');
+export const IMAGE_MATCH_AMBIGUITY_DELTA = knobNumber('IMAGE_MATCH_AMBIGUITY_DELTA');
 
 /** Confidence at/above which a candidate is treated as a confident match. */
 export const CONFIDENT_MATCH_FLOOR = IMAGE_MATCH_CONFIDENCE_THRESHOLD;

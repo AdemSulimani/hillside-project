@@ -1,9 +1,10 @@
+import { knobNumber } from '../config/knobs';
 import { findTenantById } from '../db/models/tenant';
 import { openai, OPENAI_EVAL_MODEL } from './openaiClient';
 import { logger } from '../utils/logger';
 
 function evalModel(): string {
-  return process.env.OPENAI_EVAL_MODEL?.trim() || OPENAI_EVAL_MODEL;
+  return OPENAI_EVAL_MODEL;
 }
 
 export const FLAG_REASON_VALUES = [
@@ -26,9 +27,7 @@ export interface ReplyQualityEvaluation {
 }
 
 export function getQualityThreshold(): number {
-  const t = parseFloat(process.env.QUALITY_THRESHOLD || '0.1');
-  if (!Number.isFinite(t)) return 0.1;
-  return Math.min(1, Math.max(0, t));
+  return knobNumber('QUALITY_THRESHOLD');
 }
 
 export function evaluationTriggersAlert(e: ReplyQualityEvaluation, threshold: number): boolean {

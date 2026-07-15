@@ -13,8 +13,16 @@ import { initSocketServer } from './sockets';
 import { startRedisMemoryMonitor, stopRedisMemoryMonitor } from './services/redisMemoryMonitor';
 import { startDeadLetterMonitor, stopDeadLetterMonitor } from './services/deadLetterMonitor';
 import { startLedgerRetention, stopLedgerRetention } from './services/ledgerRetention';
+import { recordConfigFingerprintBestEffort } from './jobs/configFingerprintRegistry';
+import { knobNumber } from './config/knobs';
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+/**
+ * P2-7: the code default was 3000 while `.env.example`, docker-compose, BACKEND_URL, CI and
+ * CLAUDE.md §10 all say 8000 — a documented-vs-code drift that only hid because every deployment
+ * path happens to set PORT explicitly. Reconciled to 8000 (the documented value) and read through
+ * the manifest so the two cannot diverge again.
+ */
+const PORT = knobNumber('PORT');
 
 /** P1-2 step 5: dead-letter growth monitor (off by default). */
 const DLQ_METRICS_ENABLED = (process.env.DLQ_METRICS_ENABLED ?? 'false').trim().toLowerCase() === 'true';
@@ -36,6 +44,10 @@ httpServer.listen(PORT, () => {
   startRedisMemoryMonitor();
   if (DLQ_METRICS_ENABLED) startDeadLetterMonitor();
   if (AI_DECISION_LEDGER_ENABLED) startLedgerRetention();
+  // P2-7 guard 7: publish this instance's config fingerprint so a drifted fleet is detectable.
+  // Deliberately after listen and deliberately not awaited — it is best-effort telemetry, and a
+  // slow or unavailable database must not delay serving traffic.
+  void recordConfigFingerprintBestEffort();
 });
 
 // ---------------------------------------------------------------------------

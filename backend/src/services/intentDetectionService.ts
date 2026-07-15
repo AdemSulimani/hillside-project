@@ -165,7 +165,7 @@ export async function detect(
     return { ...EMPTY_INTENT_RESULT };
   }
 
-  const model = process.env.OPENAI_INTENT_MODEL?.trim() || OPENAI_INTENT_MODEL;
+  const model = OPENAI_INTENT_MODEL;
 
   const catalogSection =
     productNames && productNames.length > 0
