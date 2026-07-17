@@ -36,6 +36,15 @@ import {
   resolveMode,
 } from './knobs';
 import { REDACT_PII } from '../utils/redact';
+// Import-safe: providerResilience is a leaf (its only import is node:async_hooks), so this stays
+// reachable from `scripts/checkConfig.ts`, which runs with no API key and no client construction.
+import {
+  AI_QUEUE_BACKOFF_BASE_MS,
+  breakerCooldownOutrunsRetries,
+  enforcementWithoutFloor,
+  type BreakerMode,
+  type ProviderPosture,
+} from '../services/providerResilience';
 
 function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
@@ -248,6 +257,60 @@ function logPosture(): void {
     console.info(
       '[albanian] NOTE: the platform footer (+~2.2K chars/tenant) and the prompt budget are BOTH on — ' +
         'the interaction the P2-5 plan flags as its top risk. The footer is never truncated by design.',
+    );
+  }
+
+  // P2-6: provider-failure isolation. `OPENAI_TIMEOUT_MS` is PER ATTEMPT, so state the real
+  // worst-case a reader would otherwise have to compute from two knobs.
+  const degrade = flag('GRACEFUL_DEGRADE_MODE');
+  const breakerMode = eff('OPENAI_CIRCUIT_BREAKER');
+  const callCap = Number(eff('OPENAI_CALL_TIMEOUT_MS'));
+  const turnBudget = Number(eff('OPENAI_TURN_DEADLINE_MS'));
+  const uncappedWorstCase = Number(eff('OPENAI_TIMEOUT_MS')) * (1 + Number(eff('OPENAI_MAX_RETRIES')));
+  console.info(
+    `[provider] GRACEFUL_DEGRADE_MODE=${
+      degrade ? 'on (provider failure ⇒ holding + provider_unavailable alert; no pause)' : 'off (reply sent even if its guards fail-opened)'
+    }; OPENAI_CALL_TIMEOUT_MS=${
+      callCap > 0 ? `${callCap} (whole call, incl. retries)` : `0 = off (worst case ${uncappedWorstCase}ms/call)`
+    }; OPENAI_TURN_DEADLINE_MS=${
+      turnBudget > 0 ? `${turnBudget} (shared across the turn's ~25 calls)` : '0 = off (turn unbounded)'
+    }; OPENAI_CIRCUIT_BREAKER=${
+      breakerMode === 'on'
+        ? `on (opens after ${eff('OPENAI_BREAKER_FAILURE_THRESHOLD')} consecutive failures, cooldown ${eff('OPENAI_BREAKER_COOLDOWN_MS')}ms)`
+        : breakerMode === 'monitor'
+          ? 'monitor (would-open events recorded; nothing fast-fails)'
+          : 'off (inert — no state, no alerts)'
+    }`,
+  );
+
+  // Both rules below are pure, exported predicates (services/providerResilience.ts) rather than
+  // conditions written inline here — same split as this file's own detect/applyMode: the rule is a
+  // tested contract, the log string is just its rendering. Warn, never fatal: a mis-set deploy must
+  // not become an outage (this file's standing posture).
+  const posture: ProviderPosture = {
+    degradeEnabled: degrade,
+    breakerMode: breakerMode as BreakerMode,
+    callCapMs: callCap,
+    turnBudgetMs: turnBudget,
+    breakerCooldownMs: Number(eff('OPENAI_BREAKER_COOLDOWN_MS')),
+  };
+
+  if (enforcementWithoutFloor(posture)) {
+    console.warn(
+      '[provider] ⚠ P2-6 enforcement is ON but GRACEFUL_DEGRADE_MODE is OFF. A provider blip can now ' +
+        'abort the cancellation/refund detector FAST, and the sensitive umbrella will fall through to a ' +
+        'normal sales reply (RC-19) — an outcome the uncapped 240s grind mostly avoided. Set ' +
+        'GRACEFUL_DEGRADE_MODE=true, or unset OPENAI_CALL_TIMEOUT_MS / OPENAI_TURN_DEADLINE_MS and ' +
+        'return OPENAI_CIRCUIT_BREAKER to off/monitor.',
+    );
+  }
+
+  if (breakerCooldownOutrunsRetries(posture)) {
+    console.warn(
+      `[provider] ⚠ OPENAI_BREAKER_COOLDOWN_MS=${posture.breakerCooldownMs} is >= aiQueue's ` +
+        `${AI_QUEUE_BACKOFF_BASE_MS}ms backoff base. All 3 retries would fast-fail inside the cooldown ` +
+        'without re-probing, so every in-flight ai.reply would dead-letter on a short outage. Lower it, ' +
+        'or raise the queue backoff in the same change.',
     );
   }
 }

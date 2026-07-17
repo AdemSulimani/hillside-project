@@ -200,6 +200,57 @@ export const KNOBS: readonly KnobSpec[] = [
   num('PROMPT_ASSEMBLY_MAX_CHARS', 'int', 34_000, { min: 1000, max: 400_000 }, 'frozen', 'Char budget above which the assembled prompt is reported (P2-5)'),
   num('OPENAI_MAX_RETRIES', 'int', 3, { min: 0, max: 10 }, 'frozen', 'Retries for every OpenAI call'),
   num('OPENAI_TIMEOUT_MS', 'int', 60_000, { min: 1000, max: 600_000 }, 'frozen', 'Timeout for every OpenAI call'),
+
+  // --- P2-6 (RC-19/RC-04): provider-failure isolation ----------------------------------------
+  //
+  // `OPENAI_TIMEOUT_MS` above is PER ATTEMPT, so with OPENAI_MAX_RETRIES=3 one call can occupy
+  // 60s x 4 = 240s while holding the per-conversation lock (SPOF-3). These two caps bound the
+  // WHOLE call and the whole turn. Both default 0 = OFF, so an env that sets neither behaves
+  // exactly as it did before P2-6.
+  num('OPENAI_CALL_TIMEOUT_MS', 'int', 0, { min: 0, max: 600_000 }, 'frozen',
+    'Hard cap (ms) on a single OpenAI call INCLUDING the SDK retry chain. 0 = off', {
+      rationale:
+        '0 = kill switch rather than a separate PER_TURN_DEADLINE bool: a flag and a value that can ' +
+        'disagree is exactly the drift class P2-7 exists to kill (same idiom as ' +
+        'RETRIEVAL_NEG_CACHE_TTL_SECONDS=0). MUST NOT be enabled without GRACEFUL_DEGRADE_MODE: on ' +
+        'its own, a cap shorter than a provider blip aborts the refund detector, the umbrella at ' +
+        'processAIReply catches it, and a SALES reply ships to a refund demand — RC-19, but faster. ' +
+        'The turn-level degrade gate is what makes this knob safe.',
+    }),
+  num('OPENAI_TURN_DEADLINE_MS', 'int', 0, { min: 0, max: 600_000 }, 'frozen',
+    'Total OpenAI budget (ms) for one AI-reply turn, shared across its ~25 calls. 0 = off', {
+      rationale:
+        'Bounds the whole fan-out, not just one call. Rearmed (NOT cleared) before the send, so the ' +
+        'post-send order-detection tail is bounded too — it runs inside the same try whose finally ' +
+        'releases ai_conv_lock. NOTE the arithmetic: budget x2 (pre-send + rearmed tail) must stay ' +
+        'under AI_CONVERSATION_LOCK_TTL_MS (300_000), which is never renewed. At 120_000 that is ' +
+        '240s vs 300s — 60s of margin, and the SDK\'s non-abort-aware backoff sleeps eat into it.',
+    }),
+  {
+    key: 'OPENAI_CIRCUIT_BREAKER',
+    kind: 'enum',
+    values: ['off', 'monitor', 'on'],
+    requiredness: { kind: 'optional', default: 'off' },
+    binding: 'per-call',
+    description: 'OpenAI circuit breaker: off | monitor (count would-open, never fast-fail) | on (P2-6)',
+    rationale:
+      'monitor is the audit\'s mandated bake-in window: it records would-open transitions against a ' +
+      'real provider without changing behaviour. Promote to `on` only after monitor shows a clean ' +
+      'healthy-provider baseline, and only with GRACEFUL_DEGRADE_MODE already on.',
+  },
+  num('OPENAI_BREAKER_FAILURE_THRESHOLD', 'int', 5, { min: 1, max: 100 }, 'frozen',
+    'Consecutive provider-availability failures before the breaker opens (P2-6)'),
+  num('OPENAI_BREAKER_COOLDOWN_MS', 'int', 5_000, { min: 1000, max: 600_000 }, 'frozen',
+    'How long the breaker fast-fails before admitting a half-open probe (P2-6)', {
+      rationale:
+        'DELIBERATELY below aiQueue\'s exponential backoff base (attempts:3, delay:10_000 ⇒ retries ' +
+        'at T+10s and T+30s). A cooldown that spans the retry window makes every BullMQ attempt ' +
+        'fast-fail without ever probing the provider, so the job exhausts and classifyJobFailure ' +
+        'dead-letters it: a 30s blip would DLQ every in-flight reply. Keep this < 10_000, or raise ' +
+        'aiQueue\'s backoff in the same change.',
+    }),
+  num('OPENAI_BREAKER_HALF_OPEN_PROBES', 'int', 1, { min: 1, max: 10 }, 'frozen',
+    'Concurrent probes admitted while the breaker is half-open (P2-6)'),
   num('PORT', 'int', 8000, { min: 1, max: 65_535 }, 'boot', 'API listen port'),
 
   // --- Image-match policy (bare parseFloat before P2-7 — same NaN class as SIMILARITY_THRESHOLD)
@@ -257,6 +308,29 @@ export const KNOBS: readonly KnobSpec[] = [
   bool('OUTBOX_DISPATCH_ENABLED', false, 'Outbox dispatch of staged side-effects (P1-1)'),
   bool('AI_REPLY_STAGE_BEFORE_SEND', false, 'Stage the reply row before sending (P1-1 idempotency)'),
   bool('DLQ_ENABLED', false, 'Route exhausted jobs to the dead-letter queue (P1-2)', { binding: 'per-call' }),
+  bool('GRACEFUL_DEGRADE_MODE', false,
+    'One safe floor when the provider fails mid-turn: holding reply + escalate (P2-6/RC-19)',
+    {
+      binding: 'per-call',
+      rationale:
+        'The gate is TURN-level and reads a counter, not an exception — deliberately. ~21 classifiers ' +
+        'catch any error into a fail-open default (classifySpeculativeHealthAdvice returns false) and ' +
+        'the sensitive umbrella swallows the rest, so an exception-driven floor would be silently ' +
+        'bypassed at ~22 sites. Enable this BEFORE (or with) OPENAI_CALL_TIMEOUT_MS / ' +
+        'OPENAI_TURN_DEADLINE_MS / OPENAI_CIRCUIT_BREAKER=on, never after.',
+    }),
+  {
+    // TEST-ONLY fault injection for the P2-6 outage validation, mirroring P0-4's
+    // TEST_FORCE_DETECTOR_ERROR. `documented: false` keeps it out of `.env.example` — operators
+    // copy that file to bootstrap a real env, and this must never appear there.
+    key: 'TEST_FORCE_PROVIDER_ERROR',
+    kind: 'enum',
+    values: ['', 'timeout', 'unavailable', 'rate_limit'],
+    requiredness: { kind: 'optional', default: '' },
+    binding: 'frozen',
+    documented: false,
+    description: 'TEST-ONLY: force every OpenAI call to fail with this cause. Never set in production',
+  },
 ];
 
 const BY_KEY = new Map(KNOBS.map((k) => [k.key, k]));

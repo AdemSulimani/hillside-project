@@ -40,6 +40,8 @@ export type ReplySlot =
   | 'holding:uncertain'
   | 'holding:sensitive'
   | 'holding:post_purchase'
+  /** P2-6: the graceful-degradation floor — the provider failed mid-turn, so we hold + escalate. */
+  | 'holding:degraded'
   | 'ack:order'
   | 'ack:order_info'
   | 'ack:eta'

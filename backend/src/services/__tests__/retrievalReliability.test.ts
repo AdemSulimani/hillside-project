@@ -197,6 +197,56 @@ describe('resolveQueryEmbedding — aborting timeout', () => {
 });
 
 // ---------------------------------------------------------------------------
+// P2-6 (RC-04) pins.
+//
+// P2-6's workstream (4) — "aborting timeout + negative caching + `semanticSkipped` metric" — was
+// ALREADY DELIVERED here by P1-4; the audit's description of a non-aborting
+// `generateQueryEmbeddingWithTimeout` in aiService.ts is stale (that function no longer exists).
+// Rather than rebuild it, P2-6 pins its validation criteria so the behaviour cannot silently rot
+// back. The abort + negative-cache halves are covered above; the metric was the one criterion with
+// no assertion on it, so it gets one here.
+// ---------------------------------------------------------------------------
+
+describe('P2-6 pin — the semanticSkipped metric (RC-04 observability)', () => {
+  it('a timeout increments the by-reason skip counter', async () => {
+    const redis = makeFakeRedis();
+    const res = await resolveQueryEmbedding('q', { ...base(), redis, embed: hangingEmbed(), timeoutMs: 10 });
+
+    assert.equal(res.reason, 'embedding_timeout');
+    // RC-04's whole remediation ask was that a silent fleet-wide degradation become measurable:
+    // "an OpenAI latency incident silently degrades retrieval fleet-wide with only a log line".
+    assert.equal(
+      redis.store.get('metrics:semantic_skipped:embedding_timeout'),
+      '1',
+      'the skip must be countable by reason, not just greppable',
+    );
+  });
+
+  it('a dimension mismatch counts under its OWN reason, not lumped in with transient timeouts', async () => {
+    const redis = makeFakeRedis();
+    // The -large 3072 landmine: a CONFIG outage, not a blip. It must not hide under timeout noise.
+    const res = await resolveQueryEmbedding('q', {
+      ...base(),
+      redis,
+      embed: async () => vec(3072),
+    });
+
+    assert.equal(res.reason, 'dim_mismatch');
+    assert.equal(redis.store.get('metrics:semantic_skipped:dim_mismatch'), '1');
+    assert.equal(redis.store.get('metrics:semantic_skipped:embedding_timeout'), undefined);
+  });
+
+  it('the metric is fail-open: a dead Redis counter never fails the reply', async () => {
+    // Already covered for `incr` alone above; pinned here as a P2-6 posture statement — the
+    // observability path must never become the thing that breaks the pipeline it observes.
+    const redis = makeFakeRedis({ failIncr: true });
+    const res = await resolveQueryEmbedding('q', { ...base(), redis, embed: hangingEmbed(), timeoutMs: 10 });
+    assert.equal(res.vector, null);
+    assert.equal(res.reason, 'embedding_timeout');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Orchestrator — negative cache prevents the re-race.
 // ---------------------------------------------------------------------------
 

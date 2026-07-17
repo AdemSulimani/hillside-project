@@ -19,6 +19,7 @@ const LABELS: Record<string, string> = {
   message_send_failed: 'Message sending failed',
   token_refresh_failed: 'Token refresh failed',
   ai_reply_undelivered: 'AI reply undelivered — needs manual reply',
+  provider_unavailable: 'AI temporarily unavailable — needs manual reply',
   confidence_band_abstain: 'Borderline AI decision — worth a look',
   multiple_channels_matched: 'Channel connected to more than one business',
 };
