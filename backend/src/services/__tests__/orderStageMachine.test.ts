@@ -11,6 +11,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decideOrderStage,
+  deriveEffectiveOrderStage,
   detectNewOrderSignalLexical,
   detectOrderConsentLexical,
   normalizeStage,
@@ -221,4 +222,50 @@ describe('detectNewOrderSignalLexical', () => {
   for (const no of ['sa kushton', 'faleminderit', 'po']) {
     it(`does NOT treat as new-order: "${no}"`, () => assert.equal(detectNewOrderSignalLexical(no), false));
   }
+});
+
+describe('deriveEffectiveOrderStage (P2-2 F4: history evidence survives a lost marker write)', () => {
+  const NO_INTENT = { product_name: null, is_ready_to_order: false };
+  const INTENT = { product_name: 'Whey 2kg', is_ready_to_order: true };
+
+  describe('persisted stage present', () => {
+    it('a valid persisted stage round-trips when history agrees', () => {
+      assert.equal(deriveEffectiveOrderStage('awaiting_confirmation', true, NO_INTENT), 'awaiting_confirmation');
+      assert.equal(deriveEffectiveOrderStage('collecting', false, INTENT), 'collecting');
+      assert.equal(deriveEffectiveOrderStage('browsing', false, NO_INTENT), 'browsing');
+    });
+
+    it('THE F4 REGRESSION: a stage stranded at collecting by a swallowed marker-write failure is advanced by the history evidence, so the customer consent can still create the order', () => {
+      // The data-confirmation ask IS in the delivered history (dataConfirmationSent=true) but the
+      // best-effort marker/stage UPDATE failed, leaving the column at 'collecting'. Before the fix
+      // the persisted value short-circuited and consent was silently refused forever (RC-22
+      // silent-forfeiture through a new mechanism).
+      assert.equal(deriveEffectiveOrderStage('collecting', true, INTENT), 'awaiting_confirmation');
+      assert.equal(deriveEffectiveOrderStage('browsing', true, NO_INTENT), 'awaiting_confirmation');
+    });
+
+    it('history evidence NEVER downgrades a persisted later stage', () => {
+      assert.equal(deriveEffectiveOrderStage('awaiting_confirmation', true, INTENT), 'awaiting_confirmation');
+      assert.equal(deriveEffectiveOrderStage('confirmed', true, INTENT), 'confirmed');
+      assert.equal(deriveEffectiveOrderStage('confirmed', false, NO_INTENT), 'confirmed');
+    });
+
+    it('an unknown persisted value normalizes to browsing and still honors the history evidence', () => {
+      assert.equal(deriveEffectiveOrderStage('garbage', false, NO_INTENT), 'browsing');
+      assert.equal(deriveEffectiveOrderStage('garbage', true, NO_INTENT), 'awaiting_confirmation');
+    });
+  });
+
+  describe('legacy NULL row (pre-077 conversations)', () => {
+    it('derives awaiting_confirmation from the history evidence', () => {
+      assert.equal(deriveEffectiveOrderStage(null, true, NO_INTENT), 'awaiting_confirmation');
+      assert.equal(deriveEffectiveOrderStage(undefined, true, INTENT), 'awaiting_confirmation');
+    });
+
+    it('derives collecting from intent signals, else browsing', () => {
+      assert.equal(deriveEffectiveOrderStage(null, false, INTENT), 'collecting');
+      assert.equal(deriveEffectiveOrderStage(null, false, { product_name: 'Whey 2kg', is_ready_to_order: false }), 'collecting');
+      assert.equal(deriveEffectiveOrderStage(null, false, NO_INTENT), 'browsing');
+    });
+  });
 });

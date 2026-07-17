@@ -13,6 +13,7 @@ import {
   isCannedHoldingCopy,
   normalizeCannedText,
 } from '../cannedReplyText';
+import { GET_BACK_TO_YOU_MESSAGES } from '../uncertainAnswerFallbackGuard';
 
 describe('isCannedHoldingCopy', () => {
   it('recognises every HOLDING_MESSAGES value in each locale', () => {
@@ -34,6 +35,15 @@ describe('isCannedHoldingCopy', () => {
     const original = HOLDING_MESSAGES.sq.usageEscalation;
     const mangled = `  ${original.toUpperCase().replace(/ë/gi, 'e').replace(/ç/gi, 'c')}\n`;
     assert.equal(isCannedHoldingCopy(mangled), true);
+  });
+
+  it('recognises the uncertain-answer escalation reply in each locale (XA-F1 regression)', () => {
+    // Sent as finalReplyText by the uncertain-answer fallback guard. Before the fix it was the one
+    // class of delivered holding copy missing from the registry, so the next turn's transcript fed
+    // "we will get back to you shortly" back to the model as an authoritative assistant statement.
+    for (const text of Object.values(GET_BACK_TO_YOU_MESSAGES)) {
+      assert.equal(isCannedHoldingCopy(text), true, `get-back-to-you: ${text}`);
+    }
   });
 
   it('recognises the legacy verbatim usage-escalation variant', () => {

@@ -17,6 +17,10 @@
  * up automatically by the classifier.
  */
 import type { ReplyLocale } from './aiService';
+// Pure, import-free module — no runtime cycle. The uncertain-answer escalation reply is sent as
+// finalReplyText by processAIReply, so it is exactly the class of delivered non-authoritative
+// copy this registry exists to relabel.
+import { GET_BACK_TO_YOU_MESSAGES } from './uncertainAnswerFallbackGuard';
 
 /** Holding / escalation / ack copy sent instead of (or after) a substantive AI reply. */
 export const HOLDING_MESSAGES: Record<
@@ -113,6 +117,13 @@ const CANNED_SYSTEM_COPY_NORMALIZED: ReadonlySet<string> = (() => {
   }
   for (const legacy of LEGACY_USAGE_ESCALATION_VARIANTS) {
     set.add(normalizeCannedText(legacy));
+  }
+  // XA-F1: the uncertain-answer escalation reply ("we will get back to you shortly") lives in
+  // uncertainAnswerFallbackGuard rather than HOLDING_MESSAGES — without this sweep it re-entered
+  // the next turn's transcript as an authoritative `assistant` turn, bypassing RC-16 for one of
+  // the most common escalation replies.
+  for (const text of Object.values(GET_BACK_TO_YOU_MESSAGES)) {
+    set.add(normalizeCannedText(text));
   }
   return set;
 })();

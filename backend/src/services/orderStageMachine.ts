@@ -153,6 +153,36 @@ export function normalizeStage(raw: string | null | undefined): OrderStage {
 }
 
 /**
+ * The order_stage the FSM should evaluate this turn. Trust the persisted column when it has been
+ * set; for a legacy row whose column is still NULL, derive it deterministically from history (the
+ * same signals the legacy gate uses) so the decision is independent of the lazy-seed timing.
+ *
+ * The history evidence (`dataConfirmationSent` — did any assistant turn actually send the
+ * data-confirmation ask?) is OR'ed in even when a persisted stage exists: the post-send marker
+ * writes are best-effort (a failure is logged and swallowed), so a transient DB blip on that one
+ * UPDATE can strand the column at 'collecting' after the ask was actually sent — and a stage that
+ * ignored history would then silently refuse the customer's consent forever (the RC-22
+ * silent-forfeiture shape through a new mechanism). History only moves the stage FORWARD to
+ * `awaiting_confirmation`; it never downgrades a persisted later stage.
+ */
+export function deriveEffectiveOrderStage(
+  persisted: string | null | undefined,
+  dataConfirmationSent: boolean,
+  intent: { product_name: string | null; is_ready_to_order: boolean },
+): OrderStage {
+  if (persisted != null) {
+    const stage = normalizeStage(persisted);
+    if (dataConfirmationSent && (stage === 'browsing' || stage === 'collecting')) {
+      return 'awaiting_confirmation';
+    }
+    return stage;
+  }
+  if (dataConfirmationSent) return 'awaiting_confirmation';
+  if (intent.product_name != null || intent.is_ready_to_order === true) return 'collecting';
+  return 'browsing';
+}
+
+/**
  * The pure FSM transition. Given the current stage and an event, returns the next stage and whether
  * an order should be created this turn. Deterministic: the same `(current, event)` always yields the
  * same decision.
