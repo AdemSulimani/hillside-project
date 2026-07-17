@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
-import { knobNumber } from '../config/knobs';
+import { knobNumber, knobString } from '../config/knobs';
 import { resolveModel } from '../config/models';
 import { instrumentOpenAIClient } from './openaiCallTracker';
+import { ProviderBreaker, type BreakerMode } from './providerResilience';
+import { installProviderResilience } from './providerResilienceInstall';
+import { logger } from '../utils/logger';
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error('OPENAI_API_KEY is not configured');
@@ -29,6 +32,47 @@ export const openai = new OpenAI({
 // inside an AI-reply job into the decision ledger's `usage.calls` (transparent pass-through
 // outside a tracking context — see services/openaiCallTracker.ts).
 instrumentOpenAIClient(openai);
+
+/**
+ * P2-6 (RC-19/RC-04): bound every OpenAI call and stop dialing a dead provider.
+ *
+ * `OPENAI_TIMEOUT_MS` above is PER ATTEMPT — with OPENAI_MAX_RETRIES=3 one call can hold the
+ * per-conversation lock for ~240s. This installs the second wrapper on the same seam as the tracker
+ * (order: resilience → tracker → orig), so all ~35 call sites get the cap, the shared per-turn
+ * deadline, and the breaker with no call-site edits. Inert outside an AI-reply turn, and inert
+ * entirely while the knobs sit at their defaults.
+ *
+ * THIS is the one place P2-6's knobs are read. The wrapper takes them as injected thunks so the
+ * seam stays unit-testable without `process.env` mutation (`node:test` isolates files, not cases).
+ *
+ * The two duration knobs are declared `binding: 'frozen'` — "read once into a module-load const" —
+ * so they are captured here rather than re-read per call, keeping the manifest's binding field
+ * honest (it drives config-fingerprint participation; RC-06's own drift axis). `OPENAI_CIRCUIT_BREAKER`
+ * is `per-call` by contrast, so an incident can flip it without a redeploy.
+ */
+const OPENAI_CALL_TIMEOUT_MS = knobNumber('OPENAI_CALL_TIMEOUT_MS');
+
+export const providerBreaker = new ProviderBreaker({
+  failureThreshold: knobNumber('OPENAI_BREAKER_FAILURE_THRESHOLD'),
+  cooldownMs: knobNumber('OPENAI_BREAKER_COOLDOWN_MS'),
+  halfOpenProbes: knobNumber('OPENAI_BREAKER_HALF_OPEN_PROBES'),
+  now: () => Date.now(),
+  onTransition: (t) => {
+    // logger.warn/error carry the correlation tags and route to Sentry for free (P2-4). Process-level
+    // facts like this deliberately get no table: the audit's own rollback note says the DLQ table is
+    // the only additive schema, and a breaker transition belongs to no tenant and answers no message.
+    const meta = { provider: 'openai', ...t };
+    if (t.to === 'open') logger.error('[provider] circuit breaker opened', undefined, meta);
+    else logger.warn('[provider] circuit breaker state change', meta);
+  },
+});
+
+installProviderResilience(openai, {
+  breaker: providerBreaker,
+  readMode: () => knobString('OPENAI_CIRCUIT_BREAKER') as BreakerMode,
+  readCallCapMs: () => OPENAI_CALL_TIMEOUT_MS,
+  readForcedError: () => knobString('TEST_FORCE_PROVIDER_ERROR'),
+});
 
 /**
  * Model ids, resolved through the single chain in `config/models.ts` (P2-7 / M8).

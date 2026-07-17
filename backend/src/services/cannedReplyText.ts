@@ -26,6 +26,14 @@ export const HOLDING_MESSAGES: Record<
     usageEscalation: string;
     productKnowledgeEscalation: string;
     orderInfoUpdated: string;
+    /**
+     * P2-6: the graceful-degradation floor. Sent when an OpenAI failure mid-turn means the reply's
+     * safety guards did not actually run, so no substantive answer can be trusted. Deliberately
+     * says nothing about products, prices, or the question itself — the whole point is that we
+     * could not verify anything this turn. Phrased as a normal "a person will follow up", not as an
+     * error: the customer does not care whose provider is down.
+     */
+    providerUnavailable: string;
   }
 > = {
   sq: {
@@ -37,6 +45,8 @@ export const HOLDING_MESSAGES: Record<
       'Së shpejti do t’ju kontaktojë një specialist me informacion të saktë për produktin.',
     orderInfoUpdated:
       'Informacioni i porosisë suaj u përditësua. Faleminderit!',
+    providerUnavailable:
+      'Faleminderit për mesazhin! Një anëtar i ekipit tonë do t’ju përgjigjet së shpejti.',
   },
   en: {
     postPurchaseSupport:
@@ -47,6 +57,8 @@ export const HOLDING_MESSAGES: Record<
       'A product specialist will contact you shortly with accurate details.',
     orderInfoUpdated:
       'Your order info has been updated. Thank you!',
+    providerUnavailable:
+      'Thank you for your message! A team member will get back to you shortly.',
   },
 };
 

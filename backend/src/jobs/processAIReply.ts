@@ -1,4 +1,4 @@
-import { knobNumber } from '../config/knobs';
+import { knobBool, knobNumber, knobString } from '../config/knobs';
 ﻿import crypto from 'crypto';
 import pool from '../db/pool';
 import { logSafe, logSafeStructured } from '../utils/redact';
@@ -155,6 +155,17 @@ import {
   decideSensitivePathAction,
   SensitivePathEscalatedError,
 } from '../services/sensitivePathFailClosed';
+import {
+  rearmTurnDeadline,
+  runWithTurnResilience,
+  shouldDegradeTurn,
+  summarizeTurnFailures,
+  turnProviderFailures,
+  type BreakerMode,
+} from '../services/providerResilience';
+// The breaker singleton lives where its knobs are read (openaiClient), and this job already loads
+// that module transitively via aiService — so this import adds no new module-load surface.
+import { providerBreaker } from '../services/openaiClient';
 import {
   CONFIDENCE_CONTRACT_SYMMETRY,
   CONFIDENCE_HYSTERESIS_BAND,
@@ -710,6 +721,54 @@ const GROUNDING_GATE_STRIP_FLOOR = (() => {
  */
 const SENSITIVE_PATH_FAIL_CLOSED =
   (process.env.SENSITIVE_PATH_FAIL_CLOSED ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P2-6 (RC-19): the graceful-degradation floor — ONE safe outcome when the provider fails
+ * mid-turn, replacing ~21 independent fail-open guesses.
+ *
+ * The gate is TURN-level and reads a COUNTER, not an exception, and that is the whole design.
+ * A `ProviderUnavailableError` cannot be caught reliably: ~21 classifiers in aiService.ts
+ * swallow any error into a fail-open default (`classifySpeculativeHealthAdvice` returns
+ * `false` — "no unsafe advice here" — on a transport error), and the sensitive umbrella below
+ * swallows what escapes them. Worse, `generateReply` runs FIRST and is the biggest budget
+ * consumer, so a per-turn deadline preferentially starves the GUARDS while preserving the
+ * reply — shipping a fast unguarded reply where today we'd get a slow guarded one. Reading the
+ * store at the pre-send gate is immune to both.
+ *
+ * This is also why the caps must never ship without it: on its own, a cap shorter than a blip
+ * aborts the refund detector, the umbrella logs "continuing normal flow", and a SALES reply
+ * goes to a refund demand — RC-19, but faster. Defaults OFF (byte-for-byte legacy).
+ *
+ * Read PER CALL (not frozen into a module const) because the manifest declares it
+ * `binding: 'per-call'`, and the two must agree. A frozen read would be the worst of both: the
+ * knob is excluded from the config fingerprint *because* it is per-call, so a fleet where one
+ * worker missed the env update would report a single hash — "the fleet agrees" — while half the
+ * workers shipped replies whose guards had fail-opened. It also has to share a lifetime with
+ * OPENAI_CIRCUIT_BREAKER, which IS genuinely per-call: the breaker's rationale says it must never
+ * be enabled without this flag, and two knobs with different lifetimes can't honour that pairing
+ * during a rollout.
+ */
+function gracefulDegradeMode(): boolean {
+  return knobBool('GRACEFUL_DEGRADE_MODE');
+}
+
+/**
+ * P2-6: the breaker mode, per-call for the same reason as above (an incident must be able to flip
+ * it without a redeploy). Passed to `snapshot()` only so a monitor-mode fleet is not recorded in
+ * the ledger as if it were enforcing.
+ */
+function breakerMode(): BreakerMode {
+  return knobString('OPENAI_CIRCUIT_BREAKER') as BreakerMode;
+}
+
+/**
+ * P2-6: the shared per-turn OpenAI budget (ms). 0 (default) = off.
+ *
+ * Read once at module load because the knob is declared `binding: 'frozen'` — the manifest's
+ * binding field drives config-fingerprint participation (RC-06's drift axis), so a `frozen`
+ * knob that is actually re-read per call would make the fingerprint a lie.
+ */
+const OPENAI_TURN_DEADLINE_MS = knobNumber('OPENAI_TURN_DEADLINE_MS');
 
 /**
  * TEST-ONLY fault injection for the P0-4 staging validation ("refund demand during an
@@ -1426,6 +1485,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
   // P2-4 Part 2 (RC-17): a third scope, same rationale — it carries the receipt snapshot down to
   // `loadAIConfig` (six frames below) as a cache staleness floor, without a `generateReply`
   // signature change. Undefined snapshot → every consumer behaves exactly as before.
+  //
+  // P2-6 (RC-19): a fourth scope — the shared per-turn OpenAI budget + this turn's provider-failure
+  // ledger. Same reason the others nest here: it reaches all ~25 call sites through the wrapper on
+  // the SDK singleton without touching one of them. Outside this scope (product imports, crons, the
+  // offline eval) the wrapper is a pure pass-through. With OPENAI_TURN_DEADLINE_MS at its default 0
+  // there is no deadline, but the store still records failures — which is exactly the step-1
+  // rollout (degrade on, caps off).
   return runWithOpenAICallTracking(() =>
     runWithLogContext(
       {
@@ -1435,7 +1501,10 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
         conversationId: data.conversationId,
         component: 'processAIReply',
       },
-      () => runWithReceiptSnapshot(data.receiptSnapshot, () => processAIReplyInner(data)),
+      () =>
+        runWithReceiptSnapshot(data.receiptSnapshot, () =>
+          runWithTurnResilience(OPENAI_TURN_DEADLINE_MS, () => processAIReplyInner(data)),
+        ),
     ),
   );
 }
@@ -2007,6 +2076,195 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         tenantId,
       });
     }
+  };
+
+  /**
+   * P2-6 (RC-19): the graceful-degradation floor — the ONE safe outcome for a turn in which the
+   * provider failed.
+   *
+   * Invoked from the pre-send gate when `turnProviderFailures()` is non-empty, i.e. at least one
+   * OpenAI call this turn did not produce a real answer — whether it fast-failed on an open
+   * breaker, blew the cap, was starved of budget, or 5xx'd — REGARDLESS of whether some classifier
+   * then swallowed it into a confident-looking fail-open default. A reply built on that is a reply
+   * whose safety guards silently did not run, so we do not send it.
+   *
+   * Shape deliberately mirrors `escalateSensitivePathOnDetectorError` above: pause + human_replied
+   * =false + alert committed in ONE transaction FIRST (so the guarantee holds even if the send
+   * fails), then a best-effort holding send that can never propagate.
+   *
+   * NOTE the `if (canned) … else …` pair rather than `stageCannedReply` alone: that helper returns
+   * null whenever AI_REPLY_STAGE_BEFORE_SEND is off — its default — so relying on it by itself
+   * would pause the conversation, raise the alert, and send the customer SILENCE. That is strictly
+   * worse than the status quo, where the throw propagates and BullMQ retries into a real reply.
+   */
+  const degradeToHoldingAndEscalate = async (): Promise<boolean> => {
+    const failures = turnProviderFailures();
+    const summary = summarizeTurnFailures(failures);
+    logger.error('[ai.reply] provider failed mid-turn — degrading to holding + escalate', undefined, {
+      conversationId,
+      tenantId,
+      failures: summary,
+      breaker: providerBreaker.snapshot(breakerMode()),
+    });
+
+    const precheck = await shouldStillSendAutomatedReply({
+      tenantId,
+      channelId,
+      conversationId,
+      scheduledInboundExternalId: data.messageExternalId,
+    });
+
+    // RC-20: the sensitive block may already have put an ack on the wire and THEN thrown — with
+    // SENSITIVE_PATH_FAIL_CLOSED off the umbrella logs "continuing normal flow" and falls through
+    // to here. `shouldStillSendAutomatedReply` re-checks the gates and superseding inbounds, but it
+    // does not know what THIS job already sent, so it would not catch it. The alert is still owed
+    // either way — but never stack a second message on top of the ack.
+    const holdingSendAllowed = precheck.ok && !sensitivePathOutboundSent;
+
+    const locale = inferHoldingMessageLocale(inboundText, replyLanguage);
+    const holdingMessage = HOLDING_MESSAGES[locale].providerUnavailable;
+
+    const client = await pool.connect();
+    let alert: AIAlert | undefined;
+    try {
+      await client.query('BEGIN');
+      /**
+       * DELIBERATELY NO `ai_paused = true` HERE — unlike every other escalation in this file.
+       *
+       * A pause means "a human must own this conversation now", and it is STICKY: the only exits
+       * are a human toggle or an alert resolved with `resume_ai:true` (`AI_AUTO_RESUME` is
+       * per-reason and defaults off, and only covers `rate_limit_exceeded`). That is right for a
+       * refund or a complaint — the conversation itself needs a person.
+       *
+       * A provider outage is not that. Nothing about the CONVERSATION is unsafe; our dependency was
+       * down for a moment. And this is the only escalation reason driven by a GLOBAL condition, so
+       * it fans out where a per-conversation reason never does: one 5-minute OpenAI blip would pause
+       * every conversation that happened to be mid-turn, and a merchant with 200 live threads would
+       * come back to 200 permanently AI-disabled ones, each needing a manual un-pause. The cure
+       * would be far worse than the disease P2-6 treats.
+       *
+       * So the floor here is: a neutral holding message (the customer is not left on read) + a
+       * durable, distinct, RETRYABLE alert (the merchant can follow up and sees what happened). The
+       * next inbound is answered normally the moment the provider is healthy — which is exactly what
+       * "retryable" is supposed to mean. Nothing unsafe was sent, so nothing needs to be held.
+       *
+       * Note `human_replied` is NOT touched either: it is a sticky billing flag, and forcing it
+       * false on a conversation a human HAS replied to would silently re-qualify it for use-case
+       * billing.
+       */
+      alert = await createAIAlert(
+        {
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          message_id: lastInbound?.id ?? null,
+          // Distinct + retryable (mirrors P2-1's `grounding_check_unavailable`): this turn is not
+          // unanswerable, it is merely unanswered.
+          reason: 'provider_unavailable',
+          // Not a genuine classification — the turn degraded because the provider failed.
+          fail_closed: true,
+        },
+        client,
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      // ROLLBACK guarded: on a dead connection an unguarded ROLLBACK throws and REPLACES the real
+      // error (the rate-limit block above uses the same idiom).
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+      if (sensitivePathOutboundSent) {
+        // RC-20: an ack from the sensitive block is already on the wire, so a re-throw would
+        // re-run the job and double-send it. Mirrors the umbrella's own `post_send` → 'stop'
+        // policy. (The earlier draft claimed "nothing on the wire yet" here — provably false:
+        // `holdingSendAllowed` above exists precisely because it may not be.)
+        logger.error('[ai.reply] degrade escalation failed after an ack was sent — stopping', err, {
+          conversationId,
+          tenantId,
+        });
+        return true;
+      }
+      throw err; // pre-send: nothing is on the wire, so a BullMQ retry is safe
+    }
+    client.release();
+
+    // Committed above ⇒ the floor's guarantee (paused, human notified, human_replied=false) is
+    // already met. Everything below is BEST-EFFORT and must never propagate.
+    try {
+      if (!holdingSendAllowed) {
+        console.info('[ai.reply] degraded-turn escalation skipping holding send', {
+          conversationId,
+          tenantId,
+          reason: precheck.ok ? 'outbound_already_sent_this_job' : precheck.reason,
+          ...(precheck.ok ? {} : precheck.logPayload),
+        });
+        if (alert) {
+          const contactForAlert = await findContactById(conversation.contact_id);
+          socketService.emitAIAlert(tenantId, {
+            ...alert,
+            message_content: inboundText || null,
+            contact_name: contactForAlert?.name?.trim() || 'Customer',
+            channel_type: channel.type,
+            channel_name: channel.name,
+          });
+          socketService.emitConversationUpdated(tenantId, conversationId);
+        }
+        return true;
+      }
+
+      const contactForSend = await findContactById(conversation.contact_id);
+      let degradedSendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
+      let outboundHolding: Message;
+      const canned = await stageCannedReply({
+        replySlot: 'holding:degraded',
+        text: holdingMessage,
+        contact: contactForSend,
+      });
+      if (canned) {
+        degradedSendResult = canned.sendResult;
+        if (!canned.outboundMessage) return true; // retry of an already-sent row
+        outboundHolding = canned.outboundMessage;
+      } else {
+        if (contactForSend) {
+          degradedSendResult = await sendMessage(channel, contactForSend.external_id, holdingMessage);
+        }
+        outboundHolding = await createMessage({
+          tenant_id: tenantId,
+          conversation_id: conversationId,
+          external_message_id: degradedSendResult?.graphMessageId ?? `ai_${crypto.randomUUID()}`,
+          direction: 'outbound',
+          type: 'text',
+          content: holdingMessage,
+          sent_by: 'ai',
+        });
+      }
+
+      if (alert) {
+        socketService.emitAIAlert(tenantId, {
+          ...alert,
+          message_content: inboundText || null,
+          contact_name: contactForSend?.name?.trim() || 'Customer',
+          channel_type: channel.type,
+          channel_name: channel.name,
+        });
+      }
+      socketService.emitNewMessage(tenantId, outboundHolding);
+      socketService.emitConversationUpdated(tenantId, conversationId);
+
+      if (degradedSendResult && !degradedSendResult.success) {
+        const errReason = degradedSendResult.error ?? 'Failed to send degraded holding message';
+        await updateMessageSendFailure(outboundHolding.id, tenantId, 'failed', errReason);
+        socketService.emitMessageSendFailed(tenantId, {
+          messageId: outboundHolding.id,
+          conversationId,
+          error: errReason,
+        });
+      }
+    } catch (bestEffortErr) {
+      logger.error('[ai.reply] degraded-turn post-commit step failed', bestEffortErr, {
+        conversationId,
+        tenantId,
+      });
+    }
+    return true;
   };
 
   // P0-4 (RC-19): wraps a SENSITIVE detector call so a transport/parse throw fails CLOSED.
@@ -4418,6 +4676,51 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     }
   };
 
+  // ---- P2-6 (RC-19): the graceful-degradation gate. ----
+  //
+  // THE one decision point for the whole turn's provider posture, placed here because this is the
+  // last moment before anything reaches the customer and every pre-send guard has now run (or
+  // silently not run). If any OpenAI call this turn failed, the reply above was assembled from
+  // guards that may have fail-opened — `classifySpeculativeHealthAdvice` returning `false` on a
+  // transport error is indistinguishable, at this point, from it returning `false` because the
+  // text is clean. So we do not send it: holding + escalate instead.
+  //
+  // Deliberately reads a counter rather than catching an exception — see GRACEFUL_DEGRADE_MODE.
+  const turnFailures = turnProviderFailures();
+  if (shouldDegradeTurn(turnFailures, gracefulDegradeMode())) {
+    await degradeToHoldingAndEscalate();
+    // Record the degradation in the ledger BEFORE returning. The verdict literal below is never
+    // reached on this path, so without this the ledger would only ever show a healthy breaker —
+    // exactly the state nobody needs to investigate.
+    void writeLedgerBestEffort(
+      buildLedgerRecord({
+        tenantId,
+        conversationId,
+        correlationId: ledgerCorrelationId,
+        traceId,
+        replySlot: 'holding:degraded',
+        decisionKind: 'escalation:provider_unavailable',
+        messageId: lastInbound?.id ?? null,
+        decisionEvents,
+        guardVerdicts: {
+          providerBreaker: providerBreaker.snapshot(breakerMode()),
+          providerFailures: summarizeTurnFailures(turnFailures),
+          degraded: true,
+        },
+      }),
+    );
+    return;
+  }
+
+  // P2-6: re-arm — NOT clear — the turn's OpenAI budget before the send.
+  //
+  // The audit's edge case is "the deadline must not abort mid-send (scope to pre-send)". But simply
+  // nulling the budget would hand `runOrderDetectionTail()` an UNBOUNDED one, and that tail makes
+  // OpenAI calls from inside the very try whose `finally` releases `ai_conv_lock` — re-creating the
+  // exact lock-expiry defect P2-6 exists to remove. A fresh budget bounds the tail without letting
+  // pre-send spend starve it (a starved order detection forfeits a commissionable order).
+  rearmTurnDeadline(OPENAI_TURN_DEADLINE_MS);
+
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
@@ -4434,6 +4737,11 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     groundingGateEscalated,
     groundingGateReason: groundingGateEscalated ? groundingGateReason : null,
     uncertainAnswerEscalated,
+    // P2-6: which config served this reply, and whether the provider misbehaved on the way. Scalars
+    // only — `guard_verdicts` is already Record<string, unknown>, so this needs no migration.
+    providerBreaker: providerBreaker.snapshot(breakerMode()),
+    providerFailures: summarizeTurnFailures(turnFailures),
+    degraded: false,
   };
   const ledgerDecisionKind = groundingGateEscalated
     ? `escalation:grounding:${groundingGateReason}`
