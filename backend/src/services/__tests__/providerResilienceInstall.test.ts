@@ -287,7 +287,9 @@ describe('installProviderResilience — cap + deadline', () => {
     });
     await runWithTurnResilience(15, async () => {
       await assert.rejects(() => chat(client)); // the 15ms turn budget is the binding constraint
-      assert.equal(turnProviderFailures()[0]?.cause, 'call_timeout');
+      // P2-6-F2: the turn budget won, so the cause is turn_truncated (recorded, never counted) —
+      // a sliver timeout is a statement about our budget, not provider health.
+      assert.equal(turnProviderFailures()[0]?.cause, 'turn_truncated');
     });
   });
 
@@ -343,6 +345,52 @@ describe('installProviderResilience — cap + deadline', () => {
           .create({ model: 'text-embedding-3-small', input: 'x' }),
         (e: ProviderUnavailableError) => e.cause === 'breaker_open',
       );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-6-F2 — which bound won decides whether the breaker may count the timeout.
+// ---------------------------------------------------------------------------
+
+describe('P2-6-F2: budget-sliver truncation never opens the breaker', () => {
+  it('turn budget below the cap: timeout is turn_truncated, recorded for degradation, uncounted', async () => {
+    const { client, deps } = installed(() => ({ kind: 'hang' }), {
+      readMode: () => 'on' as BreakerMode,
+      readCallCapMs: () => 10_000, // generous cap — the tiny turn budget is the binding bound
+    });
+
+    // Four separate turns (threshold is 3), one truncated call each: if truncation counted, the
+    // breaker would be open by turn 4.
+    for (let turn = 0; turn < 4; turn++) {
+      await runWithTurnResilience(40, async () => {
+        await assert.rejects(
+          () => chat(client),
+          (e: ProviderUnavailableError) => e.cause === 'turn_truncated',
+        );
+        const causes = turnProviderFailures().map((f) => f.cause);
+        assert.deepEqual(causes, ['turn_truncated'], 'recorded for the degradation floor');
+      });
+    }
+
+    assert.notEqual(deps.breaker.decide('chat', 'on'), 'reject', 'breaker must stay closed');
+  });
+
+  it('cap-won timeout (remaining budget above the cap) still counts and opens', async () => {
+    const { client, deps } = installed(() => ({ kind: 'hang' }), {
+      readMode: () => 'on' as BreakerMode,
+      readCallCapMs: () => 15, // the cap is the binding bound; the 10s turn budget is generous
+    });
+
+    await runWithTurnResilience(10_000, async () => {
+      for (let i = 0; i < 3; i++) {
+        await assert.rejects(
+          () => chat(client),
+          (e: ProviderUnavailableError) => e.cause === 'call_timeout',
+        );
+      }
+      // Threshold 3 reached on genuine full-cap elapses: the next decision must fast-fail.
+      assert.equal(deps.breaker.decide('chat', 'on'), 'reject');
     });
   });
 });

@@ -143,6 +143,14 @@ async function guard(
     }
 
     const effectiveMs = smallestPositive(capMs, remainingMs);
+    // P2-6-F2: which bound is binding? When the turn budget shrank below the per-call cap (or no
+    // cap is configured), a timeout is a statement about OUR budget, not provider health — it is
+    // classified `turn_truncated` and never counts toward the breaker. Only a full-cap elapse is
+    // provider evidence. Mirrors `smallestPositive` semantics (non-positive cap = no cap).
+    const capApplies = capMs !== null && capMs > 0;
+    const turnBudgetWon =
+      remainingMs !== null && remainingMs > 0 && (!capApplies || remainingMs < (capMs as number));
+    const ourAbortCause = turnBudgetWon ? ('turn_truncated' as const) : ('call_timeout' as const);
     const forced = deps.readForcedError?.() ?? '';
 
     // --- Steps 3-5: abort + race + always clear the timer. ---
@@ -183,7 +191,7 @@ async function guard(
           timer = setTimer(() => {
             ourAbortFired = true;
             ctl.abort();
-            reject(new ProviderUnavailableError('call_timeout', kind));
+            reject(new ProviderUnavailableError(ourAbortCause, kind));
           }, effectiveMs);
         });
         // The orphan MUST be caught: once the race settles on the deadline, an unhandled rejection
@@ -196,7 +204,10 @@ async function guard(
       return result;
     } catch (err) {
       // --- Step 6: record. Cause comes from OUR bookkeeping, never from sniffing the error. ---
-      const cause = classifyProviderError(err, ourAbortFired);
+      let cause = classifyProviderError(err, ourAbortFired);
+      // The abort-race fallback (the SDK's abort rejection winning the race over our deadline
+      // rejection) classifies a wrapper abort as call_timeout; apply the same bound-won rule.
+      if (cause === 'call_timeout' && ourAbortFired && turnBudgetWon) cause = 'turn_truncated';
       if (cause) {
         noteProviderFailure(kind, cause);
         deps.breaker.recordFailure(kind, cause, mode);

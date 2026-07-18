@@ -1,4 +1,5 @@
-import { knobNumber } from '../config/knobs';
+import { knobBool, knobNumber } from '../config/knobs';
+import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import type { ProductImageRef } from './productImageRequestService';
 import {
@@ -145,6 +146,9 @@ const SIMILARITY_THRESHOLD = knobNumber('SIMILARITY_THRESHOLD');
 // P1-5: cap on the masked system-prompt copy stored in the decision ledger. Enough to see the
 // persona/blocks/footer/injected directives without persisting the full 26–33K-char prompt.
 const LEDGER_PROMPT_PREVIEW_MAX_CHARS = 12000;
+// P2-4 (F2): when on, the FULL redacted system prompt is stored content-addressed in
+// ai_prompt_blobs (migration 082) and the ledger row's prompt.system_hash joins to it.
+const LEDGER_PROMPT_BLOBS = knobBool('LEDGER_PROMPT_BLOBS');
 // Log the live value once at startup so operators always know which threshold is active
 // (the .env.example default of 0.65 and an overriding SIMILARITY_THRESHOLD=0.75 both
 // used to be in circulation, causing silent config drift in deployed environments).
@@ -196,12 +200,9 @@ export const SUMMARY_SLOT_BACKED =
 
 /**
  * Hard cap (characters) on the slot-backed summary's extractive tail — the RC-26 unbudgeted-prompt
- * guard. Env-overridable.
+ * guard. Read through the P2-7 manifest.
  */
-const SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS = (() => {
-  const n = parseInt(process.env.SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS || '600', 10);
-  return Number.isFinite(n) && n > 0 ? n : 600;
-})();
+const SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS = knobNumber('SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS');
 
 const CONTEXT_MAX_HISTORY_TOKENS = (() => {
   const raw = process.env.CONTEXT_MAX_HISTORY_TOKENS;
@@ -269,10 +270,7 @@ const AI_REPLY_SEED = knobNumber('AI_REPLY_SEED');
  * `facts_used` JSON wrapper. A truncated structured output (`finish_reason:length`) is treated as
  * a retryable generation failure by `parseFactsUsedCompletion`.
  */
-const FACTS_CONTRACT_MAX_TOKENS = (() => {
-  const n = parseInt(process.env.FACTS_CONTRACT_MAX_TOKENS || '1200', 10);
-  return Number.isFinite(n) && n > 0 ? n : 1200;
-})();
+const FACTS_CONTRACT_MAX_TOKENS = knobNumber('FACTS_CONTRACT_MAX_TOKENS');
 
 /**
  * Appended to the system prompt ONLY when the contract is active, so the default prompt is
@@ -445,7 +443,12 @@ async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
   const n = await countTenantPromptBlocks(tenantId);
   if (n === 0) {
     await seedTenantPromptBlocksFromCatalog(tenantId);
-    await redisConnection.del(`tenant_prompt_blocks:${tenantId}`);
+    // P2-3 (F2): the versioned twin must be cleared alongside the legacy key — a DEL of only the
+    // legacy key leaves the AI_CONFIG_VERSIONED_CACHE read path serving the pre-heal blocks.
+    await redisConnection.del(
+      `tenant_prompt_blocks:${tenantId}`,
+      versionedPromptBlocksKey(tenantId),
+    );
     return;
   }
   // Self-healing: push any catalog changes to locked blocks that this tenant
@@ -454,7 +457,10 @@ async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
   // is already current, so the cost is a single cheap equality-check query.
   const updated = await forceSyncLockedBlocksForTenant(tenantId);
   if (updated.length > 0) {
-    await redisConnection.del(`tenant_prompt_blocks:${tenantId}`);
+    await redisConnection.del(
+      `tenant_prompt_blocks:${tenantId}`,
+      versionedPromptBlocksKey(tenantId),
+    );
     console.info('[aiService] Self-healed locked prompt blocks for tenant', {
       tenantId,
       updatedKeys: updated,
@@ -465,10 +471,11 @@ async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
 async function loadTenantPromptBlocksCached(tenantId: string) {
   // P2-3 (RC-17): the prompt-blocks twin shares the ai_config resurrection shape. Under the flag it
   // uses the SAME versioned populate (SET-IF-NEWER, version = newest block updated_at). Block
-  // mutators keep DELETE-based invalidation (there is no cheap fresh-list write-through), so a
-  // narrow residual window remains after an edit — bounded by the every-reply locked-block self-heal
-  // which re-DELs on drift, and block edits are rare. Behind AI_CONFIG_VERSIONED_CACHE; flag-off is
-  // the legacy EX 900 path byte-for-byte.
+  // mutators keep DELETE-based invalidation via invalidateTenantAiCaches (there is no cheap
+  // fresh-list write-through), so a narrow residual window remains after an edit — bounded by the
+  // every-reply locked-block self-heal, which (since the P2-audit F2 fix) DELs BOTH the legacy and
+  // the versioned key on drift, and block edits are rare. Behind AI_CONFIG_VERSIONED_CACHE;
+  // flag-off is the legacy EX 900 path byte-for-byte.
   if (AI_CONFIG_VERSIONED_CACHE) {
     const versionedKey = versionedPromptBlocksKey(tenantId);
     const hit = await readVersionedCache<Awaited<ReturnType<typeof listTenantPromptBlocksRuntime>>>(
@@ -4584,14 +4591,23 @@ Using packaging-derived details (IMPORTANT — source precedence):
 
   // ---- P1-5: capture the decision telemetry that was previously discarded at this line ----
   const usage = completion.usage ?? null;
+  const redactedSystemPrompt = redactPII(systemPrompt);
+  const systemPromptHash = createHash('sha256').update(systemPrompt).digest('hex');
+  // P2-4 (F2): persist the FULL redacted system prompt, content-addressed and deduped, so the
+  // ledger row's system_hash recovers the whole thing — not just the 12K preview head.
+  // Fire-and-forget: a blob write must never slow or fail a reply.
+  if (LEDGER_PROMPT_BLOBS) {
+    void upsertPromptBlob(systemPromptHash, tenantId, redactedSystemPrompt).catch(() => undefined);
+  }
   const telemetry: ReplyTelemetry = {
     prompt: {
       hash: createHash('sha256').update(JSON.stringify(messages)).digest('hex'),
+      systemHash: systemPromptHash,
       charCount: systemPrompt.length,
       tokenEstimate: estimateTokens(systemPrompt),
       // Masked, size-capped copy of the SYSTEM prompt (persona/blocks/footer/injected directives —
       // the §15.2 reconstruction target). redactPII keeps structure while masking any embedded PII.
-      preview: redactPII(systemPrompt).slice(0, LEDGER_PROMPT_PREVIEW_MAX_CHARS),
+      preview: redactedSystemPrompt.slice(0, LEDGER_PROMPT_PREVIEW_MAX_CHARS),
     },
     model: {
       requested: model,

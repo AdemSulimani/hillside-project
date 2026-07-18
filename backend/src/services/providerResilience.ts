@@ -63,6 +63,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * one of a turn's ~25 calls. The reason the 429 rule exists at all — "a bulk import must not open
  * the customer reply path's breaker" — is enforced far more strongly by TURN-SCOPING: imports and
  * crons run outside a turn, where the wrapper never records or consults the breaker at all.
+ *
+ * REFINEMENT (P2-6-F2): `call_timeout` counts ONLY when the per-call cap was the binding bound. A
+ * call truncated because the TURN budget had shrunk below the cap (or when no cap is configured at
+ * all) is classified `turn_truncated` — recorded for the degradation floor, never counted. The
+ * distinction is rule 2 above taken seriously: a turn that spent its own budget says nothing about
+ * provider health, and a ~5-classifier Promise.all fan-out aborting on budget slivers would
+ * otherwise accumulate `failureThreshold` counted failures inside ONE turn and open the breaker
+ * against a healthy provider — degradation causing degradation.
  */
 export type ProviderFailureCause =
   /** Provider returned 5xx, or the connection failed/timed out on its own. The breaker's signal. */
@@ -71,6 +79,11 @@ export type ProviderFailureCause =
   | 'call_timeout'
   /** The turn's shared budget was already spent. Says nothing about the provider — never counted. */
   | 'turn_starved'
+  /**
+   * OUR deadline fired, but the binding bound was the TURN budget (remaining < call cap, or no cap
+   * configured) — the call got a sliver, not a fair cap. A statement about us — never counted.
+   */
+  | 'turn_truncated'
   /** The breaker was open, so we never dialed. Never counted (it IS the breaker's own output). */
   | 'breaker_open'
   /** Provider returned 429. Provider is up; this is our own burst. Never counted. */
@@ -528,6 +541,17 @@ export const AI_QUEUE_BACKOFF_BASE_MS = 10_000;
  * so a brief blip DLQs every in-flight reply, each raising a tenant-facing `ai_reply_undelivered`
  * alert. Exactly the outcome the breaker exists to prevent.
  */
+/**
+ * P2-6 (F6): the documented safety rule "OPENAI_TURN_DEADLINE_MS x2 must stay under
+ * AI_CONVERSATION_LOCK_TTL_MS (never renewed)" as a testable contract instead of prose. x2 because
+ * the budget is re-armed before the send, so one turn can legitimately spend up to two full
+ * budgets while holding the lock; a violated margin means the lock can expire mid-turn and a
+ * second job for the same conversation can start — the exact defect P2-6's caps exist to remove.
+ */
+export function turnDeadlineOutrunsLock(turnBudgetMs: number, lockTtlMs: number): boolean {
+  return turnBudgetMs > 0 && lockTtlMs > 0 && turnBudgetMs * 2 >= lockTtlMs;
+}
+
 export function breakerCooldownOutrunsRetries(p: ProviderPosture): boolean {
   return p.breakerMode === 'on' && p.breakerCooldownMs >= AI_QUEUE_BACKOFF_BASE_MS;
 }

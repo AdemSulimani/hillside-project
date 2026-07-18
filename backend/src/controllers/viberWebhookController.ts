@@ -6,7 +6,7 @@ import { updateChannel } from '../db/models/channel';
 import { cryptoService } from '../services/cryptoService';
 import { webhookQueue } from '../jobs/queues';
 import { redisConnection } from '../jobs/redisConnection';
-import { shouldAcceptWebhookDelivery } from '../services/webhookDelivery';
+import { deriveViberDedupeKey, shouldAcceptWebhookDelivery } from '../services/webhookDelivery';
 
 /** P2-4 Part 2 (RC-11) — see webhookController's twin. Read per-file, one shared decision fn. */
 const WEBHOOK_DEDUPE_REPLAY =
@@ -34,17 +34,6 @@ function parseViberTimestampMs(payload: Record<string, unknown>): number | null 
     return ts < 1_000_000_000_000 ? ts * 1000 : ts;
   }
   return null;
-}
-
-/**
- * Extracts a stable deduplication key for a Viber payload.
- * Uses `message_token` when present (all Viber callback types include it),
- * falling back to a SHA-256 hash of the raw body.
- */
-function extractViberDedupeKey(payload: Record<string, unknown>, rawBody: Buffer): string {
-  const token = payload.message_token;
-  if (token != null && token !== '') return `viber:${String(token)}`;
-  return crypto.createHash('sha256').update(rawBody).digest('hex');
 }
 
 /** Look up a Viber channel by its DB UUID without requiring tenantId. */
@@ -180,8 +169,10 @@ export async function ingestViberWebhook(req: Request, res: Response): Promise<v
     return;
   }
 
-  // Redis-based idempotency guard using message_token.
-  const dedupeKey = `webhook_seen:${extractViberDedupeKey(parsedPayload, rawBody)}`;
+  // Redis-based idempotency guard using message_token. P2-4 (F4): uses the shared, unit-tested
+  // deriveViberDedupeKey (handles Viber's numeric tokens; namespaced body-hash fallback) instead
+  // of the former controller-local copy that drifted from it.
+  const dedupeKey = `webhook_seen:${deriveViberDedupeKey(parsedPayload, rawBody)}`;
   const dedupeResult = await redisConnection.set(dedupeKey, '1', 'EX', 86400, 'NX');
   if (dedupeResult !== 'OK') {
     res.sendStatus(200);

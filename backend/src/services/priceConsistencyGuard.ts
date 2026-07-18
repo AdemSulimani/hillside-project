@@ -39,33 +39,48 @@ export interface StatedPrice {
 }
 
 /**
+ * Numeric core shared by every price pattern. Alternation order matters — the grouped
+ * (thousands-separated) forms must be tried BEFORE the plain form: with the plain-only core,
+ * "1.250,50€" extracted as "250,50" (the regex latched onto the tail after the thousands dot), so
+ * a CORRECT €1.250,50 statement failed the catalog check and was stripped as a hallucination — an
+ * EV-011-class false positive for any product priced over €1,000.
+ */
+const PRICE_NUM = String.raw`\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d{1,7}(?:[.,]\d{1,2})?`;
+
+/**
  * Patterns for price mentions in a reply, supporting:
- *   - "€12.50", "€ 12", "€12,50" (European comma notation)
+ *   - "€12.50", "€ 12", "€12,50" (European comma notation), "€1.250,50" (grouped)
  *   - "12.50 EUR", "12.50 €"
- *   - "ALL 1250", "1250 ALL", "1250 LEK" (Albanian lek)
- *   - "çmimi është 12.50", "price is 12", "costs 25" (bare numbers in price context)
+ *   - "ALL 1250", "1250 ALL", "1250 LEK", "12,500 LEK" (Albanian lek, grouped)
  *
- * Captures the numeric part (group 1) and optional symbol suffix (group 2) so the
- * caller can reconstruct the raw string for logging.
+ * A bare number with NO currency marker ("çmimi është 12.50", "500g", "2 cope", "20%", a phone
+ * number) is deliberately NOT extracted: requiring the marker is what keeps the guard's
+ * over-reach at zero on weights/quantities/percentages (pinned in priceConsistencyGuard.test.ts).
+ *
+ * Captures the numeric part (group 1) so the caller can reconstruct the raw string for logging.
  */
 const PRICE_PATTERNS: RegExp[] = [
-  // Currency symbol prefix: €12, € 12, €12.50, €12,50
-  /€\s*(\d{1,6}(?:[.,]\d{1,2})?)/g,
-  // Currency symbol suffix: 12.50 €, 12 €
-  /(\d{1,6}(?:[.,]\d{1,2})?)\s*€/g,
+  // Currency symbol prefix: €12, € 12, €12.50, €12,50, €1.250,50
+  new RegExp(String.raw`€\s*(${PRICE_NUM})`, 'g'),
+  // Currency symbol suffix: 12.50 €, 12 €, 1.250,50 €
+  new RegExp(String.raw`(${PRICE_NUM})\s*€`, 'g'),
   // EUR suffix: 12.50 EUR
-  /(\d{1,6}(?:[.,]\d{1,2})?)\s*EUR\b/gi,
+  new RegExp(String.raw`(${PRICE_NUM})\s*EUR\b`, 'gi'),
   // Albanian lek prefix or suffix: ALL 1250, 1250 ALL, 1250 LEK, LEK 1250
-  /(?:ALL|LEK)\s*(\d{1,7}(?:[.,]\d{1,2})?)/gi,
-  /(\d{1,7}(?:[.,]\d{1,2})?)\s*(?:ALL|LEK)\b/gi,
+  new RegExp(String.raw`(?:ALL|LEK)\s*(${PRICE_NUM})`, 'gi'),
+  new RegExp(String.raw`(${PRICE_NUM})\s*(?:ALL|LEK)\b`, 'gi'),
 ];
 
-/** Normalize a price string to a canonical float (European "1.250,50" handled). */
+/** Normalize a price string to a canonical float (European "1.250,50" / US "1,250.50" handled). */
 function normalizePrice(raw: string): number {
   const s = raw.trim();
-  // European thousands separator + comma decimal: "1.250,50" → 1250.50
-  if (/^\d{1,3}(?:\.\d{3})+,\d{2}$/.test(s)) {
+  // European thousands separator, optional comma decimal: "1.250" / "1.250,50" → 1250.50
+  if (/^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$/.test(s)) {
     return parseFloat(s.replace(/\./g, '').replace(',', '.'));
+  }
+  // US thousands separator, optional dot decimal: "12,500" / "1,250.50" → 1250.50
+  if (/^\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?$/.test(s)) {
+    return parseFloat(s.replace(/,/g, ''));
   }
   // Comma as decimal separator: "12,50" → 12.50
   if (/^\d+,\d{1,2}$/.test(s)) {

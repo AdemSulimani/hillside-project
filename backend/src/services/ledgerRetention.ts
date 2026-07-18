@@ -18,16 +18,14 @@
  */
 import { knobNumber } from '../config/knobs';
 import { pruneLedger } from '../db/models/aiDecisionLedger';
+import { prunePromptBlobs } from '../db/models/promptBlob';
 
 // P2-7: read through the manifest. `LEDGER_RETENTION_DAYS`'s default was written here AND again as
 // a literal inside validateEnv's boot log, so the two could disagree about what retention actually
 // is — the drift class this item exists to remove.
 const RETENTION_DAYS = knobNumber('LEDGER_RETENTION_DAYS');
 
-const SWEEP_INTERVAL_MS = (() => {
-  const n = parseInt(process.env.LEDGER_RETENTION_INTERVAL_MS ?? '3600000', 10);
-  return Number.isFinite(n) && n > 0 ? n : 3_600_000;
-})();
+const SWEEP_INTERVAL_MS = knobNumber('LEDGER_RETENTION_INTERVAL_MS');
 
 /** Batch size per DELETE. Bounded so a backlog sweep never holds a long transaction. */
 const BATCH_SIZE = 5_000;
@@ -44,8 +42,15 @@ export async function runLedgerRetentionSweep(): Promise<number> {
       // A short batch means the backlog is drained; wait for the next tick.
       if (deleted < BATCH_SIZE) break;
     }
+    // P2-4 (F2): prune the content-addressed prompt blobs on the same retention window, keyed on
+    // last_seen so a blob still referenced by fresh ledger rows survives.
+    for (let i = 0; i < MAX_BATCHES_PER_TICK; i++) {
+      const deleted = await prunePromptBlobs(RETENTION_DAYS, BATCH_SIZE);
+      total += deleted;
+      if (deleted < BATCH_SIZE) break;
+    }
     if (total > 0) {
-      console.info('[ledger-retention] pruned ai_decision_ledger rows', {
+      console.info('[ledger-retention] pruned ai_decision_ledger + ai_prompt_blobs rows', {
         pruned: total,
         retentionDays: RETENTION_DAYS,
       });

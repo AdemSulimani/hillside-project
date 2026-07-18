@@ -104,3 +104,47 @@ describe('buildConversationSummary', () => {
     assert.doesNotMatch(s!, /Sampler \(€/);
   });
 });
+
+describe('50+-turn depth scenario (RC-13 acceptance, projector level)', () => {
+  // The spec's acceptance: a 50+-turn conversation never re-asks a provided field and never
+  // denies a previously-recommended in-stock product. The pipeline-level version needs a live
+  // stack; THIS is the committed stand-in at the seam that decides it: the fields the model
+  // needs must still be present in the assembled context after 50+ turns of chatter has pushed
+  // every load-bearing message far outside the 40-row history window.
+  it('slots + recommendation anchor survive 60 turns of chatter and a deep window', () => {
+    const chatter: SummaryMessage[] = [];
+    for (let i = 0; i < 60; i++) {
+      chatter.push({
+        isCustomer: i % 2 === 0,
+        text: i % 2 === 0 ? `A eshte i mire produkti per fillester? (pyetja ${i})` : `Po, eshte shume i pershtatshem. (pergjigja ${i})`,
+      });
+    }
+    const s = buildConversationSummary({
+      slots: { name: 'Arben', phone: '+38344123456', address: 'Rruga B, nr 12, Prishtina', orderStage: 'awaiting_confirmation' },
+      recommendedProducts: [{ name: 'Mass Gainer 3kg Qokolad', price: 52, discountedPrice: null }],
+      olderMessages: chatter,
+      maxTailChars: 600,
+    });
+    assert.ok(s);
+    // Never re-ask: every provided field is present in the injected context.
+    assert.match(s!, /Arben/);
+    assert.match(s!, /\+38344123456/);
+    assert.match(s!, /Rruga B, nr 12, Prishtina/);
+    // Never deny: the prior in-stock recommendation is present with its price.
+    assert.match(s!, /Mass Gainer 3kg Qokolad/);
+    assert.match(s!, /€52/);
+    // The chatter tail stayed bounded — depth cannot crowd out the load-bearing facts.
+    assert.ok(s!.length < 2000, `summary stayed bounded (got ${s!.length} chars)`);
+  });
+
+  it('is deterministic at depth: identical 60-turn input → byte-identical summary', () => {
+    const chatter: SummaryMessage[] = [];
+    for (let i = 0; i < 60; i++) chatter.push({ isCustomer: i % 2 === 0, text: `turn ${i}` });
+    const args = {
+      slots: { name: 'Arben', phone: '+38344123456', address: 'Rruga B', orderStage: 'collecting' },
+      recommendedProducts: [{ name: 'Whey 2kg', price: 30, discountedPrice: null }],
+      olderMessages: chatter,
+    };
+    assert.equal(buildConversationSummary(args), buildConversationSummary(args));
+  });
+});

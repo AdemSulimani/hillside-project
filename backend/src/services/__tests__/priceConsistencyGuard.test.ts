@@ -182,3 +182,47 @@ describe('replyPricesAreGrounded', () => {
     assert.ok(replyPricesAreGrounded('Price is €30.', buildCatalogPriceSet([])));
   });
 });
+
+describe('extractStatedPrices — over/under-reach boundaries (P2-1 audit gap)', () => {
+  it('does NOT extract non-price numerics: weights, quantities, percentages, phone numbers, order ids', () => {
+    for (const text of [
+      'Pesha eshte 500g, vjen 2 cope ne pako',
+      '20% zbritje kete jave',
+      'Na telefononi ne +383 44 123 456',
+      'porosia #4521 u konfirmua',
+      'cmimi eshte 12.50', // bare number with NO currency marker — deliberately not extracted
+    ]) {
+      assert.deepEqual(extractStatedPrices(text), [], text);
+    }
+  });
+
+  it('European thousands-grouped prices extract as the FULL value (the €1.250,50 regression)', () => {
+    // With the plain-only numeric core this extracted raw "250,50" → a CORRECT €1.250,50
+    // statement failed the catalog check and was stripped as a hallucination.
+    assert.deepEqual(extractStatedPrices('Kushton 1.250,50€'), [{ raw: '1.250,50', value: 1250.5 }]);
+    assert.deepEqual(extractStatedPrices('Kushton €1.250'), [{ raw: '1.250', value: 1250 }]);
+    assert.deepEqual(extractStatedPrices('12,500 LEK'), [{ raw: '12,500', value: 12500 }]);
+  });
+
+  it('comma-decimal and plain forms still extract exactly as before', () => {
+    assert.deepEqual(extractStatedPrices('Kushton 12,50€'), [{ raw: '12,50', value: 12.5 }]);
+    assert.deepEqual(extractStatedPrices('Kushton €25'), [{ raw: '25', value: 25 }]);
+    assert.deepEqual(extractStatedPrices('25.50 EUR'), [{ raw: '25.50', value: 25.5 }]);
+  });
+
+  it('KNOWN OVER-REACH: a computed line total is extracted like any stated price', () => {
+    // "2 x 18€ = 36€" extracts BOTH 18 and 36. The catalog cannot verify arithmetic, so if 36 is
+    // not a catalog price the sentence will strip. Documented boundary, not an accident — a
+    // change here must be a deliberate design decision, not a silent regression.
+    assert.deepEqual(
+      extractStatedPrices('2 x 18€ = 36€').map((p) => p.value),
+      [18, 36],
+    );
+  });
+
+  it('KNOWN UNDER-REACH: the spelled-out currency word is not matched', () => {
+    // "18 euro" / "18 leke" carry no symbol/ISO marker. Extending this is a behavior change to
+    // the ACTIVE P0-2 guard (shared code, not flag-gated) — do it deliberately, with fixtures.
+    assert.deepEqual(extractStatedPrices('Kushton 18 euro'), []);
+  });
+});

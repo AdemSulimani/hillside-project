@@ -124,3 +124,25 @@ describe('P2-6 floor txn: alert only — no pause, no human_replied', () => {
     }
   });
 });
+
+describe('P2-5: the Gheg consent widening stays OUT of the legacy affirmation path', () => {
+  // GHEG_ORDER_CONSENT_EXTRA_PATTERNS feed ONLY the FSM's stage-gated consent detector
+  // (honored solely in awaiting_confirmation). The legacy looksLikeOrderAffirmation runs on
+  // BOTH flag branches and is NOT stage-gated — a Gheg-progressive/filler token there would
+  // fire on any turn. This is the pin ghegLexicons.ts's comment refers to.
+  it('looksLikeOrderAffirmation contains none of the Gheg-only extra tokens', () => {
+    const marker = 'function looksLikeOrderAffirmation';
+    const idx = processAIReplySource.indexOf(marker);
+    assert.ok(idx !== -1, 'legacy affirmation function missing');
+    const body = processAIReplySource.slice(idx, idx + 1500);
+    // Only forms that exist SOLELY in the Gheg extra patterns: fillers (aha/ehe/hajde), the Gheg
+    // copula (jom), and the progressive "pe porosit-" stem. The pan-Albanian "porosi(s)" stem is
+    // legitimately part of the legacy patterns ("dua ta porosis") and is deliberately not listed.
+    for (const token of ['aha', 'ehe', 'hajde', 'jom', 'pe porosit']) {
+      assert.ok(
+        !body.includes(token),
+        `legacy looksLikeOrderAffirmation gained the Gheg-only token ${token} — it is not stage-gated`,
+      );
+    }
+  });
+});

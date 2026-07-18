@@ -66,7 +66,10 @@ export function normalizeAiConfig<T extends Partial<AIConfig>>(resolved: T): T {
 
 // Set the key to the payload ONLY when the incoming version is strictly newer than the stored one
 // (or the key is absent / undecodable). Returns 1 when written, 0 when rejected as stale.
-const SET_IF_NEWER_LUA = `
+// Exported for the integration suite (aiConfigVersionedCache.integration.test.ts), which pins the
+// resurrection-race and equal-version semantics against a REAL Redis — the house pattern
+// (rateLimitDeliveredCountLua): the script constant is the tested contract, never the app client.
+export const SET_IF_NEWER_LUA = `
 local cur = redis.call('GET', KEYS[1])
 if cur then
   local ok, p = pcall(cjson.decode, cur)

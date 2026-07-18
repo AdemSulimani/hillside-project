@@ -131,6 +131,8 @@ export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
     prompt: t
       ? {
           hash: t.prompt.hash,
+          // P2-4 (F2): joins to ai_prompt_blobs.hash for the full redacted system prompt.
+          system_hash: t.prompt.systemHash,
           char_count: t.prompt.charCount,
           token_estimate: t.prompt.tokenEstimate,
           preview: t.prompt.preview,

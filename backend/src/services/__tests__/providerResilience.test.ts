@@ -22,6 +22,7 @@ import {
   enforcementWithoutFloor,
   shouldDegradeTurn,
   summarizeTurnFailures,
+  turnDeadlineOutrunsLock,
   type BreakerMode,
   type BreakerState,
   type BreakerTransition,
@@ -453,3 +454,31 @@ describe('provider posture safety rules', () => {
   });
 });
 
+
+describe('P2-6-F2: turn_truncated is recorded but never counted', () => {
+  it('countsTowardBreaker(turn_truncated) is false', () => {
+    assert.equal(countsTowardBreaker('turn_truncated'), false);
+  });
+
+  it('a storm of turn_truncated failures cannot open the breaker', () => {
+    const breaker = new ProviderBreaker({
+      failureThreshold: 3,
+      cooldownMs: 5_000,
+      halfOpenProbes: 1,
+      now: () => 1_000,
+    });
+    for (let i = 0; i < 20; i++) breaker.recordFailure('chat', 'turn_truncated', 'on');
+    assert.notEqual(breaker.decide('chat', 'on'), 'reject');
+  });
+});
+
+describe('P2-6-F6: turnDeadlineOutrunsLock', () => {
+  it('flags a deadline whose x2 meets or exceeds the lock TTL', () => {
+    assert.equal(turnDeadlineOutrunsLock(150_000, 300_000), true); // 300s == 300s: no margin
+    assert.equal(turnDeadlineOutrunsLock(200_000, 300_000), true);
+  });
+  it('accepts the documented safe posture (120s x2 < 300s) and the off state', () => {
+    assert.equal(turnDeadlineOutrunsLock(120_000, 300_000), false);
+    assert.equal(turnDeadlineOutrunsLock(0, 300_000), false); // deadline off
+  });
+});

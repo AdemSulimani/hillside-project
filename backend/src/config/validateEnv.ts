@@ -41,6 +41,7 @@ import { REDACT_PII } from '../utils/redact';
 import {
   AI_QUEUE_BACKOFF_BASE_MS,
   breakerCooldownOutrunsRetries,
+  turnDeadlineOutrunsLock,
   enforcementWithoutFloor,
   type BreakerMode,
   type ProviderPosture,
@@ -127,8 +128,10 @@ export function validateRequiredEnv(): void {
 }
 
 /**
- * Guard 6 + guard 7: log the EFFECTIVE value of every knob, and the fingerprint over the
- * module-load-frozen subset.
+ * Guard 6 + guard 7: log the boot config posture — the fingerprint over the module-load-frozen
+ * subset, plus the effective value of every knob OVERRIDDEN from its default (a default-valued
+ * knob's effective value is implied by the manifest and deliberately not spammed into the boot
+ * log; the full per-knob effective view lives in `npm run config:check --json`).
  *
  * RC-06's regression-prevention text asks for "a startup assertion that all instances read
  * identical env for the frozen-at-load knobs". A single instance cannot assert that alone — so it
@@ -138,7 +141,7 @@ export function validateRequiredEnv(): void {
 function logEffectiveKnobs(mode: Mode): void {
   const fp = fingerprint(process.env);
   console.info(
-    `[config] fingerprint=${fp.hash} instance=${fp.instance} frozen_knobs=${Object.keys(fp.knobs).length} mode=${mode}` +
+    `[config] fingerprint=${fp.hash} instance=${fp.instance} knobs=${Object.keys(fp.knobs).length} mode=${mode}` +
       ` (two instances reporting different fingerprints = a drifted fleet)`,
   );
 
@@ -311,6 +314,33 @@ function logPosture(): void {
         `${AI_QUEUE_BACKOFF_BASE_MS}ms backoff base. All 3 retries would fast-fail inside the cooldown ` +
         'without re-probing, so every in-flight ai.reply would dead-letter on a short outage. Lower it, ' +
         'or raise the queue backoff in the same change.',
+    );
+  }
+
+  const lockTtlMs = Number(eff('AI_CONVERSATION_LOCK_TTL_MS'));
+  if (turnDeadlineOutrunsLock(turnBudget, lockTtlMs)) {
+    console.warn(
+      `[provider] ⚠ OPENAI_TURN_DEADLINE_MS=${turnBudget} x2 (pre-send + re-armed tail) is >= ` +
+        `AI_CONVERSATION_LOCK_TTL_MS=${lockTtlMs}, which is never renewed. The conversation lock can ` +
+        'expire mid-turn and a second job for the same conversation can start. Lower the deadline or ' +
+        'raise the lock TTL so 2x deadline stays under it with margin.',
+    );
+  }
+
+  // P2-audit (XA-F3): cross-item flag couplings the individual item postures above cannot see.
+  if (orderStageMode === 'on' && !flag('GHEG_LEXICONS')) {
+    console.warn(
+      '[classifiers] ⚠ ORDER_STAGE_MACHINE=on with GHEG_LEXICONS=off: the FSM consent lexicon is ' +
+        "Tosk-only, so a Gheg consent turn ('e du', 'pe porositi', 'aha okej') is silently missed and " +
+        'the order is never created. Enable GHEG_LEXICONS with (or before) the FSM cutover.',
+    );
+  }
+  if (degrade && !flag('HISTORY_DELIVERY_FILTERED')) {
+    console.warn(
+      '[provider] ⚠ GRACEFUL_DEGRADE_MODE=on with HISTORY_DELIVERY_FILTERED=off: a degraded-turn ' +
+        "holding reply re-enters the NEXT turn's transcript as an authoritative assistant statement " +
+        '(the legacy binary role map), so the model may repeat "a team member will follow up" instead ' +
+        'of answering once the provider recovers. Enable HISTORY_DELIVERY_FILTERED with the floor.',
     );
   }
 }

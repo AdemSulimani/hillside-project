@@ -27,6 +27,8 @@ type Db = PoolClient | typeof pool;
 export interface LedgerPromptProvenance {
   /** sha256 of the full assembled messages (integrity + "was the orphan directive injected?"). */
   hash: string;
+  /** P2-4 (F2): sha256 of the SYSTEM prompt alone — joins to ai_prompt_blobs.hash (migration 082). */
+  system_hash: string;
   char_count: number;
   token_estimate: number;
   /** Size-capped, PII-masked copy of the system prompt (the reconstruction target). */

@@ -256,6 +256,44 @@ export interface RetrievalRedisClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, mode: 'EX', ttl: number): Promise<unknown>;
   incr(key: string): Promise<number>;
+  /** Optional so existing test fakes stay valid; the burst-alert window degrades without it. */
+  expire?(key: string, ttl: number): Promise<unknown>;
+}
+
+// P2-6 (F4): RC-04's closing criterion asks for "a semanticSkipped metric WITH AN ALERT
+// THRESHOLD" — the counters alone need a human watching them. A windowed counter fires ONE loud
+// Sentry event per window when skips burst (exact-equality single-shot, the DLQ-burst idiom).
+// Threshold 0 = off (the kill-switch idiom).
+const SEMANTIC_SKIPPED_ALERT_THRESHOLD = knobNumber('SEMANTIC_SKIPPED_ALERT_THRESHOLD');
+const SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS = knobNumber('SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS');
+const SEMANTIC_SKIPPED_WINDOW_KEY = 'metrics:semantic_skipped_window';
+
+function noteSkipForBurstAlert(
+  reason: SemanticSkipReason,
+  tenantId: string | undefined,
+  redis: RetrievalRedisClient,
+): void {
+  if (SEMANTIC_SKIPPED_ALERT_THRESHOLD <= 0) return;
+  void (async () => {
+    const n = await redis.incr(SEMANTIC_SKIPPED_WINDOW_KEY);
+    if (n === 1) await redis.expire?.(SEMANTIC_SKIPPED_WINDOW_KEY, SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS);
+    if (n === SEMANTIC_SKIPPED_ALERT_THRESHOLD) {
+      console.error(
+        `[SEMANTIC_SKIPPED_BURST] ${n} semantic skips within ${SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS}s — ` +
+          `retrieval is degrading fleet-wide (last reason: ${reason})`,
+      );
+      Sentry.captureMessage('semantic retrieval skip burst', {
+        level: 'error',
+        tags: { component: 'retrieval' },
+        extra: {
+          count: n,
+          windowSeconds: SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS,
+          lastReason: reason,
+          tenantId: tenantId ?? 'unknown',
+        },
+      });
+    }
+  })().catch(() => undefined);
 }
 
 /**
@@ -273,6 +311,7 @@ export function logSemanticSkipped(
   if (!redis) return;
   try {
     void redis.incr(`metrics:semantic_skipped:${reason}`).catch(() => undefined);
+    noteSkipForBurstAlert(reason, tenantId, redis);
   } catch {
     /* fail-open: never let a metric write fail the reply */
   }
@@ -476,12 +515,25 @@ async function resolveQueryEmbeddingUncoalesced(
     return { vector: null, source: 'negative_cache' };
   }
 
-  // 4. Compute with a HARD abort deadline (actually cancels the request).
+  // 4. Compute with a HARD abort deadline (actually cancels the request) PLUS a Promise.race:
+  //    the signal cancels the socket, but the SDK's retry-after backoff sleep is a plain
+  //    non-abort-aware setTimeout, so the signal alone can overshoot the deadline by the length
+  //    of that sleep (~30s on a long retry-after). The race is what bounds OUR wall clock — the
+  //    same device the P2-6 wrapper uses; the abandoned call's rejection must be caught or it
+  //    takes the worker down on Node 22.
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timer: NodeJS.Timeout | undefined;
   let vector: number[];
   try {
-    vector = await embed(text, { signal: controller.signal });
+    const call = embed(text, { signal: controller.signal });
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('embedding deadline elapsed'));
+      }, timeoutMs);
+    });
+    void call.catch(() => undefined);
+    vector = await Promise.race([call, deadline]);
   } catch {
     const reason: SemanticSkipReason = controller.signal.aborted
       ? 'embedding_timeout'
@@ -490,7 +542,7 @@ async function resolveQueryEmbeddingUncoalesced(
     await writeNegative(redis, model, text, negCacheTtl);
     return { vector: null, source: 'skip', reason };
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 
   // 5. Dimension guard (the -large 3072 landmine). Negative-cache once so we don't recompute a

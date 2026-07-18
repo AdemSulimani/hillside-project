@@ -97,11 +97,50 @@ export async function judgeCorpus(
 }
 
 /**
- * Entry point. Judges the corpus utterances as a baseline calibration of the judge itself:
+ * Entry point — two modes:
+ *
+ * DEFAULT (no args): judges the corpus utterances as a baseline calibration of the judge itself:
  * these are real customer messages, so a Gheg-competent judge should score them HIGH. A low
  * score here means the judge is miscalibrated, not that the customers write badly.
+ *
+ * `--rescore <replies.jsonl>`: the P2-5 validation bullet "Albanian re-score materially above
+ * 54/100" — judges ASSISTANT replies, one JSON object per line with a `text` field (export them
+ * from a staging run with the P2-5 flags on, e.g. the delivered AI replies of a WF-E replay).
+ * DEFERRAL, made explicit here because the audit (P2-5-F3) found it documented nowhere: the
+ * re-score was NOT executed as part of the P2-5 merge — it needs (a) the flags live in a staging
+ * environment to produce the replies and (b) a paid judge pass over them. Run it before calling
+ * the RC-15 fluency portion re-validated:
+ *
+ *     npx tsx src/eval/ghegFluency/judge.ts --rescore staging-replies.jsonl
  */
 async function main(): Promise<void> {
+  const rescoreIdx = process.argv.indexOf('--rescore');
+  if (rescoreIdx !== -1) {
+    const file = process.argv[rescoreIdx + 1];
+    if (!file) {
+      console.error('[gheg-eval] --rescore requires a JSONL file of {"text": "<assistant reply>"} lines');
+      process.exit(1);
+    }
+    const { readFileSync } = await import('node:fs');
+    const texts = readFileSync(file, 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => (JSON.parse(l) as { text: string }).text)
+      .filter((t) => typeof t === 'string' && t.trim().length > 0);
+    console.info(`[gheg-eval] RE-SCORE: judging ${texts.length} assistant replies with ${OPENAI_EVAL_MODEL}…`);
+    const { mean, verdicts } = await judgeCorpus(texts);
+    for (const { text, verdict } of verdicts) {
+      console.info(`  ${String(verdict.score).padStart(3)}  ${text.slice(0, 80).replace(/\n/g, ' / ')}`);
+      for (const issue of verdict.issues) console.info(`       - ${issue}`);
+    }
+    console.info(
+      `[gheg-eval] RE-SCORE mean: ${mean.toFixed(1)} (WF-E pre-P2-5 baseline: 54/100 — ` +
+        'the validation passes when this is materially above it)',
+    );
+    return;
+  }
+
   const texts = GHEG_CORPUS_WITH_EV_010.map((c) => c.text);
   console.info(`[gheg-eval] judging ${texts.length} utterances with ${OPENAI_EVAL_MODEL}…`);
   const { mean, verdicts } = await judgeCorpus(texts);

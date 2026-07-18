@@ -27,13 +27,11 @@ const PORT = knobNumber('PORT');
 /** P1-2 step 5: dead-letter growth monitor (off by default). */
 const DLQ_METRICS_ENABLED = (process.env.DLQ_METRICS_ENABLED ?? 'false').trim().toLowerCase() === 'true';
 
-/**
- * P2-4 Part 2: ledger retention sweep. Tied to the ledger's OWN flag, not a metrics flag — if the
- * ledger is recording, its rows must also expire. Off by default, exactly like the ledger itself,
- * so this is inert until someone turns recording on (nothing to prune before then anyway).
- */
-const AI_DECISION_LEDGER_ENABLED =
-  (process.env.AI_DECISION_LEDGER_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+// P2-4 (F6): the retention sweep is deliberately NOT tied to AI_DECISION_LEDGER_ENABLED. Rows
+// written during a flag-on period are customer-derived data with a GDPR retention obligation that
+// does not end when recording stops — gating the sweep on the recording flag stranded them
+// unpruned indefinitely. The sweep on an empty/absent-backlog table is one cheap indexed DELETE
+// per tick, so running it unconditionally costs nothing when the ledger was never enabled.
 
 const httpServer = http.createServer(app);
 initSocketServer(httpServer);
@@ -43,7 +41,7 @@ httpServer.listen(PORT, () => {
   console.log(`[server] Listening on http://localhost:${PORT}`);
   startRedisMemoryMonitor();
   if (DLQ_METRICS_ENABLED) startDeadLetterMonitor();
-  if (AI_DECISION_LEDGER_ENABLED) startLedgerRetention();
+  startLedgerRetention();
   // P2-7 guard 7: publish this instance's config fingerprint so a drifted fleet is detectable.
   // Deliberately after listen and deliberately not awaited — it is best-effort telemetry, and a
   // slow or unavailable database must not delay serving traffic.
