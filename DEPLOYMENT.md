@@ -104,8 +104,9 @@ Recommended promotion flow:
 
 ### CI (`.github/workflows/ci.yml`)
 
-- Backend: `npm ci`, `npm run typecheck`, `npm run build`
-- Backend smoke: run migrations against ephemeral Postgres, boot API, verify `/api/health`
+- Backend: `npm ci`, `npm run typecheck`, `npm run build`, `npm test`, config-manifest drift check
+- Backend smoke: run migrations against ephemeral Postgres, `npm run migrate:verify --strict` (P3-3 ledger gate), strict config check, boot API, verify `/api/health`
+- Migration round-trip + orphan shape (P3-3): on a fresh pgvector DB, apply the full tree, `migrate:down` the reversible tip, re-apply and assert the schema is byte-identical (up/down/up), then seed orphan `_migrations` rows (deleted-file rows) and assert migrate + verify still pass
 - Frontend: `npm ci`, `npm run lint`, `npm run build`
 
 ### Deploy (`.github/workflows/deploy.yml`)
@@ -155,6 +156,7 @@ Then re-login.
 - Re-deploy previous known-good tag to production
 - Keep DB migrations forward-safe; avoid destructive migrations without backup
 - Maintain automated DB backups + restore drills
+- **Migrations roll back by re-deploy, not by `migrate:down`.** The runner applies the pending set in one batch transaction, so a *failed* migration leaves the schema byte-identical to before (nothing to undo). `npm run migrate:down` (P3-3) exists for local/CI round-trip testing and staging only, is gated behind `MIGRATE_ALLOW_DOWN=1`, and reverts only the reversible structural tip (files with a paired `NNN_name.down.sql`). Do not use it as a production rollback path — restore from backup or re-deploy the previous tag.
 
 ## 11) Production stability (DigitalOcean droplet)
 
@@ -309,3 +311,16 @@ Things to look for:
 - `OPENAI_API_KEY is not configured` or `[env] Missing required environment
   variables` → the env file on disk is empty/corrupt; redeploy so the atomic write
   in `scripts/deploy.sh` rewrites it.
+- `[migrate] … has DRIFTED: recorded … != on-disk …` (P3-3) → an already-applied
+  migration file was edited after it ran. Migrations are immutable — revert the
+  edit and ship the change as a NEW migration. (At boot this only warns; the CI
+  `migrate:verify --strict` gate is where it goes red.)
+- `[migrate] … contains transaction-hostile SQL … but is not annotated
+  '-- migrate:no-transaction'` (P3-3) → a pending migration self-commits or can't
+  run in the batch transaction. Add the annotation on its own line so it runs
+  standalone, and make that file individually idempotent (e.g.
+  `CREATE INDEX CONCURRENTLY IF NOT EXISTS`).
+- **`INVALID` index after a failed `CREATE INDEX CONCURRENTLY`** → a no-transaction
+  index build that failed mid-way leaves an invalid index (it is NOT rolled back —
+  that is the nature of `CONCURRENTLY`). `DROP INDEX IF EXISTS <name>;` then re-run
+  migrations; the `IF NOT EXISTS` build re-creates it cleanly.

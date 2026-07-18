@@ -14,6 +14,8 @@
     "repair-product-text": "tsx src/scripts/repairProductTextEncoding.ts",
     "redact-alert-details": "tsx src/scripts/redactAlertDetails.ts",
     "migrate": "tsx src/db/migrate.ts",
+    "migrate:verify": "tsx src/db/migrateVerify.ts",
+    "migrate:down": "tsx src/db/migrateDown.ts",
     "embed-all": "tsx src/scripts/embedAllProducts.ts",
     "healthcheck": "tsx src/scripts/healthCheck.ts",
     "encrypt-token": "tsx src/scripts/encryptAccessToken.ts",
