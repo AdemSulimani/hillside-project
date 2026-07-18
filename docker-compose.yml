@@ -81,6 +81,10 @@ services:
       PGSSLMODE: disable
       DB_SSL: "false"
       REDIS_URL: redis://redis:6379
+      # P3-2. Default `all` = the pre-split topology (Express + Socket.IO + all five workers in one
+      # process), so a plain `docker compose up` is unchanged. Set to `api` only when the `worker`
+      # service below is actually scaled above zero, or the queues get no consumer at all.
+      PROCESS_ROLE: ${BACKEND_PROCESS_ROLE:-all}
     env_file:
       - ./backend/.env
     depends_on:
@@ -100,6 +104,61 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    logging: *default-logging
+
+  # P3-2 Step 12 — the out-of-process worker fleet.
+  #
+  # `replicas: 0` by default, so this service exists but starts nothing: `docker compose up` behaves
+  # exactly as before, and enabling the split is `--scale worker=1` plus BACKEND_PROCESS_ROLE=api.
+  # Read docker-compose.prod.yml before scaling it in production — the 2 GB droplet is ~91% committed
+  # and does not fit a second container at parity.
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # Overrides the image CMD, which runs migrations then the API. Migrations must be run by exactly
+    # ONE process; with two services off one image, both would race the migrator on every deploy.
+    # The API keeps that job (see scripts/deploy.sh, which also runs it as a one-shot beforehand).
+    command: ["node", "dist/worker.js"]
+    restart: unless-stopped
+    # MUST exceed WORKER_SHUTDOWN_TIMEOUT_MS (default 35s). Inverting them means Docker SIGKILLs the
+    # process mid-drain and in-flight ai.reply jobs are abandoned — the C-88 defect the API side
+    # already fixed with its own 30s/25s pairing.
+    stop_grace_period: 60s
+    # Deliberately NO `ports:` block. A published host port is what makes `--scale` fail with a port
+    # collision on the second replica; without one the worker fleet scales freely.
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL}
+      PGSSLMODE: disable
+      DB_SSL: "false"
+      REDIS_URL: redis://redis:6379
+      PROCESS_ROLE: worker
+      WORKER_HEALTH_PORT: "8001"
+      # A worker has no local Socket.IO server. Without this it REFUSES TO START — see worker.ts.
+      # It must also be true on the API, or the API-side adapter has nothing to receive.
+      SOCKET_CROSS_PROCESS_EMIT: ${SOCKET_CROSS_PROCESS_EMIT:-true}
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:8001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      replicas: 0
     logging: *default-logging
 
   frontend:

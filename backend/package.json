@@ -5,8 +5,10 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:worker": "tsx watch src/worker.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/__tests__/**/*.test.ts",
     "test:integration": "tsx --test src/__integration__/**/*.integration.test.ts",
@@ -36,6 +38,7 @@
     "@bull-board/express": "^6.21.0",
     "@sentry/node": "^10.48.0",
     "@socket.io/redis-adapter": "^8.3.0",
+    "@socket.io/redis-emitter": "^5.1.0",
     "axios": "^1.14.0",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.73.1",

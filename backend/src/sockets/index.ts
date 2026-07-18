@@ -23,10 +23,33 @@ function extractHandshakeToken(auth: unknown): string | null {
   return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
+/** The adapter's Redis pair, retained so shutdown can release them (P3-2). */
+let adapterClients: IORedis[] = [];
+
+/**
+ * P3-2 Step 6: close Socket.IO and release the adapter's Redis connections on shutdown.
+ *
+ * Previously nothing closed `io` at all, so on every deploy connected clients kept a half-open
+ * socket to a dying container until their own timeout expired, instead of being told to reconnect
+ * to the new one. `io.close()` also stops the adapter, so the pub/sub pair is quit afterwards.
+ */
+export async function closeSocketServer(): Promise<void> {
+  const current = io;
+  io = null;
+  const clients = adapterClients;
+  adapterClients = [];
+
+  if (current) {
+    await new Promise<void>((resolve) => current.close(() => resolve()));
+  }
+  await Promise.allSettled(clients.map((client) => client.quit()));
+}
+
 export function initSocketServer(httpServer: HttpServer): void {
   const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
   const pubClient = new IORedis(redisUrl, redisClientDefaults);
   const subClient = pubClient.duplicate();
+  adapterClients = [pubClient, subClient];
 
   io = new Server(httpServer, {
     cors: {

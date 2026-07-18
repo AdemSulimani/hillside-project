@@ -77,6 +77,40 @@ services:
         reservations:
           memory: 384M
 
+  # P3-2 Step 12 — the worker fleet stays at ZERO replicas in production.
+  #
+  # This is a capacity fact, not caution. Declared limits already come to
+  #   postgres 640M + redis 224M + backend 900M + frontend 96M = 1860M of 2048M (~91%),
+  # before the OS, dockerd and the host nginx (~250-400M more). A worker at parity would need 2760M.
+  # Re-dividing the existing 900M does not help either: on 1 vCPU the split yields no throughput
+  # gain, it costs ~120-180M of duplicated Node baseline, and the memory-hungry path is the API, not
+  # the worker (productController runs document parsing, OCR and sharp inside the HTTP handler).
+  #
+  # So on THIS box the worker split is a structural refactor that is exercised locally and on
+  # staging, not a capacity win. Scale it only after resizing to >= 4 GB / 2 vCPU, and when you do:
+  #   1. set BACKEND_PROCESS_ROLE=api  (otherwise both processes consume the same queues);
+  #   2. set SOCKET_CROSS_PROCESS_EMIT=true on BOTH services;
+  #   3. re-divide the memory limits below rather than adding to them.
+  #
+  # The worker concurrency vars move here from `backend` because they are inert on an API-only
+  # process — but they are left on `backend` too, so a PROCESS_ROLE=all deployment is unchanged.
+  worker:
+    environment:
+      NODE_ENV: production
+      WEBHOOK_WORKER_CONCURRENCY: ${WEBHOOK_WORKER_CONCURRENCY:-3}
+      AI_WORKER_CONCURRENCY: ${AI_WORKER_CONCURRENCY:-2}
+      NOTIFICATIONS_WORKER_CONCURRENCY: ${NOTIFICATIONS_WORKER_CONCURRENCY:-1}
+      DEFAULT_WORKER_CONCURRENCY: ${DEFAULT_WORKER_CONCURRENCY:-1}
+      FINETUNING_WORKER_CONCURRENCY: ${FINETUNING_WORKER_CONCURRENCY:-1}
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=512}
+    deploy:
+      replicas: ${WORKER_REPLICAS:-0}
+      resources:
+        limits:
+          memory: 640M
+        reservations:
+          memory: 256M
+
   frontend:
     deploy:
       resources:

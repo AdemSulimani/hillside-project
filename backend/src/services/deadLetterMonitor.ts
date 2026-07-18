@@ -59,7 +59,13 @@ async function sendBurstAlert(recentHour: number, backlog: number): Promise<void
   }
 }
 
-async function tick(): Promise<void> {
+/**
+ * P3-2 Step 7: exported so a BullMQ scheduler can drive it instead of a per-process `setInterval`.
+ * With N replicas, an interval runs N times — harmless for the metric, wasteful for the retention
+ * DELETE it also performs. A scheduler keyed by name produces exactly one firing job per tick no
+ * matter how many replicas registered it.
+ */
+export async function tick(): Promise<void> {
   try {
     const { backlog, recentHour } = await countDeadLetterMetrics();
     console.info('[dlq-monitor]', { backlog, recentHour, threshold: BURST_THRESHOLD });

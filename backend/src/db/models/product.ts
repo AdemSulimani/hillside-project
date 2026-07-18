@@ -1,6 +1,9 @@
 import pool from '../pool';
 import { toSql } from 'pgvector';
 import { extractBaseName } from '../../services/productTitleNormalization';
+import { shouldEscalateEfSearch, clampEfSearch } from '../vectorSearchPolicy';
+import { iterativeScanSetting } from '../vectorCapability';
+import { knobNumber } from '../../config/knobs';
 
 export interface Product {
   id: string;
@@ -727,11 +730,7 @@ export interface SimilarProduct extends Product {
  * A larger ef_search widens the candidate pool so post-filtering still yields `limit`
  * rows, at the cost of some latency. Must be >= the requested limit.
  */
-const HNSW_EF_SEARCH = (() => {
-  const raw = process.env.HNSW_EF_SEARCH;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 100;
-})();
+const HNSW_EF_SEARCH = knobNumber('HNSW_EF_SEARCH');
 
 /**
  * Upper bound for the ADAPTIVE ef_search escalation. Because the HNSW index is global and
@@ -742,11 +741,7 @@ const HNSW_EF_SEARCH = (() => {
  * we retry once with this much larger pool to recover recall, paying the extra latency
  * only on the suspicious under-filled case rather than on every query.
  */
-const HNSW_EF_SEARCH_MAX = (() => {
-  const raw = process.env.HNSW_EF_SEARCH_MAX;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 500;
-})();
+const HNSW_EF_SEARCH_MAX = knobNumber('HNSW_EF_SEARCH_MAX');
 
 /**
  * Vector similarity search using pgvector's cosine distance operator.
@@ -761,6 +756,13 @@ export async function searchProductsBySimilarity(
   queryEmbedding: number[],
   limit = 5,
   expectedModel?: string,
+  /**
+   * P3-2 (C-125): an UPPER bound on the rows this query could return for the tenant — normally
+   * `countActiveProducts`, which the reply path already awaits. Used only to decline a provably
+   * useless escalation; `null`/omitted reproduces the legacy predicate exactly. See
+   * `db/vectorSearchPolicy.ts` for why an over-estimate is always safe.
+   */
+  eligibleCount: number | null = null,
 ): Promise<SimilarProduct[]> {
   // When the caller knows which embedding model produced the QUERY vector, exclude rows
   // whose stored vector came from a DIFFERENT model. Comparing vectors across models
@@ -774,11 +776,20 @@ export async function searchProductsBySimilarity(
   const params: unknown[] = [tenantId, toSql(queryEmbedding), limit];
   if (expectedModel) params.push(expectedModel);
 
+  // P3-2: null unless the operator enabled the flag AND the boot probe confirmed pgvector >= 0.8.
+  // Resolved ONCE per call so both passes of a single search agree.
+  const iterativeScan = iterativeScanSetting();
+
   const runWithEfSearch = async (efSearch: number): Promise<SimilarProduct[]> => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+      if (iterativeScan) {
+        // Only ever 'strict_order' (see db/vectorCapability.ts) — the callers slice and threshold
+        // these rows assuming strictly descending similarity.
+        await client.query(`SET LOCAL hnsw.iterative_scan = '${iterativeScan}'`);
+      }
       const { rows } = await client.query<SimilarProduct>(
         `SELECT *, 1 - (embedding <=> $2) AS similarity
          FROM products
@@ -801,14 +812,37 @@ export async function searchProductsBySimilarity(
     }
   };
 
-  const firstPass = await runWithEfSearch(Math.max(HNSW_EF_SEARCH, limit));
+  const firstPass = await runWithEfSearch(clampEfSearch(HNSW_EF_SEARCH, limit));
 
   // Adaptive recall recovery: an under-filled result on a GLOBAL index usually means the
   // tenant's true matches were crowded out of the candidate pool by other tenants' rows.
-  // Retry once with a much larger pool. (If the tenant genuinely has fewer than `limit`
-  // embedded products the retry simply returns the same rows — a cheap, bounded cost.)
-  const widerEfSearch = Math.max(HNSW_EF_SEARCH_MAX, limit);
-  if (firstPass.length < limit && widerEfSearch > Math.max(HNSW_EF_SEARCH, limit)) {
+  // Retry once with a much larger pool.
+  //
+  // P3-2 (C-125): the old trigger was `firstPass.length < limit` alone, which is ALWAYS true for a
+  // tenant whose catalog is smaller than the limit — so the smallest tenants paid a guaranteed
+  // second `pool.connect()` on every single semantic query, out of a 10-slot pool shared with 22
+  // worker job slots. `eligibleCount` bounds the result set from above, so holding that many rows
+  // already proves a wider pool cannot add one. The old comment called this "a cheap, bounded
+  // cost"; it is a connection, and it is paid on 100% of that tenant's queries.
+  //
+  // When the iterative scan is active the escalation is redundant BY CONSTRUCTION: the scan
+  // already continued past ef_search until the LIMIT was satisfied or the index was exhausted, so
+  // an under-filled result means the rows genuinely do not exist. Re-querying at a wider pool can
+  // only return the same rows for a second connection.
+  if (iterativeScan) return firstPass;
+
+  const widerEfSearch = clampEfSearch(HNSW_EF_SEARCH_MAX, limit);
+  const escalate = shouldEscalateEfSearch({
+    firstPassCount: firstPass.length,
+    // `limit` here is already the EFFECTIVE limit — the caller inflates it by
+    // SEMANTIC_BAND_EXTRA_DEPTH when the hysteresis band is on, and the inflated value is what
+    // reached the SQL. Comparing against anything else reintroduces the bug on the band path.
+    effectiveLimit: limit,
+    eligibleCount,
+    efSearch: HNSW_EF_SEARCH,
+    efSearchMax: HNSW_EF_SEARCH_MAX,
+  });
+  if (escalate) {
     return runWithEfSearch(widerEfSearch);
   }
   return firstPass;

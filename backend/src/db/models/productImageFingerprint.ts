@@ -2,6 +2,9 @@ import crypto from 'crypto';
 import pool from '../pool';
 import { toSql } from 'pgvector';
 import type { Product } from './product';
+import { iterativeScanSetting } from '../vectorCapability';
+import { clampEfSearch } from '../vectorSearchPolicy';
+import { knobNumber } from '../../config/knobs';
 
 /**
  * Bump this whenever the vision extraction schema/prompt changes in a way that
@@ -128,11 +131,12 @@ export function normalizeConfidenceMap(raw: unknown, maxEntries = 60): Record<st
   return out;
 }
 
-const HNSW_EF_SEARCH = (() => {
-  const raw = process.env.HNSW_EF_SEARCH;
-  const n = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 100;
-})();
+/**
+ * P3-2: was a second, independent copy of the same IIFE that lives in `product.ts` — two parses of
+ * one env var that could already disagree (they had different fallbacks the moment either was
+ * edited). Both now read the single manifest declaration.
+ */
+const HNSW_EF_SEARCH = knobNumber('HNSW_EF_SEARCH');
 
 export async function upsertProductImageFingerprint(input: {
   tenantId: string;
@@ -272,11 +276,18 @@ export async function searchProductsByImageFingerprintSimilarity(
   limit = 10,
   minSimilarity = 0.6,
 ): Promise<ImageFingerprintMatch[]> {
-  const efSearch = Math.max(HNSW_EF_SEARCH, limit * 3);
+  const efSearch = clampEfSearch(HNSW_EF_SEARCH, limit * 3);
+  // P3-2: this path has no adaptive escalation (unlike the text path) — the similarity threshold is
+  // IN the SQL here, so an under-filled result is expected and ambiguous. The iterative scan is the
+  // only recall recovery available to it, which makes it the bigger beneficiary of the two.
+  const iterativeScan = iterativeScanSetting();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query(`SET LOCAL hnsw.ef_search = ${efSearch}`);
+    if (iterativeScan) {
+      await client.query(`SET LOCAL hnsw.iterative_scan = '${iterativeScan}'`);
+    }
     const { rows } = await client.query<ImageFingerprintMatch>(
       `SELECT
          p.*,

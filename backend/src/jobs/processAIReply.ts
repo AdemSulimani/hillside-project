@@ -58,7 +58,21 @@ import {
   type LiveGateState,
 } from '../services/receiptSnapshot';
 import { aiConfigVersion } from '../services/aiConfigCache';
-import type { AIReplyJobData } from './jobTypes';
+import { buildAIReplyJobData, type AIReplyJobData } from './jobTypes';
+import {
+  decideAdmission,
+  normalizeHop,
+  admissionJobId,
+  AdmissionShedError,
+  DEFAULT_ADMISSION_POLICY,
+} from './admissionControl';
+import {
+  TENANT_SLOT_ACQUIRE_SCRIPT,
+  TENANT_SLOT_RELEASE_SCRIPT,
+  tenantSlotKey,
+  tenantSlotMember,
+  parseAcquireResult,
+} from '../services/tenantSlotLease';
 import { insertOutboxTx } from '../db/models/outbox';
 import { deriveReplyIdempotencyKey, type ReplySlot } from '../services/replyIdempotency';
 import {
@@ -1386,8 +1400,21 @@ function isEmojiOnlyText(text: string): boolean {
 const AI_MAX_CONCURRENT_PER_TENANT = (() => {
   return knobNumber('AI_MAX_CONCURRENT_PER_TENANT');
 })();
-/** How long (ms) a job backs off before retrying when the tenant is at capacity. */
+/**
+ * Legacy flat backoff, used only when `AI_FAIRNESS_MODE=legacy` (the default).
+ *
+ * P3-2 note: this was a hard-coded literal outside the knob manifest and outside `.env.example`, so
+ * the one number governing the re-add loop's aggressiveness could not be tuned without a deploy.
+ * The bounded path reads `AI_FAIRNESS_BASE_DELAY_MS` instead.
+ */
 const AI_FAIRNESS_BACKOFF_MS = 3000;
+
+/**
+ * P3-2 Step 9: `bounded` replaces the C-79 re-add loop with lease-based slots, a deterministic
+ * job id, exponential jittered backoff and a hop budget. `legacy` (default) preserves today's
+ * path byte-for-byte, including the flat 3 s re-add and the `INCR`/`DECR` counter.
+ */
+const AI_FAIRNESS_BOUNDED = knobString('AI_FAIRNESS_MODE') === 'bounded';
 
 // ---------------------------------------------------------------------------
 // Atomic per-conversation rate-limit counter
@@ -1582,51 +1609,74 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     );
   };
 
-  // ---- Per-tenant fairness ------------------------------------------------
-  const tenantActiveKey = `ai_active_jobs:${tenantId}`;
-  const activeCount = await redisConnection.incr(tenantActiveKey);
-  // Safety TTL: if the process crashes mid-job the key will expire rather than
-  // permanently blocking the tenant. 5 minutes >> any normal job duration.
-  if (activeCount === 1) {
-    await redisConnection.expire(tenantActiveKey, 300);
-  }
-  if (activeCount > AI_MAX_CONCURRENT_PER_TENANT) {
-    // Decrement immediately — this job is not actually running yet.
-    await redisConnection.decr(tenantActiveKey);
-    // Re-delay into BullMQ. The job will be picked up once earlier jobs finish.
+  /**
+   * P3-2 Step 9 (C-79): defer this job with a bounded, jittered, collapsing re-add — or shed it
+   * loudly once the hop budget is exhausted.
+   *
+   * The legacy path re-added with a flat 3 s delay and NO jobId, so N starved jobs became N new
+   * jobs every 3 s, each with `attemptsMade` reset to 0. A shed here is deliberately an EXCEPTION,
+   * not a `return`: `failureHandler` attaches to `worker.on('failed')` only, so a bare return is a
+   * *successful* job — no dead_letter row, no Sentry, no `ai_reply_undelivered` alert, and a
+   * customer message silently gone.
+   *
+   * It must NOT pause the conversation. Capacity is a global, our-side condition; `ai_paused` has
+   * no automatic exit (`AI_AUTO_RESUME` defaults off and covers only `rate_limit_exceeded`), so
+   * pausing would convert a transient burst into permanent per-conversation silence — the exact
+   * fan-out the P2-6 degradation floor is forbidden from causing.
+   */
+  const deferOrShed = async (gate: 'tenant_capacity' | 'conversation_busy'): Promise<void> => {
+    const decision = decideAdmission({
+      hop: data.fairnessHop,
+      gate,
+      // The only entropy source in the path. Kept out of `decideAdmission` so the decision itself
+      // stays a pure, testable mapping.
+      jitter: Math.random(),
+      policy: {
+        baseDelayMs: knobNumber('AI_FAIRNESS_BASE_DELAY_MS'),
+        maxDelayMs: knobNumber('AI_FAIRNESS_MAX_DELAY_MS'),
+        maxHops: knobNumber('AI_FAIRNESS_MAX_HOPS'),
+        jitterRatio: DEFAULT_ADMISSION_POLICY.jitterRatio,
+      },
+    });
+
+    if (decision.action === 'shed') {
+      recordGateDrop(gate, {}, 'dropped');
+      console.warn('[ai.reply] Admission shed — hop budget exhausted', {
+        tenantId,
+        conversationId,
+        gate,
+        hops: decision.hops,
+      });
+      throw new AdmissionShedError(decision.reason, decision.hops, gate);
+    }
+
+    // Recorded as 'deferred', never 'dropped': the message is still going to be answered, and
+    // conflating the two would make the RC-06 drop-rate metric read high for merely-delayed turns.
+    recordGateDrop(gate, {}, 'deferred');
     await aiQueue.add(
       'ai.reply',
-      data,
+      buildAIReplyJobData({ ...data, fairnessHop: decision.nextHop }),
       {
-        delay: AI_FAIRNESS_BACKOFF_MS,
-        // Inherit the original jobId/dedup behaviour if present.
+        delay: decision.delayMs,
+        // THE line that stops the amplifier: BullMQ ignores an add whose jobId already exists, so
+        // concurrent deferrals of the same inbound at the same hop collapse into ONE job.
+        jobId: admissionJobId(conversationId, data.messageExternalId, decision.nextHop),
       },
     );
-    console.info('[ai.reply] Tenant at concurrency limit — re-delayed job', {
+    console.info('[ai.reply] Admission deferred', {
       tenantId,
       conversationId,
-      activeCount,
-      maxAllowed: AI_MAX_CONCURRENT_PER_TENANT,
-      backoffMs: AI_FAIRNESS_BACKOFF_MS,
+      gate,
+      hop: normalizeHop(data.fairnessHop),
+      nextHop: decision.nextHop,
+      delayMs: decision.delayMs,
     });
-    return;
-  }
-
-  // Ensure the tenant counter is always decremented when this job finishes
-  // (success, error, or early return). Without this, a crashed job permanently
-  // reduces the tenant's available concurrency slot.
-  let tenantSlotReleased = false;
-  const releaseTenantSlot = async (): Promise<void> => {
-    if (tenantSlotReleased) return;
-    tenantSlotReleased = true;
-    await redisConnection.decr(tenantActiveKey).catch(() => undefined);
   };
 
   // ---- Per-conversation serialization lock ---------------------------------
-  // Acquire BEFORE any conversation processing so two jobs for the same
-  // conversation can never run concurrently. If another job holds the lock,
-  // re-delay this one (releasing the tenant slot we just took) and let the
-  // active job finish first.
+  // Acquired BEFORE the tenant slot (P3-2 Step 9c). The legacy order took a slot, immediately
+  // discovered the conversation was busy, and gave the slot straight back — briefly consuming
+  // capacity that a runnable job for another conversation could have used.
   const conversationLockKey = `ai_conv_lock:${conversationId}`;
   const conversationLockToken = crypto.randomUUID();
   const conversationLockAcquired = await redisConnection
@@ -1635,7 +1685,10 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     .catch(() => false);
 
   if (!conversationLockAcquired) {
-    await releaseTenantSlot();
+    if (AI_FAIRNESS_BOUNDED) {
+      await deferOrShed('conversation_busy');
+      return;
+    }
     await aiQueue.add('ai.reply', data, { delay: AI_FAIRNESS_BACKOFF_MS });
     console.info('[ai.reply] Conversation busy — re-delayed job to serialize processing', {
       tenantId,
@@ -1653,6 +1706,80 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       .eval(CONVERSATION_LOCK_RELEASE_SCRIPT, 1, conversationLockKey, conversationLockToken)
       .catch(() => undefined);
   };
+
+  // ---- Per-tenant fairness ------------------------------------------------
+  const tenantActiveKey = `ai_active_jobs:${tenantId}`;
+  const slotToken = tenantSlotMember(conversationId, conversationLockToken);
+  let tenantSlotReleased = false;
+  let releaseTenantSlot: () => Promise<void>;
+  let admitted: boolean;
+  let activeCount = 0;
+
+  if (AI_FAIRNESS_BOUNDED) {
+    // Lease-based (P3-2 Step 9a). Each slot expires independently, so a crashed job costs ONE slot
+    // for one TTL instead of corrupting a shared counter — the legacy `INCR`/`DECR` pair could go
+    // negative and TTL-less once its single un-refreshed `EXPIRE` fired mid-flight, silently
+    // disabling the cap for exactly the burst-traffic tenant it exists to contain.
+    const raw = await redisConnection
+      .eval(
+        TENANT_SLOT_ACQUIRE_SCRIPT,
+        1,
+        tenantSlotKey(tenantId),
+        String(Date.now()),
+        String(CONVERSATION_LOCK_TTL_MS),
+        slotToken,
+        String(AI_MAX_CONCURRENT_PER_TENANT),
+      )
+      .catch(() => null);
+    // Fail OPEN on a Redis error: refusing to reply because the fairness bookkeeping blipped would
+    // trade a capacity concern for customer silence.
+    const parsed = raw === null ? { acquired: true, active: 0 } : parseAcquireResult(raw);
+    admitted = parsed.acquired;
+    activeCount = parsed.active;
+    releaseTenantSlot = async (): Promise<void> => {
+      if (tenantSlotReleased) return;
+      tenantSlotReleased = true;
+      await redisConnection
+        .eval(TENANT_SLOT_RELEASE_SCRIPT, 1, tenantSlotKey(tenantId), slotToken)
+        .catch(() => undefined);
+    };
+  } else {
+    activeCount = await redisConnection.incr(tenantActiveKey);
+    // Safety TTL: if the process crashes mid-job the key will expire rather than
+    // permanently blocking the tenant. 5 minutes >> any normal job duration.
+    if (activeCount === 1) {
+      await redisConnection.expire(tenantActiveKey, 300);
+    }
+    admitted = activeCount <= AI_MAX_CONCURRENT_PER_TENANT;
+    if (!admitted) {
+      // Decrement immediately — this job is not actually running yet.
+      await redisConnection.decr(tenantActiveKey);
+    }
+    releaseTenantSlot = async (): Promise<void> => {
+      if (tenantSlotReleased) return;
+      tenantSlotReleased = true;
+      await redisConnection.decr(tenantActiveKey).catch(() => undefined);
+    };
+  }
+
+  if (!admitted) {
+    // Release the lock we already hold so the conversation is not blocked while we wait for
+    // capacity — the deferred job re-acquires it on its next hop.
+    await releaseConversationLock();
+    if (AI_FAIRNESS_BOUNDED) {
+      await deferOrShed('tenant_capacity');
+      return;
+    }
+    await aiQueue.add('ai.reply', data, { delay: AI_FAIRNESS_BACKOFF_MS });
+    console.info('[ai.reply] Tenant at concurrency limit — re-delayed job', {
+      tenantId,
+      conversationId,
+      activeCount,
+      maxAllowed: AI_MAX_CONCURRENT_PER_TENANT,
+      backoffMs: AI_FAIRNESS_BACKOFF_MS,
+    });
+    return;
+  }
 
   // P2-6 (F1): the degradation floor is defined deep inside the try (it closes over the loaded
   // conversation/channel/history), so the outer catch below can only reach it through this hoisted

@@ -61,6 +61,7 @@ import { reportChannelBindingConflict } from '../services/channelIsolationServic
 import { findAIConfigGateStateByTenant } from '../db/models/aiConfig';
 import { aiConfigVersion } from '../services/aiConfigCache';
 import { buildReceiptSnapshot, type ReceiptSnapshot } from '../services/receiptSnapshot';
+import { planInboundEnqueue } from '../services/inboundEnqueuePolicy';
 import { buildAIReplyJobData, type InboundWebhookJobData } from './jobTypes';
 
 export type { InboundWebhookJobData } from './jobTypes';
@@ -1252,8 +1253,15 @@ export async function processInboundMessage(data: InboundWebhookJobData): Promis
   // (INBOUND_OUTBOX_ENQUEUE + dispatch on) — then the atomic intent above is the single source of
   // the job. In shadow (dispatch off) this still runs so delivery continues while the relay is
   // validated; the relay shadow-drains the intent without dispatching, so there is no double job.
-  const outboxOwnsDelivery = INBOUND_OUTBOX_ENQUEUE && OUTBOX_DISPATCH_ENABLED;
-  if (normalized.skipAiReply !== true && !outboxOwnsDelivery) {
+  //
+  // P3-2 Step 11: the 2x2 now lives in `services/inboundEnqueuePolicy.ts` and is pinned by a test.
+  // The dangerous cell is not a double-enqueue but any cell where NEITHER path enqueues — a stored
+  // customer message that is never answered and leaves no error artifact (RC-21's failure mode).
+  const enqueuePlan = planInboundEnqueue({
+    outboxEnqueue: INBOUND_OUTBOX_ENQUEUE,
+    outboxDispatch: OUTBOX_DISPATCH_ENABLED,
+  });
+  if (normalized.skipAiReply !== true && enqueuePlan.legacyDirectEnqueue) {
     const aiReplyDelayMs = knobNumber('AI_REPLY_DELAY_MS');
     const pendingAiReplyJobs = await aiQueue.getJobs(['delayed', 'waiting']);
     const existingJob = pendingAiReplyJobs.find(

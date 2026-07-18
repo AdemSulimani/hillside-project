@@ -871,6 +871,11 @@ export async function matchProductsForCustomerMessage(
   // P1-5: optional retrieval-telemetry sink. When provided, populated with the similarity scores,
   // threshold outcomes and semanticSkipped that RRF otherwise drops before the caller sees them.
   telemetrySink?: RetrievalTelemetrySink,
+  // P3-2 (C-125): upper bound on the tenant's retrievable catalog, used only to skip a provably
+  // useless wider HNSW pass. `generateReply` already awaits `countActiveProducts` on the same turn,
+  // so passing it costs nothing; the other call sites have no count in scope and pass nothing,
+  // which reproduces the legacy behaviour exactly.
+  eligibleCatalogCount?: number | null,
 ): Promise<Product[]> {
   const trimmed = searchText.trim();
   if (!trimmed) return [];
@@ -910,6 +915,7 @@ export async function matchProductsForCustomerMessage(
         // just below the top-N core matches) are not starved by the SQL LIMIT.
         SIMILARITY_HYSTERESIS_BAND > 0 ? limit + SEMANTIC_BAND_EXTRA_DEPTH : limit,
         activeEmbeddingModel(),
+        eligibleCatalogCount ?? null,
       );
       const partitioned = partitionBySimilarityBand(
         similar,
@@ -3973,6 +3979,7 @@ export async function generateReply(
           freshSearchQuery,
           contextualMatchLimit,
           retrievalSink,
+          totalCatalogCount,
         );
       } catch (err) {
         console.warn('[aiService] Other-options anchor search failed', err);
@@ -3994,6 +4001,7 @@ export async function generateReply(
         searchText,
         contextualMatchLimit,
         retrievalSink,
+        totalCatalogCount,
       );
     } catch (err) {
       console.warn('[aiService] Product matching failed', err);

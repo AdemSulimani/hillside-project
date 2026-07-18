@@ -41,6 +41,17 @@ import {
 } from './pauseInvariantMonitor';
 import { processOutboxRelay, initOutboxRelayScheduler } from './outboxRelay';
 import { attachWorkerFailureHandler } from './failureHandler';
+import { resolveWorkerConcurrency } from './workerConcurrency';
+import { registerLocalWorker } from '../services/localWorkerRegistry';
+import { runLedgerRetentionSweep } from '../services/ledgerRetention';
+import { tick as runDeadLetterMetricsTick } from '../services/deadLetterMonitor';
+import {
+  LEDGER_RETENTION_JOB,
+  DLQ_METRICS_JOB,
+  initLedgerRetentionScheduler,
+  initDeadLetterMetricsScheduler,
+  removeDeadLetterMetricsScheduler,
+} from './maintenanceSchedulers';
 
 /** Shared BullMQ worker tuning to reduce idle / polling Redis traffic. */
 const redisOptimizedWorkerOptions: Pick<
@@ -64,20 +75,14 @@ function createWorkerConnection(): IORedis {
 /**
  * Allows operators to dial worker concurrency down on small hosts (e.g. the 1 vCPU droplet)
  * so that BullMQ jobs cannot starve the HTTP request loop. Defaults preserve historical
- * behaviour on hosts large enough to handle them.
+ * behaviour on hosts large enough to handle them. Parsing lives in `workerConcurrency.ts` (P3-2)
+ * so it is unit-testable and shared with the worker entrypoint.
  */
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-const WEBHOOK_CONCURRENCY = envInt('WEBHOOK_WORKER_CONCURRENCY', 10);
-const AI_CONCURRENCY = envInt('AI_WORKER_CONCURRENCY', 5);
-const NOTIFICATIONS_CONCURRENCY = envInt('NOTIFICATIONS_WORKER_CONCURRENCY', 3);
-const FINETUNING_CONCURRENCY = envInt('FINETUNING_WORKER_CONCURRENCY', 1);
-const DEFAULT_CONCURRENCY = envInt('DEFAULT_WORKER_CONCURRENCY', 3);
+const WEBHOOK_CONCURRENCY = resolveWorkerConcurrency('WEBHOOK_WORKER_CONCURRENCY');
+const AI_CONCURRENCY = resolveWorkerConcurrency('AI_WORKER_CONCURRENCY');
+const NOTIFICATIONS_CONCURRENCY = resolveWorkerConcurrency('NOTIFICATIONS_WORKER_CONCURRENCY');
+const FINETUNING_CONCURRENCY = resolveWorkerConcurrency('FINETUNING_WORKER_CONCURRENCY');
+const DEFAULT_CONCURRENCY = resolveWorkerConcurrency('DEFAULT_WORKER_CONCURRENCY');
 
 export const webhookWorker = new Worker<InboundWebhookJobData>(
   'webhook',
@@ -164,6 +169,16 @@ export const defaultWorker = new Worker<
       await processOutboxRelay();
       return;
     }
+    // P3-2 Step 7: these two were per-process `setInterval`s in server.ts, so N replicas ran N
+    // concurrent DELETE sweeps. As scheduler jobs they fire exactly once fleet-wide.
+    if (job.name === LEDGER_RETENTION_JOB) {
+      await runLedgerRetentionSweep();
+      return;
+    }
+    if (job.name === DLQ_METRICS_JOB) {
+      await runDeadLetterMetricsTick();
+      return;
+    }
     if (job.name === 'embeddingReconcile') {
       await processReconcileProductEmbeddings();
       return;
@@ -198,6 +213,38 @@ attachWorkerFailureHandler(aiWorker, { queueName: 'ai' });
 attachWorkerFailureHandler(notificationsWorker, { queueName: 'notifications', alertOnExhaustion: false });
 attachWorkerFailureHandler(finetuningWorker, { queueName: 'finetuning' });
 attachWorkerFailureHandler(defaultWorker, { queueName: 'default' });
+
+/**
+ * P3-2 Step 5: publish local Worker state for `/api/health/queues` WITHOUT the health path having
+ * to import this module. `queueHealthService` previously imported these five bindings directly,
+ * which made `import app` construct the entire fleet (the five `new Worker(...)` above are
+ * module-load side effects). The registry inverts that edge; in an API-only process it stays empty
+ * and health falls back to the Redis worker count, which is the cross-process-correct signal.
+ */
+const LOCAL_WORKERS = [
+  { key: 'webhook', worker: webhookWorker },
+  { key: 'ai', worker: aiWorker },
+  { key: 'notifications', worker: notificationsWorker },
+  { key: 'finetuning', worker: finetuningWorker },
+  { key: 'default', worker: defaultWorker },
+] as const;
+
+for (const { key, worker } of LOCAL_WORKERS) {
+  registerLocalWorker(key, () => ({
+    concurrency: worker.opts.concurrency ?? 1,
+    isRunning: worker.isRunning(),
+    isPaused: worker.isPaused(),
+  }));
+}
+
+/**
+ * P3-2 Step 6: one drain used by BOTH entrypoints, so `server.ts` and `worker.ts` cannot diverge
+ * on shutdown semantics. `allSettled` — one worker refusing to close must not abandon the other
+ * four mid-job, which is exactly how a deploy SIGKILLs an in-flight `ai.reply` (C-88).
+ */
+export async function closeAllWorkers(): Promise<void> {
+  await Promise.allSettled(LOCAL_WORKERS.map(({ worker }) => worker.close()));
+}
 
 aiWorker.on('completed', (job) => {
   console.info('[jobs] ai completed', { jobId: job?.id });
@@ -246,3 +293,17 @@ void initMonthlyUseCaseSnapshotScheduler().catch((err) => {
 void initOutboxRelayScheduler().catch((err) => {
   console.error('[jobs] Failed to register outbox relay scheduler', err);
 });
+
+void initLedgerRetentionScheduler().catch((err) => {
+  console.error('[jobs] Failed to register ledger retention scheduler', err);
+});
+
+// The scheduler record lives in Redis, so turning the flag off must actively REMOVE it — otherwise
+// a scheduler registered by a previous deploy keeps firing after the code stopped wanting it.
+if ((process.env.DLQ_METRICS_ENABLED ?? 'false').trim().toLowerCase() === 'true') {
+  void initDeadLetterMetricsScheduler().catch((err) => {
+    console.error('[jobs] Failed to register dead-letter metrics scheduler', err);
+  });
+} else {
+  void removeDeadLetterMetricsScheduler();
+}

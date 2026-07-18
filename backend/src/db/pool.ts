@@ -1,4 +1,6 @@
 import { Pool, type PoolConfig } from 'pg';
+import { resolveProcessRole } from '../config/processRole';
+import { buildRolePoolSettings, buildSessionOptions, poolRoleFromProcessRole } from './poolConfig';
 
 function isLocalHost(host: string) {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === 'postgres';
@@ -50,11 +52,37 @@ function buildPoolConfig(): PoolConfig {
   return { connectionString, ssl: true };
 }
 
+/**
+ * P3-2 Step 10: the pool's CONFIGURATION is role-aware; the pool itself is still one default export.
+ *
+ * 65 files import this default. Making the singleton's config depend on the role keeps all of them
+ * untouched, while letting the API and the worker diverge on the settings where they genuinely must
+ * — most importantly `statement_timeout`, which the API wants and the worker must not have (the
+ * reconcile, finetuning and monthly-snapshot jobs legitimately run for minutes).
+ *
+ * With PROCESS_ROLE unset the role is `all` and every value is byte-identical to the pre-split
+ * defaults, so an existing deployment sees no change whatsoever.
+ */
+const poolSettings = buildRolePoolSettings({ role: poolRoleFromProcessRole(resolveProcessRole()) });
+const sessionOptions = buildSessionOptions(poolSettings);
+
 const pool = new Pool({
   ...buildPoolConfig(),
-  max: parseInt(process.env.PG_POOL_MAX || '10', 10),
-  idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10),
-  connectionTimeoutMillis: parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '10000', 10),
+  max: poolSettings.max,
+  idleTimeoutMillis: poolSettings.idleTimeoutMillis,
+  connectionTimeoutMillis: poolSettings.connectionTimeoutMillis,
+  // Makes `SELECT application_name, count(*) FROM pg_stat_activity GROUP BY 1` answer "did the
+  // split take effect". Every row is anonymous without it.
+  application_name: poolSettings.applicationName,
+  ...(sessionOptions !== undefined ? { options: sessionOptions } : {}),
+});
+
+console.info('[db] pool configured', {
+  role: poolSettings.role,
+  max: poolSettings.max,
+  applicationName: poolSettings.applicationName,
+  statementTimeoutMs: poolSettings.statementTimeoutMs,
+  idleInTransactionTimeoutMs: poolSettings.idleInTransactionTimeoutMs,
 });
 
 /**

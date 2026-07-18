@@ -192,6 +192,25 @@ export const KNOBS: readonly KnobSpec[] = [
   num('EMBEDDING_QUERY_TIMEOUT_MS', 'int', 5000, { min: 100, max: 60_000 }, 'frozen', 'Timeout for OpenAI query-embedding calls'),
   num('AI_MAX_CONCURRENT_PER_TENANT', 'int', 8, { min: 1, max: 100 }, 'frozen', 'Per-tenant concurrent AI reply slots'),
   num('AI_CONVERSATION_LOCK_TTL_MS', 'int', 300_000, { min: 1000, max: 3_600_000 }, 'frozen', 'Per-conversation processing lock TTL'),
+  num('AI_FAIRNESS_BASE_DELAY_MS', 'int', 3000, { min: 100, max: 300_000 }, 'frozen',
+    'Base delay before an admission-deferred ai.reply job retries; doubles per hop (P3-2/C-79)', {
+      rationale:
+        'Was a hard-coded 3000 literal in processAIReply, outside both this manifest and ' +
+        '.env.example — the single number governing how hard the fairness gate re-adds jobs, and ' +
+        'untunable without a deploy. Under the legacy flat-3s loop N starved jobs produced N new ' +
+        'jobs every 3s forever; the bounded mode doubles this per hop up to AI_FAIRNESS_MAX_DELAY_MS.',
+    }),
+  num('AI_FAIRNESS_MAX_DELAY_MS', 'int', 60_000, { min: 1000, max: 900_000 }, 'frozen',
+    'Ceiling for a single admission deferral delay (P3-2)'),
+  num('AI_FAIRNESS_MAX_HOPS', 'int', 8, { min: 1, max: 100 }, 'frozen',
+    'How many times one inbound may be deferred before it is shed to the DLQ (P3-2)', {
+      rationale:
+        'With the default 3000ms base this is ~3+6+12+24+48+60+60+60 ≈ 4.5 minutes of total wait ' +
+        'before shedding. A shed is NOT silent — it raises AdmissionShedError so the P1-2 path ' +
+        'writes a dead_letter row plus an ai_reply_undelivered alert. It deliberately does NOT ' +
+        'pause the conversation: capacity is a global condition and ai_paused has no automatic ' +
+        'exit, so pausing would turn a transient burst into permanent per-conversation silence.',
+    }),
   // Read by the boot posture logs. Declared here so their defaults exist in ONE place — before
   // P2-7 each was duplicated as a literal inside validateEnv's log strings, which is how the
   // validator became a drift source in its own right.
@@ -212,6 +231,27 @@ export const KNOBS: readonly KnobSpec[] = [
   num('SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS', 'int', 300, { min: 10, max: 86_400 }, 'frozen',
     'Rolling window (s) for the semantic-skip burst alert (P2-6/RC-04)'),
   num('PROMPT_GUIDELINES_MAX_CHARS', 'int', 20_000, { min: 1000, max: 200_000 }, 'frozen', 'Char budget for the assembled guideline blocks (P2-5)'),
+  // P3-2 (C-125/RC-04): the two HNSW candidate-pool knobs were bare `parseInt(process.env...)` IIFEs
+  // in db/models/product.ts, and HNSW_EF_SEARCH was DUPLICATED in productImageFingerprint.ts — two
+  // copies that could already disagree. They are decision knobs, not infrastructure: they change
+  // which products a customer is shown. Declaring them also removes an interpolation hazard —
+  // `SET LOCAL hnsw.ef_search = ${n}` is string-built (a GUC is not bindable), so a NaN rendered
+  // literally and threw inside the similarity query's own transaction.
+  num('HNSW_EF_SEARCH', 'int', 100, { min: 1, max: 10_000 }, 'frozen',
+    'HNSW candidate-pool size for the first similarity pass', {
+      rationale:
+        'The embedding index is GLOBAL and `tenant_id` is a POST-filter, so a small tenant\'s true ' +
+        'matches can be crowded out of the pool by other tenants\' rows. pgvector\'s default (40) ' +
+        'was too small for that; 100 is the measured floor. Always raised to at least the query ' +
+        'LIMIT before use.',
+    }),
+  num('HNSW_EF_SEARCH_MAX', 'int', 500, { min: 1, max: 100_000 }, 'frozen',
+    'Ceiling for the adaptive HNSW escalation on an under-filled first pass', {
+      rationale:
+        'Only reached when the first pass under-fills AND the tenant provably has more eligible ' +
+        'rows than we hold (P3-2 fixed the missing second condition — see db/vectorSearchPolicy.ts). ' +
+        'Superseded by VECTOR_ITERATIVE_SCAN where pgvector >= 0.8 is available.',
+    }),
   num('PROMPT_ASSEMBLY_MAX_CHARS', 'int', 34_000, { min: 1000, max: 400_000 }, 'frozen', 'Char budget above which the assembled prompt is reported (P2-5)'),
   num('OPENAI_MAX_RETRIES', 'int', 3, { min: 0, max: 10 }, 'frozen', 'Retries for every OpenAI call'),
   num('OPENAI_TIMEOUT_MS', 'int', 60_000, { min: 1000, max: 600_000 }, 'frozen', 'Timeout for every OpenAI call'),
@@ -345,7 +385,64 @@ export const KNOBS: readonly KnobSpec[] = [
   bool('OUTBOX_RELAY_ENABLED', false, 'Transactional outbox relay (P1-1)'),
   bool('OUTBOX_DISPATCH_ENABLED', false, 'Outbox dispatch of staged side-effects (P1-1)'),
   bool('AI_REPLY_STAGE_BEFORE_SEND', false, 'Stage the reply row before sending (P1-1 idempotency)'),
+  bool('INBOUND_OUTBOX_ENQUEUE', false,
+    'Write the ai.reply intent transactionally with the message row instead of the racy debounce (P1-1/RC-05)',
+    {
+      rationale:
+        'Declared in P3-2: it shipped with P1-1 as an inline process.env read documented only in ' +
+        '.env.example, so it had no band validation, no boot report and no fingerprint coverage — ' +
+        'while being one of the two flags that decide WHO creates the ai.reply job. Two instances ' +
+        'disagreeing on it is a real split-brain: one persists an intent the other never dispatches. ' +
+        'It replaces the getJobs/remove/add debounce (which does not scan `active`, removes at most ' +
+        'one match, and is O(queue depth) per inbound) with the partial-unique-index upsert P1-1 ' +
+        'already built. Only takes over delivery when OUTBOX_DISPATCH_ENABLED is also on — see ' +
+        'services/inboundEnqueuePolicy.ts for why the half-on states keep the legacy enqueue.',
+    }),
   bool('DLQ_ENABLED', false, 'Route exhausted jobs to the dead-letter queue (P1-2)', { binding: 'per-call' }),
+  {
+    // Enum rather than a bool because a third mode (e.g. shadow-compare) is a plausible next step,
+    // and because it reads at the call site as the topology choice it is. Mirrors the proven
+    // ORDER_STAGE_MACHINE / QUALITY_EVAL_MODE shape.
+    key: 'AI_FAIRNESS_MODE',
+    kind: 'enum',
+    values: ['legacy', 'bounded'],
+    requiredness: { kind: 'optional', default: 'legacy' },
+    binding: 'frozen',
+    description: 'Admission control for ai.reply: legacy (flat 3s re-add) | bounded (P3-2/C-79)',
+    rationale:
+      'The legacy path re-adds a starved job every 3s with NO jobId, so N jobs become N NEW jobs ' +
+      'per tick with attemptsMade reset to 0 — an unbounded retry amplifier on the same queue the ' +
+      'inbound debounce scans linearly per message. `bounded` adds a deterministic jobId (so ' +
+      'concurrent deferrals collapse into one), exponential jittered backoff, a hop budget, and ' +
+      'lease-based tenant slots that cannot go negative. Default legacy so the cutover is a flag.',
+  },
+  bool('SOCKET_CROSS_PROCESS_EMIT', false,
+    'Publish socket events through Redis so a worker process can reach connected clients (P3-2)',
+    {
+      binding: 'frozen',
+      rationale:
+        'Declared here (unlike PROCESS_ROLE and the pool/concurrency vars) precisely BECAUSE it is ' +
+        'not role-varying: both roles should carry the same value, so a divergence is real drift ' +
+        'worth catching. socketService holds a module-local `io` attached only by the API, and every ' +
+        'emit used to early-return on null with no log — so a worker would drop all ~87 of its emits ' +
+        'silently. The inbox has NO polling backstop (query-client sets refetchOnWindowFocus:false ' +
+        'and InboxPage sets no refetchInterval), so that reads to a merchant as a frozen inbox while ' +
+        'the AI replies normally. PROCESS_ROLE=worker with this OFF is refused at boot.',
+    }),
+  bool('VECTOR_ITERATIVE_SCAN', false,
+    'Use pgvector >= 0.8 iterative index scan instead of the adaptive ef_search retry (P3-2/RC-04)',
+    {
+      binding: 'per-call',
+      rationale:
+        'The upstream fix for ANN-plus-post-filter under-fill: the scan continues past ef_search ' +
+        'until the LIMIT is satisfied or the index is exhausted, so it self-terminates for a small ' +
+        'tenant AND recovers recall for a large one — strictly better than the two-shot retry. ' +
+        'ALWAYS strict_order: partitionBySimilarityBand and the retrievalTop slice both assume ' +
+        'strictly descending similarity, which relaxed_order does not guarantee. Gated because the ' +
+        'capability is version-dependent and prod pins a ROLLING image tag; the flag is inert ' +
+        'unless db/vectorCapability.ts probed support, since SETting an unknown hnsw.* GUC errors ' +
+        'inside the similarity query\'s transaction and would take retrieval to zero.',
+    }),
   bool('GRACEFUL_DEGRADE_MODE', false,
     'One safe floor when the provider fails mid-turn: holding reply + escalate (P2-6/RC-19)',
     {
@@ -834,7 +931,14 @@ export function fingerprint(env: NodeJS.ProcessEnv, instance = defaultInstanceId
 function defaultInstanceId(): string {
   // Lazy require keeps this module importable where `os` is unavailable (and leaf-pure).
   const host = process.env.HOSTNAME || require('node:os').hostname();
-  return `${host}:${process.pid}`;
+  // P3-2: the role leads the id. After the worker split, an API process and a worker process share
+  // a hostname on the same box, so `host:pid` alone made the two indistinguishable in
+  // `config_fingerprints` — and "which ROLE is the drifted one" is the first question anyone asks
+  // when `count(DISTINCT hash) > 1` fires. Reading PROCESS_ROLE directly (rather than importing
+  // config/processRole) keeps this module a dependency-free leaf; an unset value yields `all`,
+  // matching that module's default.
+  const role = (process.env.PROCESS_ROLE ?? 'all').trim().toLowerCase() || 'all';
+  return `${role}@${host}:${process.pid}`;
 }
 
 /** The short form carried on every ledger row — a pointer into config_fingerprints. */
