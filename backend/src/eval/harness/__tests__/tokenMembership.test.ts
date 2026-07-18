@@ -10,23 +10,15 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import path from 'node:path';
 import { checkClaimTokenMembership, describeViolations } from '../tokenMembership';
 import { buildPriceSetFromCatalogRows } from '../../../services/catalogGuardReferenceService';
 
-/** Locate `backend/src` by walking up from the cwd (tsx transpiles to CJS — no import.meta). */
-function findSrcDir(): string {
-  let dir = process.cwd();
-  for (let i = 0; i < 6; i++) {
-    const candidate = path.join(dir, 'src');
-    if (existsSync(path.join(candidate, 'services', 'aiService.ts'))) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  throw new Error(`could not locate backend/src from cwd ${process.cwd()}`);
-}
+// NOTE: the `findSrcDir` helper and the node:fs/node:path imports were removed with P3-1. They
+// existed solely for the source-text tripwire that asserted `groundingGate.ts` did NOT consume
+// `f.type === 'attribute'`. That tripwire fired when the lane landed, which was its whole purpose,
+// so it was deleted. The equivalent invariant now lives, inverted, in
+// `services/__tests__/groundingGate.test.ts` — it asserts BOTH type filters are present, so the
+// gap cannot be silently un-closed in either direction.
 
 const CATALOG_TEXT = [
   'MATCHING PRODUCTS:',
@@ -184,19 +176,31 @@ describe('KNOWN RECALL GAPS — what this checker deliberately does NOT catch', 
    * in lowercase Albanian prose has no such marker, and catching it would need semantics — i.e. a
    * judge, which is exactly what RC-03 says not to rely on for this.
    *
-   * ⚠️ DO NOT ASSUME THE `facts_used` CONTRACT COVERS THESE. It does not, as of P3-4. The model IS
-   * instructed to declare attribute claims (`{type:'attribute', value:'pa sheqer'}` —
-   * `groundingGate.ts` FACTS_USED_JSON_SCHEMA), but `evaluateConsolidatedGrounding` consumes only
-   * `f.type === 'name'` and re-derives prices from the prose. Declared ATTRIBUTE facts are
-   * collected and thrown away, so the third case below is unguarded at every layer, on the send
-   * path included. Closing it is a named P3-1 work item (validate declared attribute facts against
-   * the injected catalog, mirroring the existing name path) — NOT more heuristics here: this module
-   * is a CI instrument that never runs on the send path, so nothing it does can stop such a reply
-   * reaching a customer.
+   * ⚠️ WHAT THE `facts_used` CONTRACT NOW COVERS — AND WHAT IT STILL DOES NOT (P3-1).
    *
-   * Detection-side, these belong to the LIVE runner (`npm run eval:live-replay`), which at least
-   * sees real generated prose. If one of them ever starts failing, that is a capability
-   * improvement: update the test, do not weaken the checker.
+   * P3-1 landed the declared-attribute lane: `evaluateConsolidatedGrounding` now consumes
+   * `f.type === 'attribute'` and, behind `GROUNDING_GATE_ATTRIBUTE_FACTS`, strips or escalates a
+   * declared exclusion claim on the SEND path. So the third case below is no longer unguarded at
+   * every layer — but only for its CONTRADICTION half, and the distinction matters:
+   *
+   *   - CONTRADICTED (guarded): the resolved product's own catalog text asserts the opposite. The
+   *     real row behind case 3 reads "Sheqer i reduktuar ... më e ulët në sheqer", so "pa sheqer"
+   *     is refuted and the lane fires.
+   *   - SILENT (still open, by design): the catalog says nothing about the substance. 218 of 257
+   *     active rows are silent on sugar and most supplements genuinely ARE sugar-free — the
+   *     merchant just never wrote it down — so flagging silence would strip TRUE sentences into a
+   *     pause that has no automatic exit. Closing that half needs merchant-supplied structured
+   *     dietary data, not a cleverer text predicate.
+   *
+   * Two further limits worth naming: the lane judges DECLARED facts only (an undeclared attribute
+   * claim in prose has no deterministic backstop, unlike prices), and only substances in a closed
+   * lexicon. None of that is fixable HERE — this module is a CI instrument that never runs on the
+   * send path, so nothing it does can stop such a reply reaching a customer.
+   *
+   * The three cases below still pass unchanged: this CHECKER is untouched by P3-1 and genuinely
+   * cannot see any of them. Detection-side they belong to the LIVE runner
+   * (`npm run eval:live-replay`), which at least sees real generated prose. If one of them ever
+   * starts failing, that is a capability improvement: update the test, do not weaken the checker.
    */
   it('MISSES an all-lowercase invented claim (no capital, no digit → no claim position)', () => {
     assert.equal(check('kjo permban shume proteina dhe ndihmon per muskuj').ok, true);
@@ -208,37 +212,9 @@ describe('KNOWN RECALL GAPS — what this checker deliberately does NOT catch', 
 
   it('MISSES a false statement built entirely from catalog words', () => {
     // Every token is grounded; only the CLAIM is false. Membership cannot see this by construction.
-    // This is the case the P3-1 attribute-validation item exists to close — see the note above.
+    // P3-1 closed this on the SEND path (contradiction half only) — this CHECKER still cannot see
+    // it, and that is the point of recording it here. See the note above.
     assert.equal(check('Mega mass 3kg Vanil eshte pa sheqer').ok, true);
-  });
-});
-
-describe('the facts_used contract does not (yet) cover attribute claims', () => {
-  /**
-   * A guard on a CLAIM, not on code — asserted here so the note above cannot quietly go stale.
-   *
-   * If someone lands P3-1's attribute validation, `evaluateConsolidatedGrounding` will start
-   * consuming `f.type === 'attribute'` and this test fails. That failure is the correct signal:
-   * delete this block and the "unguarded at every layer" wording it protects, because the gap will
-   * genuinely be closed.
-   */
-  it('the gate consumes only name facts (prices come from the prose, attributes are discarded)', () => {
-    const source = readFileSync(
-      path.join(findSrcDir(), 'services', 'groundingGate.ts'),
-      'utf8',
-    );
-    assert.match(
-      source,
-      /f\.type === 'name'/,
-      'the gate no longer filters declared facts by name — re-check what it consumes',
-    );
-    assert.equal(
-      /f\.type === 'attribute'/.test(source),
-      false,
-      'the gate now consumes declared ATTRIBUTE facts — P3-1 attribute validation appears to have ' +
-        'landed. Delete this describe block and update the KNOWN RECALL GAPS note above, which ' +
-        'still says the class is unguarded at every layer.',
-    );
   });
 });
 

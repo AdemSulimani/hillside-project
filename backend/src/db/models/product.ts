@@ -876,6 +876,43 @@ export async function listActiveCatalogNamesForTenant(tenantId: string): Promise
   return rows.map((r) => r.name).filter((n): n is string => Boolean(n?.trim()));
 }
 
+export interface CatalogAttributeSourceRow {
+  id: string;
+  name: string;
+  category: string | null;
+  description: string | null;
+  usage_description: string | null;
+}
+
+/**
+ * Free-text evidence rows for the P3-1 declared-attribute grounding lane.
+ *
+ * Deliberately UNTRUNCATED. A per-row character cap looks like a tuning knob but is a correctness
+ * hazard with the wrong monotonicity: on the real row `Isolate protein 700gr qokolad` the text
+ * that CONTRADICTS a lactose-free claim sits at char ~345 while the text that would SUPPORT it
+ * sits far later, so any cap in the plausible range keeps the contradiction and cuts the rescue —
+ * i.e. truncation MANUFACTURES flags. Real descriptions reach 3272 chars (avg ~800). The bound is
+ * therefore on ROWS (`$2`), and hitting it sets `truncated` on the index, which makes every claim
+ * contradiction-ineligible rather than silently judging on a partial view.
+ *
+ * `extracted_text` is excluded on purpose: it is a raw OCR/PDF dump whose cross-product noise (an
+ * ingredient panel belonging to a different item on the same source page) is a pure
+ * false-positive source, and it is not part of the context the generator was shown.
+ */
+export async function listActiveCatalogAttributeRowsForTenant(
+  tenantId: string,
+  rowLimit: number,
+): Promise<CatalogAttributeSourceRow[]> {
+  const { rows } = await pool.query<CatalogAttributeSourceRow>(
+    `SELECT id, name, category, description, usage_description FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+     ORDER BY name ASC
+     LIMIT $2::int`,
+    [tenantId, rowLimit],
+  );
+  return rows;
+}
+
 export interface SimilarProductName {
   name: string;
   similarity: number;

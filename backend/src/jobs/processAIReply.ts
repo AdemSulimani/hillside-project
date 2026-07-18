@@ -146,6 +146,11 @@ import {
   verifySuspectedNamesAgainstCatalog,
 } from '../services/catalogGuardReferenceService';
 import {
+  getFullCatalogAttributeIndex,
+  resolveProductRef,
+} from '../services/catalogAttributeReferenceService';
+import type { AttributeGateMode } from '../services/attributeGrounding';
+import {
   evaluateConsolidatedGrounding,
   GenerationContractError,
   type GroundingGateDeps,
@@ -707,6 +712,19 @@ const GROUNDING_GATE_CONSOLIDATED =
  * from being sent as an empty/degenerate message. Read through the P2-7 manifest.
  */
 const GROUNDING_GATE_STRIP_FLOOR = knobNumber('GROUNDING_GATE_STRIP_FLOOR');
+
+/**
+ * P3-1: the declared-attribute grounding lane — `off` | `shadow` | `enforce`.
+ *
+ * Read through `knobString` rather than a bare `process.env` compare. The three flags above are
+ * pre-existing raw reads and are NOT the precedent to copy: the manifest is what makes a knob
+ * band-checked, documented and fingerprinted, and this one is fingerprinted for a concrete reason
+ * — two workers on different rungs would strip different replies from identical input.
+ */
+const GROUNDING_GATE_ATTRIBUTE_FACTS = knobString(
+  'GROUNDING_GATE_ATTRIBUTE_FACTS',
+) as AttributeGateMode;
+const GROUNDING_ATTR_MAX_CLAIMS = knobNumber('GROUNDING_ATTR_MAX_CLAIMS');
 
 /**
  * P0-4 (RC-19, RC-22): when ON, the pre-reply sensitive-escalation subsystem fails
@@ -4358,6 +4376,11 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         suspectNames: filterHallucinatedProductNames,
         verifyNames: (t, suspects, index) =>
           verifySuspectedNamesAgainstCatalog(t, suspects, index),
+        // P3-1: injected, never imported by the gate — keeps the gate offline-testable. Both are
+        // only ever reached once a declared attribute claim has already been parsed AND located in
+        // the prose, so a turn with no attribute claim costs zero Redis reads and zero queries.
+        getAttributeIndex: getFullCatalogAttributeIndex,
+        resolveProductRef: (t, productRef, index) => resolveProductRef(t, productRef, index),
       };
       const verdict = await evaluateConsolidatedGrounding({
         tenantId,
@@ -4366,7 +4389,15 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         deps: gateDeps,
         nameLlmCap: NAME_GUARD_LLM_CATALOG_CAP,
         stripFloor: GROUNDING_GATE_STRIP_FLOOR,
+        attributeMode: GROUNDING_GATE_ATTRIBUTE_FACTS,
+        attributeMaxClaims: GROUNDING_ATTR_MAX_CLAIMS,
       });
+      // P3-1: `declared` and `observed` are what make a SHADOW window legible. A lane that flags
+      // nothing is ambiguous between "no fabrications" and "the model stopped declaring attribute
+      // facts at all" — and a dead guard that looks green is precisely the failure this audit item
+      // exists to prevent. Recording the declared count separates the two.
+      const declaredAttributeCount = (factsUsed ?? []).filter((f) => f.type === 'attribute').length;
+      const observedAttributes = verdict.ungroundedAttributes ?? verdict.shadowAttributes ?? [];
       recordDecision({
         classifier: 'grounding_gate',
         raw_score: verdict.ungroundedPrices.length + verdict.ungroundedNames.length,
@@ -4375,6 +4406,19 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         passed: verdict.escalate || verdict.status === 'stripped',
         branch: verdict.status,
       });
+      if (GROUNDING_GATE_ATTRIBUTE_FACTS !== 'off') {
+        recordDecision({
+          classifier: 'grounding_attribute_lane',
+          raw_score: observedAttributes.length,
+          threshold: null,
+          boost_applied: false,
+          passed: observedAttributes.length > 0,
+          branch:
+            `${GROUNDING_GATE_ATTRIBUTE_FACTS}:declared=${declaredAttributeCount}` +
+            `:contradicted=${observedAttributes.length}` +
+            `:scopes=${observedAttributes.map((a) => a.scope).join('|') || 'none'}`,
+        });
+      }
 
       if (verdict.escalate) {
         groundingGateEscalated = true;
@@ -4386,6 +4430,12 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           reason: groundingGateReason,
           ungroundedPrices: verdict.ungroundedPrices,
           ungroundedNames: verdict.ungroundedNames,
+          // Spread, so the key is ABSENT when the attribute lane contributed nothing. `details` is
+          // persisted verbatim into ai_alerts.details JSONB, and an unconditional `[]` would
+          // change every flag-off escalation record.
+          ...(verdict.ungroundedAttributes
+            ? { ungroundedAttributes: verdict.ungroundedAttributes }
+            : {}),
           originalReplyPreview: finalReplyText.slice(0, 200),
         };
         logger.warn('[GROUNDING GATE] Reply not fully grounded — escalating to holding message', {

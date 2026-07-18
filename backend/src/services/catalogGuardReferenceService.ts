@@ -35,11 +35,14 @@ import { findAIConfigByTenant, type AIConfig } from '../db/models/aiConfig';
 import { listTenantPromptBlocksRuntime } from '../db/models/promptBlock';
 import { extractStatedPrices, type CatalogPriceSet } from './priceConsistencyGuard';
 import { normalizeText } from './productTitleNormalization';
+import { knobNumber } from '../config/knobs';
+// One-way import: catalogAttributeReferenceService must NOT import back from here (cycle).
+import { catalogGuardAttributesKey } from './catalogAttributeReferenceService';
 
-const CACHE_TTL_SECONDS = (() => {
-  const n = parseInt(process.env.GUARD_CATALOG_CACHE_TTL_SECONDS || '120', 10);
-  return Number.isFinite(n) && n > 0 ? n : 120;
-})();
+// P3-1: read through the P2-7 manifest instead of a bare parseInt. `readKnob` falls back to the
+// declared default on a non-finite or out-of-band value exactly as the old IIFE did, so behaviour
+// is unchanged — what is new is that the drift is reported by `npm run config:check`.
+const CACHE_TTL_SECONDS = knobNumber('GUARD_CATALOG_CACHE_TTL_SECONDS');
 
 /**
  * Minimum pg_trgm word_similarity for a suspected name to be considered a real
@@ -62,10 +65,7 @@ const CACHE_TTL_SECONDS = (() => {
  * Raise toward ~0.7 only if invented near-variants must be caught at the cost of
  * escalating heavier typos; lower toward ~0.4 only if real typo'd names still escalate.
  */
-const NAME_SIMILARITY_THRESHOLD = (() => {
-  const n = parseFloat(process.env.NAME_GUARD_SIMILARITY_THRESHOLD || '0.48');
-  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.48;
-})();
+const NAME_SIMILARITY_THRESHOLD = knobNumber('NAME_GUARD_SIMILARITY_THRESHOLD');
 
 export function catalogGuardPricesKey(tenantId: string): string {
   return `guard_catalog_prices:${tenantId}`;
@@ -296,12 +296,20 @@ export async function verifySuspectedNamesAgainstCatalog(
 
 /**
  * Clears every product-derived Redis cache for the tenant: the AI fallback catalog
- * list plus both guard reference sets. Call on any product mutation.
+ * list plus all three guard reference sets. Call on any product mutation.
+ *
+ * The P3-1 attribute index is invalidated here rather than in `invalidateTenantAiCaches`
+ * deliberately. The price set merges in AI-config and prompt-block text (an operator-stated
+ * delivery fee is ground truth the AI was told), but attribute evidence must come ONLY from
+ * `products` rows — otherwise a sentence in a tenant's persona could ground a claim about a
+ * product's composition. It is derived from product rows alone, so product mutation is the only
+ * event that can stale it.
  */
 export async function invalidateProductCatalogCaches(tenantId: string): Promise<void> {
   await redisConnection.del(
     `products:${tenantId}`,
     catalogGuardPricesKey(tenantId),
     catalogGuardNamesKey(tenantId),
+    catalogGuardAttributesKey(tenantId),
   );
 }

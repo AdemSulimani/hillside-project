@@ -130,20 +130,46 @@ describe('parseFactsUsedCompletion', () => {
     );
   });
 
-  it('coerces malformed fact entries and drops empty-value facts', () => {
+  /**
+   * P3-1 changed this: an unknown `type` is now DROPPED, not coerced to 'attribute'.
+   *
+   * The old default was harmless only while the attribute bucket was discarded unread. Now that
+   * declared attribute facts drive a customer-visible strip, coercing would route every malformed
+   * fact the model emits — a mistyped price, a truncated enum, an invented fourth type — into the
+   * attribute lane as a judgeable claim. Dropping leaves it unjudged, which is the same outcome as
+   * the model never declaring it.
+   */
+  it('DROPS unknown-type facts (P3-1) and drops empty-value facts', () => {
     const out = parseFactsUsedCompletion(
       JSON.stringify({
         prose: 'ok',
         facts_used: [
-          { type: 'weird', product_ref: 'x', value: 'kept' }, // unknown type → 'attribute'
+          { type: 'weird', product_ref: 'x', value: 'kept' }, // unknown type → DROPPED
           { type: 'price', product_ref: 'y', value: '' }, // empty value → dropped
           { type: 'name', value: 'z' }, // missing product_ref → '' but kept
         ],
       }),
     );
-    assert.equal(out.facts_used.length, 2);
-    assert.equal(out.facts_used[0].type, 'attribute');
-    assert.equal(out.facts_used[1].value, 'z');
+    assert.equal(out.facts_used.length, 1);
+    assert.equal(out.facts_used[0].type, 'name');
+    assert.equal(out.facts_used[0].value, 'z');
+  });
+
+  it('keeps all three declared types', () => {
+    const out = parseFactsUsedCompletion(
+      JSON.stringify({
+        prose: 'ok',
+        facts_used: [
+          { type: 'price', product_ref: 'a', value: '18.00' },
+          { type: 'name', product_ref: 'b', value: 'Carbo One' },
+          { type: 'attribute', product_ref: 'c', value: 'pa sheqer' },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      out.facts_used.map((f) => f.type),
+      ['price', 'name', 'attribute'],
+    );
   });
 });
 
@@ -391,3 +417,4 @@ describe('evaluateConsolidatedGrounding (orchestrator)', () => {
     assert.doesNotMatch(sent.toLowerCase(), /ghost whey protein/);
   });
 });
+
