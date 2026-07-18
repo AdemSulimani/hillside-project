@@ -312,6 +312,25 @@ export const KNOBS: readonly KnobSpec[] = [
     binding: 'per-call',
     description: 'Deterministic order-stage FSM: off | shadow | on (P2-2)',
   },
+  {
+    // P3-4 (RC-15). Enum, not a bool pair: the states are ordered and mutually exclusive, and two
+    // independent booleans would admit a meaningless fourth combination. Mirrors the proven
+    // ORDER_STAGE_MACHINE off|shadow|on shape.
+    key: 'QUALITY_EVAL_MODE',
+    kind: 'enum',
+    values: ['enforce', 'shadow', 'off'],
+    requiredness: { kind: 'optional', default: 'enforce' },
+    binding: 'per-call',
+    description: 'Reply quality eval: enforce | shadow (score + ledger only, no alert/pause) | off',
+    rationale:
+      'The eval is MISCALIBRATED and sits on the send path: it scores order confirmations a ' +
+      'systematic 0.200 (EV-018) and a degenerate one-word "Po." scored 0.20 and shipped. At the ' +
+      'live QUALITY_THRESHOLD=0.1 that is inert; at the 0.6 `.env.example` once shipped, every ' +
+      'order confirmation would flag and PAUSE the AI at checkout with no auto-resume (RC-14). ' +
+      'RC-15\'s fix is to move it OFF the send path, not to retune the floor. `shadow` is the ' +
+      'parallel/log-only window: scores still reach the P1-5 ledger for the offline parity ' +
+      'comparison, but nothing pauses. Default `enforce` keeps today\'s behaviour byte-identical.',
+  },
   bool('COMMISSION_STORED_TIMESTAMP', false, 'Compute commission from stored timestamps, not NOW() (P2-2/RC-22)', { binding: 'per-call' }),
   bool('STICKY_LOCALE_SLOT', false, 'Sticky per-conversation reply locale (P2-2/RC-10)'),
   bool('INTENT_STRUCTURED_CONTRACT', false, 'Structured intent-classifier contract (P2-2)'),

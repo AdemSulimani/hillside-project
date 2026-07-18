@@ -186,10 +186,12 @@ import {
 import { shouldAutoResumeRateLimitPause } from '../services/aiResumePolicy';
 import { getOrComputeClassifierVerdict } from '../services/classifierVerdictStore';
 import { runWithOpenAICallTracking } from '../services/openaiCallTracker';
+import { buildShadowBranch } from '../services/shadowComparison';
 import { logger, runWithLogContext } from '../utils/logger';
 import {
   evaluateReply,
   evaluationTriggersAlert,
+  getQualityEvalMode,
   getQualityThreshold,
   resolveStoredFlagReason,
 } from '../services/aiQualityService';
@@ -4094,9 +4096,23 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         normalizeForIncludesCheck(finalReplyText) ===
         normalizeForIncludesCheck(sentence),
     );
+  /**
+   * P3-4 (RC-15): how the eval participates in this turn.
+   *
+   *   enforce — unchanged: score, and let a failing score flag + alert + PAUSE.
+   *   shadow  — score and record in the ledger, but take no action. The parallel/log-only window
+   *             that produces the data `npm run eval:quality` compares the offline scorer against.
+   *   off     — skip the call entirely.
+   *
+   * `off` short-circuits to the SAME synthetic 0.95 the three skip predicates above already use,
+   * so no new code path is introduced — only a new reason to take an existing one.
+   */
+  const qualityEvalMode = getQualityEvalMode();
+  const skipEvaluationForMode = qualityEvalMode === 'off';
   const qualityEval = knowledgeGapEscalated
     ? null
-    : skipEvaluationForHonestNegative ||
+    : skipEvaluationForMode ||
+        skipEvaluationForHonestNegative ||
         skipEvaluationForOutOfStockCanned ||
         skipEvaluationForClosingReply
       ? {
@@ -4108,16 +4124,25 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           flagging_rule_triggered: null,
         }
       : await evaluateReply(inboundText, finalReplyText, tenantId, productCatalogContext);
-  let qualityFailing =
+  const qualityWouldFail =
     qualityEval !== null && evaluationTriggersAlert(qualityEval, qualityThreshold);
+  // In `shadow` the verdict is observed but never acted on: no flag, no alert, no pause.
+  let qualityFailing = qualityEvalMode === 'enforce' && qualityWouldFail;
   const qualityScore = qualityEval?.quality_score ?? null;
   recordDecision({
     classifier: 'quality_eval',
     raw_score: qualityScore,
     threshold: qualityThreshold,
     boost_applied: false,
-    passed: qualityFailing,
-    branch: qualityFailing ? 'flagged' : 'ok',
+    // Record what the eval CONCLUDED, not what was enforced — otherwise a shadow window would
+    // write "everything passed" and the parity comparison it exists to feed would have no signal.
+    passed: qualityWouldFail,
+    branch:
+      qualityEvalMode === 'enforce'
+        ? qualityWouldFail
+          ? 'flagged'
+          : 'ok'
+        : `${qualityEvalMode}:${qualityWouldFail ? 'would_flag' : 'ok'}`,
   });
   let flagReason =
     qualityEval && qualityFailing ? resolveStoredFlagReason(qualityEval, qualityThreshold) : null;
@@ -5806,8 +5831,17 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       }
 
       if (ORDER_STAGE_MACHINE_MODE === 'shadow') {
-        const agree = fsmShouldCreateOrder === legacyPassesDraftOrderValidation;
-        if (!agree) {
+        // P3-4: the branch string is now built by the shared encoder rather than inline here, so
+        // P3-1's retired classifiers get one idiom instead of ~20 hand-rolled ones. The emitted
+        // string is byte-identical to what this block wrote before — pinned by shadowComparison.test.ts,
+        // because changing it would orphan every historical ledger row.
+        const shadow = buildShadowBranch({
+          classifier: 'order_stage',
+          legacy: legacyPassesDraftOrderValidation,
+          deterministic: fsmShouldCreateOrder,
+          context: { stage: effectiveStage },
+        });
+        if (!shadow.agree) {
           console.warn('[ORDER_STAGE_DIVERGENCE] deterministic FSM disagrees with legacy gate', {
             conversationId,
             tenantId,
@@ -5821,10 +5855,8 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           raw_score: null,
           threshold: null,
           boost_applied: false,
-          passed: fsmShouldCreateOrder,
-          branch: agree
-            ? `agree:${fsmShouldCreateOrder}:stage=${effectiveStage}`
-            : `diverge:legacy=${legacyPassesDraftOrderValidation}:det=${fsmShouldCreateOrder}:stage=${effectiveStage}`,
+          passed: shadow.passed,
+          branch: shadow.branch,
         });
       }
     }

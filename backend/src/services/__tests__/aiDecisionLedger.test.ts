@@ -18,6 +18,7 @@ import {
   insertParams,
   redactLedgerRecord,
   type LedgerDecisionEvent,
+  ledgerSelectList,
 } from '../../db/models/aiDecisionLedger';
 import type { DeclaredFact } from '../groundingGate';
 
@@ -380,5 +381,43 @@ describe('aiDecisionLedger — facts_used reaches the DB (P2-4 Part 2)', () => {
     });
     const delivered = buildLedgerRecord({ ...base, replySlot: 'main', decisionKind: 'reply' });
     assert.notEqual(suppressed.idempotency_key, delivered.idempotency_key);
+  });
+});
+
+/**
+ * P3-4 added the READ side. Before it, this model was write-only (`grep "FROM ai_decision_ledger"`
+ * returned nothing but the retention DELETE), so §15.2's "reconstruct an incident from the ledger
+ * alone" was a property of the schema rather than of anything the code could do.
+ */
+describe('aiDecisionLedger — read-side column list (P3-4)', () => {
+  it('qualifies EVERY column for the reconstruct join', () => {
+    // This is not cosmetic. The list used to be a multi-line template split on ', ', which misses
+    // the columns whose separator is ',\n  ' — `idempotency_key` and `guard_verdicts` came out
+    // UNQUALIFIED. Postgres resolves them today only because ai_prompt_blobs shares no column
+    // name; the day it gains one, the reconstruction query fails with "ambiguous column
+    // reference" — precisely while someone is investigating an incident.
+    const qualified = ledgerSelectList('l');
+    for (const segment of qualified.split(/,\s*/)) {
+      assert.ok(
+        segment.startsWith('l.'),
+        `unqualified column in the join select list: "${segment}"`,
+      );
+    }
+  });
+
+  it('carries every column the reader maps back onto LedgerRecord', () => {
+    const plain = ledgerSelectList();
+    for (const required of [
+      'id', 'tenant_id', 'conversation_id', 'message_id', 'correlation_id', 'trace_id',
+      'idempotency_key', 'reply_slot', 'decision_kind', 'prompt', 'model', 'usage', 'retrieval',
+      'decision_events', 'guard_verdicts', 'facts_used', 'receipt_snapshot', 'config_fingerprint',
+      'created_at',
+    ]) {
+      assert.ok(plain.split(', ').includes(required), `missing column: ${required}`);
+    }
+  });
+
+  it('the unqualified form has no alias prefix (it is used without a join)', () => {
+    assert.ok(!ledgerSelectList().includes('l.'));
   });
 });
