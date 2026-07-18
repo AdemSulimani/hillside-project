@@ -28,6 +28,10 @@ const INTENT_RESULT_SCHEMA: Record<string, unknown> = {
     'reasoning',
   ],
   properties: {
+    // Range deliberately NOT declared on the wire: `strict: true` schema validators have
+    // historically rejected `minimum`/`maximum` as unsupported keywords, and a schema the API
+    // refuses would 400 EVERY intent call at flag-on. The declared-range half of the contract is
+    // enforced in the Zod layer below instead — same fail direction (retryable contract error).
     intent_score: { type: 'number' },
     product_name: { type: ['string', 'null'] },
     quantity: { type: ['integer', 'null'] },
@@ -38,8 +42,13 @@ const INTENT_RESULT_SCHEMA: Record<string, unknown> = {
   },
 };
 
-/** Minimal Zod validator; `mapIntentPayload` does the coercion/clamping the legacy parser did. */
-const intentPayloadSchema = z.object({ intent_score: z.number() }).passthrough();
+/**
+ * Zod validator; `mapIntentPayload` does the coercion/clamping the legacy parser did.
+ * P2-2 (F3): the contract's DECLARED RANGE is enforced here — a percentage-scale (C-63) or
+ * negative score is a contract violation (retryable StructuredContractError), killing the
+ * legacy '>1 ? /100' scale-guess class on the flag-on path.
+ */
+const intentPayloadSchema = z.object({ intent_score: z.number().min(0).max(1) }).passthrough();
 
 export interface IntentResult {
   intent_score: number;

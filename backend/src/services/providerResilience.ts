@@ -541,6 +541,17 @@ export const AI_QUEUE_BACKOFF_BASE_MS = 10_000;
  * so a brief blip DLQs every in-flight reply, each raising a tenant-facing `ai_reply_undelivered`
  * alert. Exactly the outcome the breaker exists to prevent.
  */
+/**
+ * P2-6 (F6): the documented safety rule "OPENAI_TURN_DEADLINE_MS x2 must stay under
+ * AI_CONVERSATION_LOCK_TTL_MS (never renewed)" as a testable contract instead of prose. x2 because
+ * the budget is re-armed before the send, so one turn can legitimately spend up to two full
+ * budgets while holding the lock; a violated margin means the lock can expire mid-turn and a
+ * second job for the same conversation can start — the exact defect P2-6's caps exist to remove.
+ */
+export function turnDeadlineOutrunsLock(turnBudgetMs: number, lockTtlMs: number): boolean {
+  return turnBudgetMs > 0 && lockTtlMs > 0 && turnBudgetMs * 2 >= lockTtlMs;
+}
+
 export function breakerCooldownOutrunsRetries(p: ProviderPosture): boolean {
   return p.breakerMode === 'on' && p.breakerCooldownMs >= AI_QUEUE_BACKOFF_BASE_MS;
 }

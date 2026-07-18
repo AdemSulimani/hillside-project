@@ -1,4 +1,5 @@
-import { knobNumber } from '../config/knobs';
+import { knobBool, knobNumber } from '../config/knobs';
+import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import type { ProductImageRef } from './productImageRequestService';
 import {
@@ -145,6 +146,9 @@ const SIMILARITY_THRESHOLD = knobNumber('SIMILARITY_THRESHOLD');
 // P1-5: cap on the masked system-prompt copy stored in the decision ledger. Enough to see the
 // persona/blocks/footer/injected directives without persisting the full 26–33K-char prompt.
 const LEDGER_PROMPT_PREVIEW_MAX_CHARS = 12000;
+// P2-4 (F2): when on, the FULL redacted system prompt is stored content-addressed in
+// ai_prompt_blobs (migration 082) and the ledger row's prompt.system_hash joins to it.
+const LEDGER_PROMPT_BLOBS = knobBool('LEDGER_PROMPT_BLOBS');
 // Log the live value once at startup so operators always know which threshold is active
 // (the .env.example default of 0.65 and an overriding SIMILARITY_THRESHOLD=0.75 both
 // used to be in circulation, causing silent config drift in deployed environments).
@@ -4587,14 +4591,23 @@ Using packaging-derived details (IMPORTANT — source precedence):
 
   // ---- P1-5: capture the decision telemetry that was previously discarded at this line ----
   const usage = completion.usage ?? null;
+  const redactedSystemPrompt = redactPII(systemPrompt);
+  const systemPromptHash = createHash('sha256').update(systemPrompt).digest('hex');
+  // P2-4 (F2): persist the FULL redacted system prompt, content-addressed and deduped, so the
+  // ledger row's system_hash recovers the whole thing — not just the 12K preview head.
+  // Fire-and-forget: a blob write must never slow or fail a reply.
+  if (LEDGER_PROMPT_BLOBS) {
+    void upsertPromptBlob(systemPromptHash, tenantId, redactedSystemPrompt).catch(() => undefined);
+  }
   const telemetry: ReplyTelemetry = {
     prompt: {
       hash: createHash('sha256').update(JSON.stringify(messages)).digest('hex'),
+      systemHash: systemPromptHash,
       charCount: systemPrompt.length,
       tokenEstimate: estimateTokens(systemPrompt),
       // Masked, size-capped copy of the SYSTEM prompt (persona/blocks/footer/injected directives —
       // the §15.2 reconstruction target). redactPII keeps structure while masking any embedded PII.
-      preview: redactPII(systemPrompt).slice(0, LEDGER_PROMPT_PREVIEW_MAX_CHARS),
+      preview: redactedSystemPrompt.slice(0, LEDGER_PROMPT_PREVIEW_MAX_CHARS),
     },
     model: {
       requested: model,

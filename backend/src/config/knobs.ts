@@ -207,6 +207,10 @@ export const KNOBS: readonly KnobSpec[] = [
     'max_tokens for the facts_used contract completion; truncation is a retryable failure (P2-1)'),
   num('SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS', 'int', 600, { min: 1, max: 10_000 }, 'frozen',
     "Char cap on the slot-backed summary's extractive tail (P2-3)"),
+  num('SEMANTIC_SKIPPED_ALERT_THRESHOLD', 'int', 20, { min: 0, max: 100_000 }, 'frozen',
+    'Semantic-skip count within the window that fires ONE Sentry burst alert. 0 = off (P2-6/RC-04)'),
+  num('SEMANTIC_SKIPPED_ALERT_WINDOW_SECONDS', 'int', 300, { min: 10, max: 86_400 }, 'frozen',
+    'Rolling window (s) for the semantic-skip burst alert (P2-6/RC-04)'),
   num('PROMPT_GUIDELINES_MAX_CHARS', 'int', 20_000, { min: 1000, max: 200_000 }, 'frozen', 'Char budget for the assembled guideline blocks (P2-5)'),
   num('PROMPT_ASSEMBLY_MAX_CHARS', 'int', 34_000, { min: 1000, max: 400_000 }, 'frozen', 'Char budget above which the assembled prompt is reported (P2-5)'),
   num('OPENAI_MAX_RETRIES', 'int', 3, { min: 0, max: 10 }, 'frozen', 'Retries for every OpenAI call'),
@@ -289,9 +293,13 @@ export const KNOBS: readonly KnobSpec[] = [
   bool('STRUCTURED_LOGGING', false, 'JSON, correlation-keyed AI-path logs (P2-4)', { binding: 'per-call' }),
   bool('AI_DECISION_LEDGER_ENABLED', false, 'Write the per-reply AI decision ledger (P1-5/P2-4)'),
   bool('RECEIPT_TIME_SNAPSHOT', false, 'Capture gate/config state at receipt (P2-4 Part 2, record-only)'),
+  bool('LEDGER_PROMPT_BLOBS', false,
+    'Persist the full redacted system prompt content-addressed in ai_prompt_blobs (P2-4/§15.2)'),
   bool('WEBHOOK_DEDUPE_REPLAY', false, 'Accept late deliveries; replay via per-message key + DB dedupe (P2-4)'),
   bool('FACTS_USED_CONTRACT', false, 'Deterministic reply generation with a facts_used contract (P2-1)'),
-  bool('GROUNDING_GATE_CONSOLIDATED', false, 'One consolidated grounding gate replacing the legacy guards (P2-1)', { binding: 'per-call' }),
+  // P2-audit (P2-1-F2): binding corrected per-call -> frozen — the consumer reads it into a
+  // module-load const (processAIReply), so per-call was a false read-lifetime claim.
+  bool('GROUNDING_GATE_CONSOLIDATED', false, 'One consolidated grounding gate replacing the legacy guards (P2-1)'),
   bool('GUARD_VALIDATE_AGAINST_FULL_CATALOG', false, 'Validate guards against the full active catalog (P0-2)', { binding: 'per-call' }),
   bool('GAP_GATE_DETERMINISTIC_FIRST', false, 'Gap gate escalates only on deterministic evidence (P0-3)', { binding: 'per-call' }),
   bool('SENSITIVE_PATH_FAIL_CLOSED', false, 'Sensitive-intent path fails closed (P0-4)', { binding: 'per-call' }),
@@ -754,7 +762,7 @@ export function detectExampleDrift(
 // ---------------------------------------------------------------------------
 
 export interface ConfigFingerprint {
-  /** Short sha256 over the frozen knob set. Two instances disagreeing ⇒ a drifted fleet. */
+  /** Short sha256 over the manifest knob set. Two instances disagreeing ⇒ a drifted fleet. */
   hash: string;
   /** host:pid — which instance reported this config. */
   instance: string;
@@ -762,17 +770,23 @@ export interface ConfigFingerprint {
 }
 
 function shouldFingerprint(spec: KnobSpec): boolean {
-  return spec.fingerprint ?? spec.binding === 'frozen';
+  return spec.fingerprint ?? true;
 }
 
 /**
- * Fingerprint the module-load-frozen knobs (RC-06's "startup assertion that all instances read
- * identical env for the frozen-at-load knobs").
+ * Fingerprint EVERY manifest knob (RC-06's "startup assertion that all instances read identical
+ * env" — for all of them, not a subset).
  *
- * Only `frozen` knobs participate: a `per-call` knob legitimately differs between two reads of the
- * same process, so hashing it would produce drift alarms that mean nothing. Secrets contribute a
- * hash of their value, never the value — a rotated secret must still show as drift, but the
- * fingerprint is written to a database and logs.
+ * P2-audit (P2-7-F3/F4) correction: this originally hashed only `frozen` knobs, on the rationale
+ * that "a per-call knob legitimately differs between two reads of the same process" — which is
+ * false for env-backed knobs: `process.env` is boot-static, so a per-call read returns the same
+ * value for the life of the process, and CROSS-INSTANCE disagreement on a per-call knob (two
+ * workers with different AI_MAX_REPLIES_PER_HOUR or QUALITY_THRESHOLD — the spec's own
+ * drift-acceptance scenario) is exactly as real as drift on a frozen one. `binding` documents
+ * READ lifetime, not mutability, and no longer affects fingerprint coverage; `fingerprint: false`
+ * on a spec remains the explicit opt-out. Secrets contribute a hash of their value, never the
+ * value — a rotated secret must still show as drift, but the fingerprint is written to a database
+ * and logs.
  */
 export function fingerprint(env: NodeJS.ProcessEnv, instance = defaultInstanceId()): ConfigFingerprint {
   const knobs: Record<string, string | number | boolean> = {};

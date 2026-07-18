@@ -41,6 +41,7 @@ import { REDACT_PII } from '../utils/redact';
 import {
   AI_QUEUE_BACKOFF_BASE_MS,
   breakerCooldownOutrunsRetries,
+  turnDeadlineOutrunsLock,
   enforcementWithoutFloor,
   type BreakerMode,
   type ProviderPosture,
@@ -140,7 +141,7 @@ export function validateRequiredEnv(): void {
 function logEffectiveKnobs(mode: Mode): void {
   const fp = fingerprint(process.env);
   console.info(
-    `[config] fingerprint=${fp.hash} instance=${fp.instance} frozen_knobs=${Object.keys(fp.knobs).length} mode=${mode}` +
+    `[config] fingerprint=${fp.hash} instance=${fp.instance} knobs=${Object.keys(fp.knobs).length} mode=${mode}` +
       ` (two instances reporting different fingerprints = a drifted fleet)`,
   );
 
@@ -313,6 +314,16 @@ function logPosture(): void {
         `${AI_QUEUE_BACKOFF_BASE_MS}ms backoff base. All 3 retries would fast-fail inside the cooldown ` +
         'without re-probing, so every in-flight ai.reply would dead-letter on a short outage. Lower it, ' +
         'or raise the queue backoff in the same change.',
+    );
+  }
+
+  const lockTtlMs = Number(eff('AI_CONVERSATION_LOCK_TTL_MS'));
+  if (turnDeadlineOutrunsLock(turnBudget, lockTtlMs)) {
+    console.warn(
+      `[provider] ⚠ OPENAI_TURN_DEADLINE_MS=${turnBudget} x2 (pre-send + re-armed tail) is >= ` +
+        `AI_CONVERSATION_LOCK_TTL_MS=${lockTtlMs}, which is never renewed. The conversation lock can ` +
+        'expire mid-turn and a second job for the same conversation can start. Lower the deadline or ' +
+        'raise the lock TTL so 2x deadline stays under it with margin.',
     );
   }
 

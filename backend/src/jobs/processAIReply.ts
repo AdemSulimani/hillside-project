@@ -1,7 +1,7 @@
 import { knobBool, knobNumber, knobString } from '../config/knobs';
 ﻿import crypto from 'crypto';
 import pool from '../db/pool';
-import { logSafe, logSafeStructured } from '../utils/redact';
+import { logSafe, logSafeStructured, redactForLog } from '../utils/redact';
 import { redisConnection } from './redisConnection';
 import { findChannelById } from '../db/models/channel';
 import {
@@ -1882,6 +1882,9 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     buildInboundBurstContext(recentMessages);
   if (!lastInbound) {
     console.info('[ai.reply] No inbound message found in conversation, skipping', { conversationId });
+    // P2-4 (F8): even this oddball drop leaves an artifact — RC-06's accounting must not exclude
+    // a class of discarded messages just because the drop reason is rare.
+    recordGateDrop('no_inbound', liveGateState());
     return;
   }
   if (lastInbound.external_message_id !== data.messageExternalId) {
@@ -1890,6 +1893,10 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       scheduledFor: data.messageExternalId,
       latestInboundExternalId: lastInbound.external_message_id,
     });
+    // P2-4 (F8): 'deferred', not 'dropped' — the newer inbound's own job answers the conversation,
+    // so this message is superseded rather than lost; conflating the two would inflate the RC-06
+    // drop-rate metric on every burst.
+    recordGateDrop('superseded_by_newer_inbound', liveGateState(), 'deferred');
     return;
   }
   const inboundText = mergedInboundText.trim();
@@ -4777,6 +4784,18 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     providerBreaker: providerBreaker.snapshot(breakerMode()),
     providerFailures: summarizeTurnFailures(turnFailures),
     degraded: false,
+    // P2-3/P2-4 audit gap: when ANY guard changed the text, persist the pre-guard draft
+    // (hash + redacted capped preview) — makes "the delivered corrected text is history, the
+    // flagged draft is ledger-recorded" true. Null when the draft shipped untouched (no bloat
+    // on the common path). Redacted through the same PII boundary as the prompt preview.
+    draft:
+      finalReplyText === replyText
+        ? null
+        : {
+            hash: crypto.createHash('sha256').update(replyText).digest('hex'),
+            char_count: replyText.length,
+            preview: String(redactForLog(replyText)).slice(0, 2000),
+          },
   };
   const ledgerDecisionKind = groundingGateEscalated
     ? `escalation:grounding:${groundingGateReason}`

@@ -331,13 +331,15 @@ describe('fingerprint (RC-06)', () => {
     assert.notEqual(a.instance, b.instance);
   });
 
-  it('ignores per-call knobs', () => {
-    // A per-call knob legitimately differs between two reads inside ONE process, so hashing it
-    // would raise drift alarms that mean nothing.
+  it('includes per-call knobs (P2-7-F3/F4: env is boot-static, so their drift is real drift)', () => {
+    // The original design hashed frozen knobs only, on the false premise that a per-call knob can
+    // differ between two reads of one process — process.env cannot. Two instances disagreeing on
+    // a per-call knob (the spec's own AI_MAX_REPLIES_PER_HOUR / QUALITY_THRESHOLD acceptance
+    // scenario) MUST surface as different fingerprints.
     const a = fingerprint(baseEnv({ QUALITY_THRESHOLD: '0.1' }), 'host:1');
     const b = fingerprint(baseEnv({ QUALITY_THRESHOLD: '0.9' }), 'host:1');
-    assert.equal(a.hash, b.hash);
-    assert.ok(!('QUALITY_THRESHOLD' in a.knobs));
+    assert.notEqual(a.hash, b.hash);
+    assert.ok('QUALITY_THRESHOLD' in a.knobs, 'per-call knobs are part of the fingerprinted set');
   });
 
   it('hashes secrets rather than storing them — the fingerprint reaches a table and the logs', () => {

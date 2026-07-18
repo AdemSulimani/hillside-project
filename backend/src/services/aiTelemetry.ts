@@ -43,6 +43,12 @@ export interface ReplyTelemetry {
   prompt: {
     /** sha256 of the full assembled messages array. */
     hash: string;
+    /**
+     * P2-4 (F2): sha256 of the SYSTEM prompt alone — the join key into `ai_prompt_blobs`, where
+     * the full redacted text lives when LEDGER_PROMPT_BLOBS is on (the preview is capped at 12K
+     * of a 26-33K prompt; this closes the §15.2 "from the ledger alone" residue).
+     */
+    systemHash: string;
     charCount: number;
     tokenEstimate: number;
     /** Size-capped, PII-masked copy of the SYSTEM prompt (the reconstruction target). */
