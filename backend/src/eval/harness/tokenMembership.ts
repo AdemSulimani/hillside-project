@@ -39,17 +39,21 @@
  * is independently grounded is never a violation. Real recall gaps remain — they are enumerated as
  * passing tests in `tokenMembership.test.ts` under "KNOWN RECALL GAPS".
  *
- * ⚠️ THE BIGGEST GAP IS CURRENTLY UNGUARDED AT EVERY LAYER, AND THAT IS WORTH STATING PLAINLY.
+ * ⚠️ THE BIGGEST GAP IS NOW HALF-CLOSED — ELSEWHERE — AND THE HALVES ARE WORTH DISTINGUISHING.
  * A false SENTENCE built from true WORDS — "Mega mass 3kg Vanil është pa sheqer" ("…is sugar-free")
- * when the catalog says nothing about sugar — is invisible to token membership by construction:
- * every token is grounded, only the proposition is invented. It is tempting to say the
- * `facts_used` contract covers it. IT DOES NOT, as of P3-4: the model is instructed to declare
- * attribute claims (`{type:'attribute', value:'pa sheqer'}`, groundingGate.ts FACTS_USED_JSON_SCHEMA)
- * but `evaluateConsolidatedGrounding` consumes only `f.type === 'name'` and re-derives prices from
- * the prose — DECLARED ATTRIBUTE FACTS ARE COLLECTED AND DISCARDED. Closing this needs attribute
- * validation in the gate (P3-1), not more heuristics here: this module is a CI instrument that
- * never runs on the send path, so no amount of cleverness in it can stop such a reply reaching a
- * customer.
+ * — is invisible to token membership by construction: every token is grounded, only the
+ * proposition is invented. THIS MODULE STILL CANNOT SEE IT and never will; it is a CI instrument
+ * that never runs on the send path, so no amount of cleverness here could stop such a reply
+ * reaching a customer.
+ *
+ * P3-1 closed it where it had to be closed — in the gate. `evaluateConsolidatedGrounding` now
+ * consumes `f.type === 'attribute'` and, behind `GROUNDING_GATE_ATTRIBUTE_FACTS`, strips or
+ * escalates a declared exclusion claim the resolved product's own catalog text REFUTES. That is
+ * the contradiction half. The SILENCE half stays open deliberately: 218 of 257 real active rows
+ * say nothing about sugar and most supplements genuinely are sugar-free, so flagging absence would
+ * strip true sentences at scale into a pause with no automatic exit. The lane also judges only
+ * DECLARED facts (no prose backstop exists for a semantic claim) and only a closed substance
+ * lexicon. Do not read "P3-1 landed" as "attribute fabrication is solved".
  *
  * THE ALLOWLIST GROWS ONLY FROM NEGATIVE-CORPUS FAILURES. Every entry below is here because a real
  * recorded reply tripped on it, and each is a language/canned-copy word, never a product word.

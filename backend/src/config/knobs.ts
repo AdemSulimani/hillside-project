@@ -222,6 +222,67 @@ export const KNOBS: readonly KnobSpec[] = [
     'How often the ledger retention sweep runs (P2-4)'),
   num('GROUNDING_GATE_STRIP_FLOOR', 'int', 24, { min: 0, max: 2000 }, 'frozen',
     'Min grounded chars that must survive a targeted strip before the gate escalates the turn (P2-1)'),
+  num('NAME_GUARD_SIMILARITY_THRESHOLD', 'float', 0.48, { min: 0, max: 1 }, 'frozen',
+    'Min pg_trgm word_similarity for a suspected product name to be rescued as a real catalog item', {
+      rationale:
+        'Pre-existing since P0-2 but declared here only with P3-1 — it was a bare parseFloat IIFE ' +
+        'in catalogGuardReferenceService, i.e. exactly the inline-parse class this manifest exists ' +
+        'to kill (an unparseable SIMILARITY_THRESHOLD is how NaN silently disabled semantic ' +
+        'retrieval fleet-wide). Behaviour is unchanged: readKnob falls back to the default on a ' +
+        'non-finite or out-of-band value just as the IIFE did — what is new is that the drift is ' +
+        'now REPORTED. 0.48 was calibrated empirically (2026-07-12) on the 257-row dev catalog ' +
+        'with a 29-item labelled corpus: 16 realistic typos scored 0.500-0.870 (all rescued), 10 ' +
+        'pure fabrications scored 0.143-0.467 (all still flagged); 0.48 is the midpoint of the ' +
+        'empirical gap and avoids the knife edge at 0.50. Raise toward 0.7 only to catch invented ' +
+        'near-variants at the cost of escalating heavier typos. Band is inclusive [0,1] to match ' +
+        'every sibling similarity knob; 0 degenerates to rescue-everything, which is the ' +
+        'fail-OPEN direction and therefore the safe one for a guard.',
+    }),
+  num('GUARD_CATALOG_CACHE_TTL_SECONDS', 'int', 120, { min: 1, max: 86_400 }, 'frozen',
+    'TTL for the per-tenant guard reference sets (price set, name index, attribute index)', {
+      rationale:
+        'Also pre-existing and also a bare parseInt IIFE until P3-1. Shared by all three reference ' +
+        'sets deliberately — correctness comes from invalidateProductCatalogCaches firing on every ' +
+        'product mutation, not from the TTL, so independent per-set TTLs would add drift surface ' +
+        'and buy nothing. The TTL only bounds how long a MISSED invalidation can persist. Note the ' +
+        'staleness direction differs per set: for prices/names a stale entry can withhold a ' +
+        'rescue; for the P3-1 attribute index it can additionally withhold SUPPORT, so a merchant ' +
+        'who edits a description to add "pa sheqer" has a true claim contradictable for up to one ' +
+        'TTL. Lower it before raising the attribute lane to enforce on a fast-editing tenant.',
+    }),
+  num('GROUNDING_ATTR_MAX_CLAIMS', 'int', 8, { min: 0, max: 64 }, 'frozen',
+    'Max declared attribute claims judged per reply; the remainder are let through (P3-1)', {
+      rationale:
+        'Each DISTINCT product_ref can cost one pg_trgm round trip, on the send-path tail, inside ' +
+        'the never-renewed AI_CONVERSATION_LOCK_TTL_MS (300s) and outside any OpenAI turn ' +
+        'deadline. The json_schema does not bound the facts_used array, so a pathological ' +
+        'completion is otherwise unbounded work. Overflow FAILS OPEN (extra claims are let ' +
+        'through, never flagged), so this cap can only ever REDUCE flags. 0 disables judging ' +
+        'without touching the mode enum — the fast in-incident kill switch.',
+    }),
+  num('GROUNDING_ATTR_INDEX_MAX_ROWS', 'int', 20_000, { min: 100, max: 200_000 }, 'frozen',
+    'Row cap on the P3-1 attribute evidence index; hitting it disables CONTRADICTION entirely', {
+      rationale:
+        'A ROW cap, deliberately NOT a per-row character cap. A char cap looks like a tuning knob ' +
+        'but is a correctness hazard with the wrong monotonicity: on the real row "Isolate ' +
+        'protein 700gr qokolad" the text CONTRADICTING a lactose-free claim sits at char ~345 ' +
+        'while the SUPPORTING text sits far later, so truncation keeps the contradiction and cuts ' +
+        'the rescue — it MANUFACTURES flags. Real descriptions reach 3272 chars (avg ~800), so ' +
+        'rows are stored untruncated and the index instead sets `truncated` when this cap is hit, ' +
+        'which makes every claim contradiction-ineligible. Raising this can only reduce flags.',
+    }),
+  num('GROUNDING_ATTR_REF_SIMILARITY', 'float', 0.6, { min: 0.3, max: 1 }, 'frozen',
+    "pg_trgm floor for resolving an attribute fact's product_ref to ONE catalog row (P3-1)", {
+      rationale:
+        'DECOUPLED from NAME_GUARD_SIMILARITY_THRESHOLD (0.48) because the safety DIRECTION is ' +
+        'inverted. For names a LOW threshold RESCUES a suspect, i.e. produces fewer flags; here a ' +
+        'low threshold resolves MORE refs to product scope — the only scope permitted to ' +
+        'contradict — so lowering it INCREASES flag exposure. Sharing one knob would mean an ' +
+        'operator loosening it to rescue heavier typos silently widens the attribute flag ' +
+        'surface. 0.6 clears the empirically calibrated fabrication band (0.143-0.467) with ' +
+        'margin. A resolution failure costs only recall: it falls back to tenant scope, which is ' +
+        'rescue-only and can never flag.',
+    }),
   num('FACTS_CONTRACT_MAX_TOKENS', 'int', 1200, { min: 256, max: 16_000 }, 'frozen',
     'max_tokens for the facts_used contract completion; truncation is a retryable failure (P2-1)'),
   num('SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS', 'int', 600, { min: 1, max: 10_000 }, 'frozen',
@@ -340,6 +401,32 @@ export const KNOBS: readonly KnobSpec[] = [
   // P2-audit (P2-1-F2): binding corrected per-call -> frozen — the consumer reads it into a
   // module-load const (processAIReply), so per-call was a false read-lifetime claim.
   bool('GROUNDING_GATE_CONSOLIDATED', false, 'One consolidated grounding gate replacing the legacy guards (P2-1)'),
+  {
+    // P3-1 (RC-02/RC-03). An ENUM not a bool, following ORDER_STAGE_MACHINE / QUALITY_EVAL_MODE:
+    // this is the first grounding dimension whose reference material is FREE PROSE rather than a
+    // structurally complete set, so its false-positive rate has to be measured on live traffic
+    // before it is allowed to act on a reply.
+    key: 'GROUNDING_GATE_ATTRIBUTE_FACTS',
+    kind: 'enum',
+    values: ['off', 'shadow', 'enforce'],
+    requiredness: { kind: 'optional', default: 'off' },
+    binding: 'frozen',
+    description:
+      'Declared-attribute grounding lane: off | shadow (judge + ledger only) | enforce (P3-1). ' +
+      'Meaningful only with GROUNDING_GATE_CONSOLIDATED=true and FACTS_USED_CONTRACT=true.',
+    rationale:
+      "Closes P3-1's named open gap — a false SENTENCE built from true WORDS, e.g. \"Mega mass " +
+      '3kg Vanil eshte pa sheqer\" where the product and every token are real and only the ' +
+      'proposition is invented. The lane flags ONLY CONTRADICTION: the resolved row\'s own text ' +
+      'asserts the opposite. It deliberately does NOT flag SILENCE. Measured on the 257-row dev ' +
+      'catalog, 218 rows say nothing about sugar and most supplements genuinely ARE sugar-free — ' +
+      'the merchant simply never wrote it down — so "absent from the catalog" cannot be read as ' +
+      '"false" here, and flagging silence would strip TRUE sentences at scale into a pause with ' +
+      'no automatic exit. The gap\'s own acceptance product needs no silence rung: that row reads ' +
+      '"Sheqer i reduktuar ... me e ulet ne sheqer", so the claim is refuted, not unsupported. ' +
+      'Frozen, hence fingerprinted: two workers on different rungs would strip different replies ' +
+      'from identical input — exactly the fleet-drift class the fingerprint registry detects.',
+  },
   bool('GUARD_VALIDATE_AGAINST_FULL_CATALOG', false, 'Validate guards against the full active catalog (P0-2)', { binding: 'per-call' }),
   bool('GAP_GATE_DETERMINISTIC_FIRST', false, 'Gap gate escalates only on deterministic evidence (P0-3)', { binding: 'per-call' }),
   bool('SENSITIVE_PATH_FAIL_CLOSED', false, 'Sensitive-intent path fails closed (P0-4)', { binding: 'per-call' }),

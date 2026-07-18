@@ -34,6 +34,21 @@ import {
 } from './priceConsistencyGuard';
 import type { NameVerificationResult } from './catalogGuardReferenceService';
 import { normalizeText } from './productTitleNormalization';
+import { foldDialect } from './dialectNormalization';
+import { locateClaimInProse, parseAttributeClaim } from './attributeClaimLexicon';
+// Everything below is from the PURE attribute module — the redis/pg-backed
+// catalogAttributeReferenceService is injected through `deps`, never imported here, so the gate
+// stays offline-testable and the eval suite's walked import graph stays clean.
+import {
+  decideAttributeVerdicts,
+  evidenceForRow,
+  tenantWideEvidence,
+  type AttributeGateMode,
+  type CatalogAttributeIndex,
+  type JudgeableAttributeClaim,
+  type ProductRefResolution,
+  type UngroundedAttribute,
+} from './attributeGrounding';
 
 // ---------------------------------------------------------------------------
 // facts_used generation contract (RC-03)
@@ -135,18 +150,27 @@ export function parseFactsUsedCompletion(
     throw new GenerationContractError('facts_used completion missing prose', 'shape');
   }
 
+  // P3-1: an unrecognized `type` is DROPPED, not coerced.
+  //
+  // This previously defaulted to 'attribute', which was harmless only because the attribute bucket
+  // was discarded unread. Now that declared attribute facts drive a customer-visible strip, that
+  // default would route every malformed fact the model emits — a mistyped price, a truncated
+  // enum, a hallucinated fourth type — into the attribute lane as a judgeable claim. Dropping is
+  // the safe direction: an unparseable fact simply goes unjudged, which is the same outcome as the
+  // model not declaring it.
   const facts: DeclaredFact[] = Array.isArray(obj.facts_used)
     ? (obj.facts_used as unknown[])
         .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
         .map((f) => {
           const type = String((f as Record<string, unknown>).type);
+          const known = type === 'price' || type === 'name' || type === 'attribute';
           return {
-            type: (type === 'price' || type === 'name' || type === 'attribute' ? type : 'attribute') as FactType,
+            type: (known ? type : null) as FactType | null,
             product_ref: typeof f.product_ref === 'string' ? f.product_ref : '',
             value: typeof f.value === 'string' ? f.value.trim() : '',
           };
         })
-        .filter((f) => f.value.length > 0)
+        .filter((f): f is DeclaredFact => f.type !== null && f.value.length > 0)
     : [];
 
   return { facts_used: facts, prose: obj.prose };
@@ -161,6 +185,7 @@ export type GroundingStatus = 'grounded' | 'stripped' | 'escalate' | 'infra_erro
 export type GroundingReason =
   | 'hallucinated_price'
   | 'hallucinated_product_name'
+  | 'hallucinated_product_attribute'
   | 'grounding_check_unavailable';
 
 export interface GroundingVerdict {
@@ -180,6 +205,17 @@ export interface GroundingVerdict {
   ungroundedPrices: string[];
   /** Product names asserted (declared or prose-surfaced) with no full-catalog match. */
   ungroundedNames: string[];
+  /**
+   * Declared attribute claims the resolved catalog row REFUTES (P3-1).
+   *
+   * OPTIONAL and OMITTED — never `[]` — when the attribute lane is off, because
+   * `groundingGateDetails` is persisted verbatim into `ai_alerts.details` JSONB. Emitting an empty
+   * array would change every flag-off escalation record, breaking the byte-for-byte flag-off
+   * guarantee the whole P0/P1/P2 flag discipline rests on.
+   */
+  ungroundedAttributes?: UngroundedAttribute[];
+  /** `shadow` mode only: what WOULD have been flagged, for the cutover bake-in. */
+  shadowAttributes?: UngroundedAttribute[];
 }
 
 const PRICE_EPSILON = 0.01;
@@ -200,6 +236,7 @@ function stripUngroundedSentences(
   prose: string,
   ungroundedPriceValues: number[],
   ungroundedNames: string[],
+  ungroundedAttributes: UngroundedAttribute[] = [],
 ): string {
   const normNames = ungroundedNames.map((n) => normalizeText(n)).filter((n) => n.length >= 3);
   const kept = splitSentences(prose).filter((sentence) => {
@@ -211,9 +248,37 @@ function stripUngroundedSentences(
     const normSentence = normalizeText(sentence);
     const carriesBadName = normNames.some((n) => normSentence.includes(n));
     if (carriesBadName) return false;
+    if (ungroundedAttributes.length > 0 && sentenceCarriesAttribute(sentence, ungroundedAttributes)) {
+      return false;
+    }
     return true;
   });
   return kept.join(' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * A sentence carries a refuted attribute claim only when it states BOTH the claim phrase AND the
+ * product it was made about.
+ *
+ * Requiring the product reference is what keeps this from re-creating the `fcd0af7e` pathology one
+ * dimension down. A reply can legitimately contain "Green proten është pa sheqer" (true) next to
+ * "Mega mass 3kg Vanil është pa sheqer" (refuted); both fold to contain the same claim phrase, so a
+ * phrase-only strip would delete the correct sentence too. When the claim and its product never
+ * co-occur in one sentence nothing is stripped, and `evaluateGroundingFacts` escalates instead —
+ * we know a refuted claim is in the text but cannot excise it surgically.
+ */
+function sentenceCarriesAttribute(
+  sentence: string,
+  ungroundedAttributes: UngroundedAttribute[],
+): boolean {
+  const folded = foldDialect(sentence);
+  if (!folded) return false;
+  const norm = normalizeText(sentence);
+  return ungroundedAttributes.some((attr) => {
+    if (!attr.proseSpan || !folded.includes(attr.proseSpan)) return false;
+    const ref = normalizeText(attr.matchedProduct ?? attr.productRef);
+    return ref.length >= 3 && norm.includes(ref);
+  });
 }
 
 /**
@@ -230,25 +295,62 @@ export function evaluateGroundingFacts(input: {
   priceSet: CatalogPriceSet;
   ungroundedNames: string[];
   stripFloor: number;
+  /** P3-1. OPTIONAL so every pre-existing 4-field call site compiles unchanged. */
+  ungroundedAttributes?: UngroundedAttribute[];
 }): GroundingVerdict {
   const prose = input.prose ?? '';
   const ungroundedStated = filterHallucinatedPrices(prose, input.priceSet);
   const ungroundedPrices = ungroundedStated.map((p) => p.raw);
   const ungroundedPriceValues = ungroundedStated.map((p) => p.value);
   const ungroundedNames = [...new Set(input.ungroundedNames.filter((n) => Boolean(n && n.trim())))];
+  const ungroundedAttributes = input.ungroundedAttributes ?? [];
+  // Spread, so the key is ABSENT (not `[]`) whenever the lane contributed nothing — see the
+  // GroundingVerdict docblock: this is what keeps flag-off `ai_alerts.details` byte-identical.
+  const attrField =
+    ungroundedAttributes.length > 0 ? { ungroundedAttributes } : ({} as Record<string, never>);
 
-  if (ungroundedPrices.length === 0 && ungroundedNames.length === 0) {
+  if (
+    ungroundedPrices.length === 0 &&
+    ungroundedNames.length === 0 &&
+    ungroundedAttributes.length === 0
+  ) {
     return { status: 'grounded', text: prose, escalate: false, ungroundedPrices, ungroundedNames };
   }
 
-  const stripped = stripUngroundedSentences(prose, ungroundedPriceValues, ungroundedNames);
-  if (stripped.length >= Math.max(0, input.stripFloor)) {
-    return { status: 'stripped', text: stripped, escalate: false, ungroundedPrices, ungroundedNames };
+  const stripped = stripUngroundedSentences(
+    prose,
+    ungroundedPriceValues,
+    ungroundedNames,
+    ungroundedAttributes,
+  );
+  // Every refuted attribute must actually be GONE from the surviving text before we call this a
+  // strip. The attribute strip additionally requires the product reference in the same sentence,
+  // so when a claim and its product never co-occur nothing is excised — and sending the remainder
+  // would ship text we know carries a refuted claim. Scoped to the attribute lane on purpose: the
+  // price and name paths keep their original semantics exactly.
+  const attributesExcised =
+    ungroundedAttributes.length === 0 ||
+    !sentenceCarriesAttribute(stripped, ungroundedAttributes);
+  if (attributesExcised && stripped.length >= Math.max(0, input.stripFloor)) {
+    return {
+      status: 'stripped',
+      text: stripped,
+      escalate: false,
+      ungroundedPrices,
+      ungroundedNames,
+      ...attrField,
+    };
   }
 
   // Not enough grounded content survives a targeted strip → hand the turn to a human.
+  // Precedence is unchanged for the pre-existing dimensions: with no attributes the expression is
+  // value-identical to the original name-then-price ternary.
   const reason: GroundingReason =
-    ungroundedNames.length > 0 ? 'hallucinated_product_name' : 'hallucinated_price';
+    ungroundedNames.length > 0
+      ? 'hallucinated_product_name'
+      : ungroundedPrices.length > 0
+        ? 'hallucinated_price'
+        : 'hallucinated_product_attribute';
   return {
     status: 'escalate',
     text: prose,
@@ -257,6 +359,7 @@ export function evaluateGroundingFacts(input: {
     failClosed: false,
     ungroundedPrices,
     ungroundedNames,
+    ...attrField,
   };
 }
 
@@ -280,6 +383,17 @@ export interface GroundingGateDeps {
     suspects: string[],
     nameIndex: string[],
   ) => Promise<NameVerificationResult>;
+  /**
+   * P3-1 free-text attribute evidence index. OPTIONAL — an absent dep disables the attribute lane
+   * entirely, so every pre-existing 4-property `deps` literal keeps compiling and behaving.
+   */
+  getAttributeIndex?: (tenantId: string) => Promise<CatalogAttributeIndex>;
+  /** P3-1 `product_ref` → catalog row resolver. OPTIONAL, same reason. */
+  resolveProductRef?: (
+    tenantId: string,
+    productRef: string,
+    index: CatalogAttributeIndex,
+  ) => Promise<ProductRefResolution>;
 }
 
 /**
@@ -299,6 +413,10 @@ export async function evaluateConsolidatedGrounding(input: {
   deps: GroundingGateDeps;
   nameLlmCap: number;
   stripFloor: number;
+  /** P3-1 declared-attribute lane. OPTIONAL, defaults `'off'` — flag-off is byte-for-byte legacy. */
+  attributeMode?: AttributeGateMode;
+  /** P3-1 per-reply bound on judged attribute claims. Overflow FAILS OPEN (let through). */
+  attributeMaxClaims?: number;
 }): Promise<GroundingVerdict> {
   const prose = input.prose ?? '';
 
@@ -352,10 +470,111 @@ export async function evaluateConsolidatedGrounding(input: {
     }
   }
 
-  return evaluateGroundingFacts({
+  const attribute = await judgeDeclaredAttributes(input, prose);
+
+  const verdict = evaluateGroundingFacts({
     prose,
     priceSet,
     ungroundedNames,
     stripFloor: input.stripFloor,
+    ungroundedAttributes: attribute.flagged,
   });
+  return attribute.observed.length > 0 && attribute.flagged.length === 0
+    ? { ...verdict, shadowAttributes: attribute.observed }
+    : verdict;
+}
+
+/**
+ * P3-1 — judge the declared `attribute` facts.
+ *
+ * FAIL-OPEN THROUGHOUT, and deliberately asymmetric with the price/name index above, which fails
+ * CLOSED. That asymmetry is the point, not an oversight: the price/name reference sets are proven
+ * and structurally complete, so their unavailability genuinely means "cannot validate". This lane
+ * is new, judges free prose, and can only ever ADD flags — so an infrastructure blip must leave
+ * the reply alone rather than pause a conversation that has no automatic exit. Pinned by test so
+ * it is not later "harmonised" into fail-closed.
+ *
+ * LAZY: no index fetch, no Redis GET, no query happens until pure parsing has produced at least one
+ * eligible claim actually present in the prose. On greetings, price questions and order
+ * confirmations that is zero, at every mode.
+ */
+async function judgeDeclaredAttributes(
+  input: {
+    tenantId: string;
+    factsUsed: DeclaredFact[] | null | undefined;
+    deps: GroundingGateDeps;
+    attributeMode?: AttributeGateMode;
+    attributeMaxClaims?: number;
+  },
+  prose: string,
+): Promise<{ flagged: UngroundedAttribute[]; observed: UngroundedAttribute[] }> {
+  const mode: AttributeGateMode = input.attributeMode ?? 'off';
+  const none = { flagged: [], observed: [] };
+  if (mode === 'off') return none;
+  const { getAttributeIndex, resolveProductRef } = input.deps;
+  if (!getAttributeIndex || !resolveProductRef) return none;
+
+  const maxClaims = Math.max(0, input.attributeMaxClaims ?? 8);
+  if (maxClaims === 0) return none;
+
+  // The declared-attribute filter. The literal `f.type === 'attribute'` below is what fires P3-4's
+  // source-text tripwire in eval/harness/__tests__/tokenMembership.test.ts — that test asserts this
+  // exact byte sequence is ABSENT and must be deleted when this lane lands. Writing it any other
+  // way (double quotes, a helper predicate, a switch) would leave the tripwire green and the
+  // "unguarded at every layer" note silently stale.
+  const declaredAttributes = (input.factsUsed ?? []).filter((f) => f.type === 'attribute');
+  if (declaredAttributes.length === 0) return none;
+
+  const proseFolded = foldDialect(prose);
+  if (!proseFolded) return none;
+
+  // Declaration order, not sorted — the cap must be a stable prefix of what the model said.
+  const located: Array<{ productRef: string; claim: ReturnType<typeof parseAttributeClaim>; proseSpan: string }> = [];
+  for (const fact of declaredAttributes) {
+    if (located.length >= maxClaims) break;
+    const claim = parseAttributeClaim(fact.value);
+    if (!claim.eligible) continue;
+    const proseSpan = locateClaimInProse(claim, proseFolded);
+    if (!proseSpan) continue;
+    located.push({ productRef: fact.product_ref ?? '', claim, proseSpan });
+  }
+  if (located.length === 0) return none;
+
+  let index: CatalogAttributeIndex;
+  try {
+    index = await getAttributeIndex(input.tenantId);
+  } catch (err) {
+    console.warn('[grounding_gate] attribute index unavailable — attribute lane inert this turn', {
+      tenantId: input.tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return none;
+  }
+
+  const resolutions = new Map<string, ProductRefResolution>();
+  const claims: JudgeableAttributeClaim[] = [];
+  for (const item of located) {
+    let resolution = resolutions.get(item.productRef);
+    if (!resolution) {
+      try {
+        resolution = await resolveProductRef(input.tenantId, item.productRef, index);
+      } catch {
+        resolution = { row: null, via: 'lookup_error' };
+      }
+      resolutions.set(item.productRef, resolution);
+    }
+    const scope = resolution.row ? 'product' : 'tenant';
+    claims.push({
+      claim: item.claim,
+      productRef: item.productRef,
+      proseSpan: item.proseSpan,
+      matchedProduct: resolution.row?.name ?? null,
+      scope,
+      evidence: resolution.row
+        ? evidenceForRow(resolution.row, index)
+        : tenantWideEvidence(index),
+    });
+  }
+
+  return decideAttributeVerdicts({ claims, mode });
 }

@@ -11,6 +11,13 @@ const LABELS: Record<string, string> = {
   usage_question_unanswered: 'Usage question unanswered',
   product_question_unanswered: 'Product question unanswered',
   uncertain_answer_escalated: 'Uncertain answer — needs human reply',
+  // The grounding-gate family. Plain language on purpose: without these the fallback title-cases
+  // the raw reason and merchants read internal jargon ("Hallucinated Product Name"). Each says
+  // what the merchant can actually act on — usually correcting the catalog, not the AI.
+  hallucinated_price: 'AI quoted a price not in your catalog',
+  hallucinated_product_name: 'AI named a product not in your catalog',
+  hallucinated_product_attribute: 'AI claim contradicts the product description',
+  grounding_check_unavailable: 'Could not verify against catalog — needs manual reply',
   cancellation_request: 'Cancellation request',
   refund_request: 'Refund request',
   post_purchase_support_request: 'Delivery or product issue',
