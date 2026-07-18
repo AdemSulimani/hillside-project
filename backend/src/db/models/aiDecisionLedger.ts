@@ -267,6 +267,176 @@ export async function insertLedgerBestEffort(record: LedgerRecord): Promise<void
   }
 }
 
+// ---------------------------------------------------------------------------
+// READ side (P3-4)
+//
+// Until P3-4 this model was WRITE-ONLY: `grep "FROM ai_decision_ledger"` returned nothing but the
+// retention DELETE. Every field above was captured and none was ever read back, which meant the
+// §15.2 promise — "reconstruct an incident from the ledger alone" — was a claim about the schema
+// rather than about anything the code could do. These functions are what make the ledger an
+// instrument: the shadow-diff report and the quality-eval parity report are both built on them,
+// and P3-1's per-classifier cutovers are gated on the first of those.
+//
+// Deliberately NO new migration and NO GIN index. Filtering by `decision_events[].classifier`
+// would want `decision_events @> '[{"classifier":"..."}]'` and an index to go with it; for the
+// volumes P3-4 reports over, a tenant+time-bounded scan filtered application-side is enough, and
+// it keeps this item purely additive. Add the index when volume demands it, not before.
+// ---------------------------------------------------------------------------
+
+/** A ledger row as read back, i.e. the written record plus its server-assigned identity. */
+export interface LedgerRow extends LedgerRecord {
+  id: string;
+  created_at: Date;
+}
+
+export interface LedgerQuery {
+  tenantId?: string;
+  conversationId?: string;
+  decisionKind?: string;
+  since?: Date;
+  until?: Date;
+  /** Hard-capped at 10_000: a report must not be able to pull a month of rows into memory. */
+  limit?: number;
+  /** Keyset pagination — pass the last row's `id` to continue. */
+  afterId?: string;
+}
+
+/**
+ * The read column list, as an ARRAY rather than a formatted string.
+ *
+ * `reconstructReply` needs the same columns table-qualified for its join, and deriving that by
+ * splitting a multi-line template on ', ' silently misses the columns whose separator is ',\n  ' —
+ * they come out unqualified. Postgres resolves them today only because `ai_prompt_blobs` happens
+ * to share no column name; the day it gains one, the §15.2 reconstruction query starts failing
+ * with "column reference is ambiguous", i.e. exactly while someone is investigating an incident.
+ * An array cannot drift with formatting.
+ */
+const LEDGER_COLUMNS = [
+  'id', 'tenant_id', 'conversation_id', 'message_id', 'correlation_id', 'trace_id',
+  'idempotency_key', 'reply_slot', 'decision_kind', 'prompt', 'model', 'usage', 'retrieval',
+  'decision_events', 'guard_verdicts', 'facts_used', 'receipt_snapshot', 'config_fingerprint',
+  'created_at',
+] as const;
+
+const SELECT_COLUMNS = LEDGER_COLUMNS.join(', ');
+/** The same columns, qualified for a join. Exported for the test that pins the qualification. */
+export const ledgerSelectList = (alias?: string): string =>
+  LEDGER_COLUMNS.map((c) => (alias ? `${alias}.${c}` : c)).join(', ');
+
+const MAX_LIMIT = 10_000;
+
+function buildQuery(q: LedgerQuery): { sql: string; params: unknown[] } {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  const add = (clause: string, value: unknown): void => {
+    params.push(value);
+    where.push(clause.replace('$?', `$${params.length}`));
+  };
+
+  if (q.tenantId) add('tenant_id = $?', q.tenantId);
+  if (q.conversationId) add('conversation_id = $?', q.conversationId);
+  if (q.decisionKind) add('decision_kind = $?', q.decisionKind);
+  if (q.since) add('created_at >= $?', q.since);
+  if (q.until) add('created_at < $?', q.until);
+  if (q.afterId) add('id > $?', q.afterId);
+
+  params.push(Math.min(Math.max(1, q.limit ?? 1_000), MAX_LIMIT));
+  return {
+    // ORDER BY id — monotonic and unique, so keyset pagination cannot skip or repeat a row the way
+    // ordering by created_at would when two rows share a timestamp.
+    sql: `SELECT ${SELECT_COLUMNS} FROM ai_decision_ledger
+          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+          ORDER BY id ASC
+          LIMIT $${params.length}`,
+    params,
+  };
+}
+
+/** One page of ledger rows. Ordered by `id` so `afterId` paginates deterministically. */
+export async function queryLedger(q: LedgerQuery, client: Db = pool): Promise<LedgerRow[]> {
+  const { sql, params } = buildQuery(q);
+  const { rows } = await client.query(sql, params);
+  return rows as LedgerRow[];
+}
+
+/**
+ * Stream every matching row, one page at a time.
+ *
+ * A shadow-diff report over a bake-in window can cover hundreds of thousands of replies; buffering
+ * that would defeat the purpose of having a bounded `limit` at all.
+ */
+export async function* scanLedger(
+  q: LedgerQuery,
+  batchSize = 1_000,
+  client: Db = pool,
+): AsyncGenerator<LedgerRow> {
+  // Clamp to the SAME bound `queryLedger` applies. Without this, `scanLedger(q, 20_000)` asks for
+  // 20k, silently receives the 10k cap, sees `page.length < batchSize` and returns as if the scan
+  // were complete — a report over a truncated window, with no error and no warning, in the
+  // safe-looking direction (fewer observations). Comparing against the EFFECTIVE page size is what
+  // makes the termination condition mean "the server ran out of rows".
+  const effectiveBatch = Math.min(Math.max(1, batchSize), MAX_LIMIT);
+  let afterId = q.afterId;
+  for (;;) {
+    const page = await queryLedger({ ...q, afterId, limit: effectiveBatch }, client);
+    if (page.length === 0) return;
+    for (const row of page) yield row;
+    if (page.length < effectiveBatch) return;
+    afterId = page[page.length - 1].id;
+  }
+}
+
+/** The reply this idempotency key produced, if any. */
+export async function getLedgerByIdempotencyKey(
+  key: string,
+  client: Db = pool,
+): Promise<LedgerRow | null> {
+  const { rows } = await client.query(
+    `SELECT ${SELECT_COLUMNS} FROM ai_decision_ledger WHERE idempotency_key = $1`,
+    [key],
+  );
+  return (rows[0] as LedgerRow) ?? null;
+}
+
+/** Every ledger row written for one message (a turn can produce several — gate drops, acks, sends). */
+export async function getLedgerForMessage(
+  messageId: string,
+  client: Db = pool,
+): Promise<LedgerRow[]> {
+  const { rows } = await client.query(
+    `SELECT ${SELECT_COLUMNS} FROM ai_decision_ledger WHERE message_id = $1 ORDER BY id ASC`,
+    [messageId],
+  );
+  return rows as LedgerRow[];
+}
+
+/**
+ * The §15.2 reconstruction: a ledger row plus the full system prompt that produced it.
+ *
+ * The prompt is content-addressed in `ai_prompt_blobs` (migration 082) and joined on
+ * `prompt->>'system_hash'`, so the 26–33K-char prompt is stored once per distinct prompt rather
+ * than once per reply. `systemPrompt` is null when `LEDGER_PROMPT_BLOBS` was off for the reply or
+ * the blob has since aged out of the retention window — a null here means "not recoverable", which
+ * is itself the answer to the reconstructability question and must not be mistaken for an error.
+ */
+export async function reconstructReply(
+  idempotencyKey: string,
+  client: Db = pool,
+): Promise<{ ledger: LedgerRow; systemPrompt: string | null } | null> {
+  const { rows } = await client.query(
+    `SELECT ${ledgerSelectList('l')}, b.content AS system_prompt
+       FROM ai_decision_ledger l
+       LEFT JOIN ai_prompt_blobs b ON b.hash = l.prompt->>'system_hash'
+      WHERE l.idempotency_key = $1`,
+    [idempotencyKey],
+  );
+  if (rows.length === 0) return null;
+  const { system_prompt: systemPrompt, ...ledger } = rows[0] as LedgerRow & {
+    system_prompt: string | null;
+  };
+  return { ledger: ledger as LedgerRow, systemPrompt: systemPrompt ?? null };
+}
+
 /**
  * P2-4 Part 2: retention prune — delete ledger rows older than `retentionDays`.
  *

@@ -16,8 +16,12 @@
  *     merge. The DISCRETE half of Gheg capability — locale, routing labels — is deterministic
  *     and IS in `npm test` (see `ghegCorpus.test.ts`), per RC-25: "Dialect classification is a
  *     discrete label — checkable without a judge; reserve LLM-as-judge for fluency."
- *     This repo has no nightly workflow (only ci.yml and deploy.yml); the remediation plan
- *     assumed one existed. Rather than invent that scaffold, this runs on demand:
+ *
+ *     UPDATED BY P3-4: the nightly scaffold this file said did not exist now does —
+ *     `.github/workflows/nightly-eval.yml` runs this on a cron. That does NOT relax the rule
+ *     above: the nightly is advisory, never a required check, and it SKIPS (exit 0) when
+ *     `CI_OPENAI_API_KEY` is absent. "Not in CI" still means "never gates a merge".
+ *     Also runs on demand:
  *
  *         cd backend && npx tsx src/eval/ghegFluency/judge.ts
  *

@@ -178,7 +178,26 @@ npm run dev            # Vite HMR
 cd backend && npm test
 ```
 
-Tests live in `backend/src/services/__tests__/` (plus `backend/src/config/__tests__/`). CI **does** run `npm test`, alongside typecheck, `config:check`, build, migration smoke-test, and the health endpoint check. Integration tests (`backend/src/__integration__/`, `npm run test:integration`) need a live Postgres + Redis and are **not** run in CI.
+Tests live in `backend/src/services/__tests__/` (plus `backend/src/config/__tests__/` and, since P3-4, `backend/src/eval/**/__tests__/`). CI **does** run `npm test`, alongside typecheck, `config:check`, build, migration smoke-test, and the health endpoint check. Integration tests (`backend/src/__integration__/`, `npm run test:integration`) need a live Postgres + Redis and are **not** run in CI.
+
+### AI eval harness (P3-4)
+
+`backend/src/eval/` is the standing AI eval/regression harness — the hard gate every behaviour-changing cutover (P3-1 especially) must pass. It is split along one line: **deterministic assertions gate every PR offline; anything stochastic or paid is manual/nightly and never blocks a merge.**
+
+| Command | What it does |
+|---------|--------------|
+| `npm test` | includes all three golden corpora — RC-01 gap-gate invariance, RC-02 EV replay, RC-03 fabrication |
+| `npm run eval:golden` | the RC-01 corpus **only**, reduced to a digest. CI runs it 3× and requires an identical sha256. RC-01 is the only corpus whose assertions consume random draws, so it is the only one whose reproducibility is a live question — the other two are pure fixtures and are covered by `npm test` alone |
+| `npm run eval:shadow` | per-classifier agreement from `ai_decision_ledger` — P3-1's cutover gate (needs Postgres) |
+| `npm run eval:quality` | inline-vs-offline quality-score parity (paid; gates `QUALITY_EVAL_MODE=off`) |
+| `npm run eval:fluency` | the Albanian/Gheg LLM judge (paid; baseline 54/100 in `ghegFluency/baseline.json`) |
+| `npm run eval:live-replay` | `distinctRepliesPerInput` against the real pipeline (**paid**; dry-run by default) |
+
+Rules when touching it:
+- **Nothing under `src/eval/**` may be imported by the send path**, and no CI-side eval module may reach `services/openaiClient.ts` (it throws at module load without a key — one bad import takes the whole suite down in CI). Both directions are enforced by import-graph walks: `services/__tests__/evalIsolation.test.ts` and `eval/goldenSets/__tests__/harnessOfflineFence.test.ts`.
+- **`Math.random`, `localeCompare` and `toLocale*Case` are banned** under `src/eval/**`; clock reads are banned outside the runners. A release gate must give identical results on every machine.
+- **Every corpus case cites its evidence** (`source: 'EV-011 …'`) and corpus sizes are pinned — a suite that quietly shrinks stops guarding.
+- The corpora encode **three different pre-fix mechanisms**, and conflating them is the easy mistake: RC-01 flips a flag (`decideGapEscalation`'s third argument), RC-02 flips an *injected reference set* (window-scoped vs full-catalog), and RC-03 has no switch at all (there was never a checker — the meta-test replays recorded fabricating text).
 
 ### Production
 

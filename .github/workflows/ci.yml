@@ -50,6 +50,29 @@ jobs:
       - name: Test
         run: npm test
 
+      # P3-4 (RC-01): the golden corpora are a RELEASE GATE, so they must be provably non-flaky —
+      # the remediation plan's own stated hazard is "a flaky assertion blocks deploys".
+      # `npm test` above already runs ALL THREE corpora (the glob covers src/eval/**/__tests__).
+      # This step adds the stability assertion the plan asks for, and it covers the RC-01 corpus
+      # specifically: that is the only one whose assertions consume random draws, so it is the only
+      # one whose reproducibility is a live question. Three SEPARATE processes, not an in-process
+      # loop, because process-seed-dependent nondeterminism is the only kind that could still flake.
+      # Offline: no DB, no Redis, no network, no OpenAI key.
+      - name: Golden determinism (RC-01 corpus, 3× identical digest)
+        run: |
+          # Truncate first: on a self-hosted runner the workspace persists, and stale digests from
+          # a previous run would otherwise accumulate and fail this spuriously.
+          rm -f /tmp/golden-digests.txt
+          for i in 1 2 3; do
+            npm run --silent eval:golden -- --digest >> /tmp/golden-digests.txt || exit 1
+          done
+          cat /tmp/golden-digests.txt
+          if [ "$(sort -u /tmp/golden-digests.txt | wc -l)" -ne 1 ]; then
+            echo "::error::golden set is NOT reproducible — three runs produced different digests"
+            exit 1
+          fi
+          echo "golden set reproducible across 3 runs"
+
   backend-smoke:
     name: Backend Migration + Health Smoke
     runs-on: ubuntu-latest

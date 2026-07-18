@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "P3-4 (RC-25) — the standing Albanian/Gheg fluency baseline.",
+    "",
+    "TWO NUMBERS, AND THEY ARE NOT INTERCHANGEABLE. The remediation plan says 'baselined at",
+    "54/100', and 54 is the audit's WEIGHTED COMPOSITE across six dimensions (WF-E:",
+    "0.20*80 understanding + 0.25*35 retrieval + 0.20*55 intent + 0.15*55 extraction +",
+    "0.10*65 response-quality + 0.10*30 consistency = 53.5). Most of that composite is retrieval",
+    "and classification, which judge.ts does not measure at all.",
+    "",
+    "What judge.ts DOES measure — register, dialect fit, grammar, encoding integrity of a",
+    "generated Albanian reply — is the 'Response quality (Albanian output)' dimension, scored 65.",
+    "So 65 is the number a re-score is comparable to; 54 is recorded because the plan names it and",
+    "because the composite is what 'the Gheg eval improves' ultimately refers to. Comparing a judge",
+    "run against 54 would flatter it by ~11 points for free.",
+    "",
+    "HOW TO ADD A POINT: run `npm run eval:fluency -- --rescore <replies.jsonl>` against a batch of",
+    "DELIVERED assistant replies (not corpus utterances — those are the customers' own words and",
+    "score high by construction), then append to `history` with its date and what changed. Never",
+    "overwrite a point; the trend is the artefact.",
+    "",
+    "NOT A GATE. LLM-judge verdicts are stochastic and cost money per run, so this never blocks a",
+    "merge — RC-25 is explicit that dialect CLASSIFICATION is a discrete label checkable without a",
+    "judge (that half is in ghegCorpus.test.ts, in CI) and that the judge is reserved for FLUENCY of",
+    "the generated reply. Trend over threshold."
+  ],
+  "comparable": {
+    "score": 65,
+    "scale": 100,
+    "dimension": "Response quality (Albanian output)",
+    "source": "docs/audit/08-albanian-language-audit.md (WF-E dimension table)",
+    "measuredAt": "2026-07-12",
+    "notes": "What judge.ts measures. Deductions: delivered mojibake (EV-011); Albanian-only hardcoded append on English conversations."
+  },
+  "composite": {
+    "score": 54,
+    "scale": 100,
+    "source": "docs/audit/08-albanian-language-audit.md (WF-E weighted total, 53.5 rounded)",
+    "measuredAt": "2026-07-12",
+    "notes": "The headline number the remediation plan cites. Dominated by retrieval (35) and consistency (30), neither of which the fluency judge touches. The audit states a +/-10 honest band on this total."
+  },
+  "history": []
+}

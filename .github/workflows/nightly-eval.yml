@@ -1,0 +1,110 @@
+# P3-4 — the nightly (stochastic, paid) half of the AI eval harness.
+#
+# THE SPLIT THIS WORKFLOW EXISTS TO ENFORCE. The remediation plan is explicit: "wire the fast
+# deterministic assertions into CI (offline, ~6s); run LLM-judge evals nightly", and it names the
+# reason — the deterministic gate must be genuinely deterministic because it blocks deploys, while
+# "the token-costing LLM-judge evals run offline/nightly, NEVER blocking per-PR". So everything
+# here is advisory: it reports, uploads artifacts, and is never a required status check.
+#
+# ⚠️ NEVER MAKE THIS A REQUIRED CHECK. LLM-judge verdicts are stochastic and cost money per run.
+# RC-25 draws the line precisely: dialect CLASSIFICATION is a discrete label checkable without a
+# judge (that half runs in `npm test` via ghegCorpus.test.ts) and the judge is reserved for FLUENCY
+# of the generated reply. Trend over threshold.
+#
+# GRACEFUL DEGRADATION. `CI_OPENAI_API_KEY` may not be configured. GitHub does not allow secrets in
+# `if:` conditions, so presence is detected in a step and surfaced as an output. When it is absent
+# the job logs a notice and exits 0 — a fork PR or a rotated secret must never page anyone. It also
+# deliberately does NOT reuse ci.yml's `'ci-placeholder-key'` fallback: there that value exists so
+# the API can boot without calling anything, but here it would produce a real request with a bogus
+# key and a confusing 401.
+name: Nightly AI Eval
+
+on:
+  schedule:
+    # 03:00 UTC — after any evening deploy has settled, before the working day in Kosovo (UTC+2).
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Ledger window (days) for the shadow-diff and quality-parity reports'
+        required: false
+        default: '7'
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    # The deterministic half, re-run nightly against main. It needs no key and no services, so it
+    # is the one job here that can genuinely fail — a red result means the gate itself has rotted.
+    name: Golden corpora (offline)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - name: Golden set (with digest)
+        run: npm run eval:golden
+      - name: Live-replay planner (dry run — asserts zero OpenAI calls)
+        run: npm run eval:live-replay
+
+  fluency:
+    name: Albanian/Gheg fluency judge (paid)
+    runs-on: ubuntu-latest
+    needs: offline
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+
+      # Secrets cannot be referenced in `if:`, hence the step-output detection pattern.
+      - name: Detect eval key
+        id: key
+        env:
+          K: ${{ secrets.CI_OPENAI_API_KEY }}
+        run: |
+          if [ -n "$K" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skipped (no key configured)
+        if: steps.key.outputs.present != 'true'
+        run: |
+          echo "::notice::CI_OPENAI_API_KEY is not configured — the LLM-judge eval was skipped."
+          echo "Add the secret to enable it. This is not a failure: the deterministic half of the"
+          echo "harness runs in the 'offline' job above and in every PR via 'npm test'."
+
+      # Judges the corpus utterances as a CALIBRATION pass: these are real customer messages, so a
+      # Gheg-competent judge should score them HIGH. A low score here means the judge drifted, not
+      # that the customers write badly. Scoring delivered assistant replies (the WF-E 54/100 trend
+      # in ghegFluency/baseline.json) needs a replies JSONL and is run on demand with --rescore.
+      - name: Gheg fluency judge
+        if: steps.key.outputs.present == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.CI_OPENAI_API_KEY }}
+          OPENAI_EVAL_MODEL: ${{ vars.CI_OPENAI_EVAL_MODEL || 'gpt-4o' }}
+        run: npm run eval:fluency | tee gheg-fluency.txt
+
+      - name: Upload fluency report
+        if: steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gheg-fluency
+          path: backend/gheg-fluency.txt
+          if-no-files-found: warn
