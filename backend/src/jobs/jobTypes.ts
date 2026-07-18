@@ -42,6 +42,18 @@ export interface AIReplyJobData {
    * while RECEIPT_TIME_SNAPSHOT is off all lack it.
    */
   receiptSnapshot?: ReceiptSnapshot;
+  /**
+   * P3-2 Step 9 (C-79): how many times admission control has already deferred this inbound.
+   *
+   * Absent on a first delivery and on every job enqueued before this shipped, so `undefined` MUST
+   * normalise to 0 (see `normalizeHop`). Without it the fairness gate had no way to distinguish a
+   * job deferred once from one deferred four hundred times, which is why the 3 s re-add loop could
+   * run forever.
+   *
+   * NOTE: adding a field here is not enough — it must ALSO be listed in `buildAIReplyJobData`'s
+   * whitelist and in `aiReplyJobDataSchema` below, or it is silently erased on the outbox path.
+   */
+  fairnessHop?: number;
 }
 
 /**
@@ -64,6 +76,7 @@ export function buildAIReplyJobData(input: AIReplyJobData): AIReplyJobData {
     messageExternalId: input.messageExternalId,
     ...(input.traceId !== undefined ? { traceId: input.traceId } : {}),
     ...(input.receiptSnapshot !== undefined ? { receiptSnapshot: input.receiptSnapshot } : {}),
+    ...(input.fairnessHop !== undefined ? { fairnessHop: input.fairnessHop } : {}),
   };
 }
 
@@ -96,4 +109,10 @@ export const aiReplyJobDataSchema = z.object({
   messageExternalId: z.string().min(1),
   traceId: z.string().optional(),
   receiptSnapshot: receiptSnapshotSchema.optional().catch(undefined),
+  // P3-2: zod's `z.object` STRIPS unknown keys, and the relay parses every rehydrated payload
+  // through this schema. Omitting the field here would make `fairnessHop` read 0 forever on exactly
+  // the outbox path — i.e. the deferral loop would be unbounded again, only on the path P3-2 is
+  // meant to move delivery onto. `.catch(undefined)` so a malformed value degrades to "first hop"
+  // rather than failing the whole payload parse and dead-lettering a real customer message.
+  fairnessHop: z.number().int().nonnegative().optional().catch(undefined),
 });

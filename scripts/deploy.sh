@@ -98,6 +98,32 @@ for i in $(seq 1 30); do
   sleep 5
 done
 
+# P3-2: gate the deploy on the worker fleet too, when it is actually running.
+#
+# The loop above probes `backend` BY NAME only, so once a `worker` service exists a crash-looping
+# worker would deploy green — the API answers /api/health perfectly well while no queue has a
+# consumer, which is silent customer impact. `--status running` returns nothing when replicas are 0,
+# so this is a no-op until the fleet is actually scaled up.
+if docker compose "${COMPOSE_FILES[@]}" ps --status running --services 2>/dev/null | grep -qx worker; then
+  echo "[deploy] Waiting for worker health"
+  for i in $(seq 1 30); do
+    if docker compose "${COMPOSE_FILES[@]}" exec -T worker node -e \
+          "require('http').get('http://127.0.0.1:8001/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" \
+          >/dev/null 2>&1; then
+      echo "[deploy] Worker reports healthy"
+      break
+    fi
+    if [ "$i" -eq 30 ]; then
+      echo "[deploy] ERROR: worker never became healthy" >&2
+      docker compose "${COMPOSE_FILES[@]}" logs --tail=200 worker >&2 || true
+      exit 1
+    fi
+    sleep 5
+  done
+else
+  echo "[deploy] No running worker service — skipping worker health gate"
+fi
+
 echo "[deploy] Cleaning old images and build cache"
 docker image prune -f
 docker builder prune -f --keep-storage 1GB || true

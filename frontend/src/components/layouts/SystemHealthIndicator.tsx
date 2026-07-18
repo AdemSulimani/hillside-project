@@ -6,10 +6,13 @@ function buildTooltip(payload: Awaited<ReturnType<typeof fetchQueuesHealth>> | u
   if (error) return 'Nuk u ngarkua statusi i radhës së punës.';
   if (!payload) return 'Duke ngarkuar statusin e radhës së punës…';
 
-  const lines = payload.queues.map(
-    (q) =>
-      `${q.label}: thellësia ${q.depth} (pragu ${payload.depthWarningThreshold}), dështuar ${q.counts.failed}, punëtori ${q.worker.isRunning ? 'aktiv' : 'joaktiv'}`,
-  );
+  const lines = payload.queues.map((q) => {
+    const status = q.worker.isRunning ? 'aktiv' : 'joaktiv';
+    // P3-2: when workers run out-of-process, liveness comes from the Redis registration count
+    // rather than a local Worker object — show it so "aktiv" is traceable to something.
+    const scope = q.worker.inProcess ? '' : ` (${q.worker.redisWorkersCount} jashtë procesit)`;
+    return `${q.label}: thellësia ${q.depth} (pragu ${payload.depthWarningThreshold}), dështuar ${q.counts.failed}, punëtori ${status}${scope}`;
+  });
   const head = payload.overallHealthy
     ? 'Të gjitha radhët brenda kufijve dhe punëtorët aktivë.'
     : 'Kujdes: mbipopullim ose problem punëtori në një ose më shumë radhë.';

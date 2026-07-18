@@ -203,3 +203,41 @@ describe('classifyJobFailure — unknown errors default safe', () => {
     assert.equal(v.deadLetter, true);
   });
 });
+
+describe('classifyJobFailure — P3-2 admission shed (C-79)', () => {
+  it('dead-letters an admission shed IMMEDIATELY, not at attempt exhaustion', () => {
+    // The job already waited out the full backoff ladder (~4.5 min at the defaults). aiQueue retries
+    // at an exponential 10s base, so deferring the DLQ to exhaustion would just re-enter the
+    // admission gate and re-shed three more times while the customer waits.
+    const v = classifyJobFailure({
+      errorName: 'AdmissionShedError',
+      errorMessage: 'admission_shed:tenant_capacity:hops=8',
+      attemptsMade: 1,
+      maxAttempts: 3,
+    });
+    assert.equal(v.classification, 'terminal');
+    assert.equal(v.deadLetter, true);
+  });
+
+  it('matches the error name case-insensitively', () => {
+    const v = classifyJobFailure({
+      errorName: 'admissionshederror',
+      errorMessage: 'admission_shed:conversation_busy:hops=8',
+      attemptsMade: 1,
+      maxAttempts: 3,
+    });
+    assert.equal(v.deadLetter, true);
+  });
+
+  it('is what turns a shed into an ai_reply_undelivered alert rather than silence', () => {
+    // Regression anchor: if this ever returns deadLetter:false on a fresh attempt, a shed customer
+    // message goes back to being invisible — the exact failure mode P3-2 Step 9d exists to prevent.
+    const v = classifyJobFailure({
+      errorName: 'AdmissionShedError',
+      errorMessage: 'admission_shed:tenant_capacity:hops=8',
+      attemptsMade: 1,
+      maxAttempts: 3,
+    });
+    assert.notEqual(v.deadLetter, false);
+  });
+});

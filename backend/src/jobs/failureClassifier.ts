@@ -11,7 +11,12 @@
  * The legacy `attemptsMade >= attempts` guard therefore mislabels it "will retry" and drops it
  * silently. This classifier keys on the stalled message / error name, never on the attempt count,
  * for that path.
+ *
+ * P3-2 adds one rule and keeps the purity constraint: `admissionControl` is itself a pure leaf
+ * (no BullMQ, no Redis, no env), so importing its error-name constant costs nothing and stops the
+ * two from drifting apart.
  */
+import { ADMISSION_SHED_ERROR_NAME } from './admissionControl';
 
 export type JobFailureClassification = 'transient' | 'terminal' | 'stalled';
 
@@ -102,6 +107,15 @@ export function classifyJobFailure(input: ClassifyJobFailureInput): JobFailureVe
 
   // 2. Any other UnrecoverableError — BullMQ has already decided not to retry it.
   if (name === 'unrecoverableerror') {
+    return { classification: 'terminal', deadLetter: true };
+  }
+
+  // 2b. P3-2 (C-79): admission control exhausted its hop budget. Terminal and dead-lettered
+  // IMMEDIATELY, not at exhaustion — the job already waited out the full backoff ladder, and
+  // `aiQueue` retries at an exponential 10s base, so letting it burn three more attempts would just
+  // re-enter the gate and re-shed three times while the customer waits. Dead-lettering here is what
+  // turns the shed into an `ai_reply_undelivered` alert instead of an invisible dropped message.
+  if (name === ADMISSION_SHED_ERROR_NAME.toLowerCase()) {
     return { classification: 'terminal', deadLetter: true };
   }
 

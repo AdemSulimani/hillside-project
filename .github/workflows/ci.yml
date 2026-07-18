@@ -120,6 +120,13 @@ jobs:
       OPENAI_EMBEDDING_MODEL: text-embedding-3-small
       ENCRYPTION_KEY: ${{ secrets.CI_ENCRYPTION_KEY }}
       ADMIN_JWT_SECRET: ${{ secrets.CI_ADMIN_JWT_SECRET || 'ci-admin-secret' }}
+      # P3-2. `all` is the default anyway, but pinning it here documents that this smoke exercises
+      # the single-process topology; the split is covered by the `split-topology` job below.
+      PROCESS_ROLE: all
+      # P3-2 adds exactly one new boot fatal: PROCESS_ROLE=worker with this off refuses to start.
+      # It cannot fire in this job (role is `all`), but per CLAUDE.md §11 any variable that gates a
+      # fatal belongs in this env block so the smoke never breaks on a config the code now requires.
+      SOCKET_CROSS_PROCESS_EMIT: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -269,6 +276,195 @@ jobs:
         run: |
           npm run migrate
           npm run migrate:verify -- --strict
+
+  split-topology:
+    # P3-2: prove the two-process topology on the two claims the audit item states as acceptance —
+    # "a worker-only deploy leaves the API up" and "an API-only deploy leaves the queue draining".
+    # No Docker needed: two Node processes against the CI Postgres + Redis is the same failure
+    # domain question, and it is the only place the split is exercised before staging.
+    name: Split Topology Smoke
+    runs-on: ubuntu-latest
+    needs: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hillside_split
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PORT: 8000
+      WORKER_HEALTH_PORT: 8001
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hillside_split
+      REDIS_URL: redis://localhost:6379
+      FRONTEND_URL: http://localhost:3000
+      BACKEND_URL: http://localhost:8000
+      JWT_SECRET: ci-jwt-secret
+      JWT_REFRESH_SECRET: ci-refresh-secret
+      OPENAI_API_KEY: ci-placeholder-key
+      OPENAI_EMBEDDING_MODEL: text-embedding-3-small
+      ADMIN_JWT_SECRET: ci-admin-secret
+      ENCRYPTION_KEY: ${{ secrets.CI_ENCRYPTION_KEY }}
+      # REQUIRED, and not obviously so: services/backblazeService.ts constructs an S3Client at
+      # MODULE LOAD, and the AWS SDK throws "Region is missing" on an empty region. So `import app`
+      # dies before listen without it — the process logs its config banner and then exits, which
+      # reads like a mysteriously dead server. This is the same reason backend-smoke carries it.
+      BACKBLAZE_REGION: ${{ secrets.CI_BACKBLAZE_REGION || 'eu-central-003' }}
+      SOCKET_CROSS_PROCESS_EMIT: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Migrate
+        run: npm run migrate
+        env:
+          MIGRATE_STRICT: "1"
+
+      - name: A worker with no socket transport refuses to start
+        # The one new boot fatal. If this ever starts succeeding, a worker could run with every
+        # real-time emit silently dropped and a frozen merchant inbox — assert the refusal, not
+        # just the happy path.
+        run: |
+          set +e
+          PROCESS_ROLE=worker SOCKET_CROSS_PROCESS_EMIT=false node dist/worker.js > /tmp/refuse.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/refuse.log
+          if [ "$code" -eq 0 ]; then
+            echo "::error::worker started without SOCKET_CROSS_PROCESS_EMIT — the boot fatal is gone"
+            exit 1
+          fi
+          grep -q "REFUSING TO START" /tmp/refuse.log
+
+      # Start and wait are SEPARATE steps, mirroring backend-smoke. Combining them hid a real
+      # failure once: `curl … && break` falls through to `sleep 5`, which succeeds, so the loop
+      # exited 0 after every attempt failed — the step went green while the API was dead and a
+      # later step took the blame.
+      - name: Start API-only process
+        run: PROCESS_ROLE=api node dist/server.js > /tmp/api.log 2>&1 &
+
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 24); do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/api/health > /dev/null; then
+              echo "API is healthy"
+              exit 0
+            fi
+            echo "Waiting for API ($i/24)..."
+            sleep 5
+          done
+          echo "::error::API failed to become healthy"
+          cat /tmp/api.log
+          exit 1
+
+      - name: API-only process runs NO workers
+        # The Step 5 regression guard, observed at RUNTIME rather than through the import graph.
+        # `jobs/workers.ts` constructs its five Workers as module-load side effects, so if anything
+        # ever statically reaches it from `app.ts` again, this process would register consumers in
+        # Redis despite PROCESS_ROLE=api — and the split would silently stop being a split.
+        run: |
+          if ! grep -q "PROCESS_ROLE=api — workers are NOT started" /tmp/api.log; then
+            echo "::error::API-only process did not report skipping workers"
+            cat /tmp/api.log
+            exit 1
+          fi
+          node -e "
+            const { aiQueue } = require('./dist/jobs/queues');
+            aiQueue.getWorkersCount()
+              .then((n) => {
+                console.log('ai-queue consumers registered in Redis:', n);
+                if (n !== 0) {
+                  console.error('::error::an API-only process registered ' + n + ' worker(s)');
+                  process.exit(1);
+                }
+                process.exit(0);
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
+
+      - name: Start worker process alongside
+        run: PROCESS_ROLE=worker node dist/worker.js > /tmp/worker.log 2>&1 &
+
+      - name: Wait for the worker, and confirm the API is unaffected
+        run: |
+          for i in $(seq 1 24); do
+            if curl --fail --silent --show-error http://127.0.0.1:8001/health > /dev/null; then
+              echo "Worker is healthy"
+              curl --silent http://127.0.0.1:8001/health | head -c 400; echo
+              curl --fail --silent --show-error http://127.0.0.1:8000/api/health > /dev/null
+              echo "API still healthy alongside the worker"
+              exit 0
+            fi
+            echo "Waiting for worker ($i/24)..."
+            sleep 5
+          done
+          echo "::error::worker failed to become healthy"
+          cat /tmp/worker.log
+          exit 1
+
+      - name: The worker fleet is now consuming the queues
+        # The other half of the previous assertion: the consumers exist, they are just in the other
+        # process. Without this, "0 workers" above could pass simply because nothing works at all.
+        run: |
+          node -e "
+            const { aiQueue } = require('./dist/jobs/queues');
+            aiQueue.getWorkersCount()
+              .then((n) => {
+                console.log('ai-queue consumers registered in Redis:', n);
+                if (n < 1) {
+                  console.error('::error::worker process registered no consumers');
+                  process.exit(1);
+                }
+                process.exit(0);
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
+
+      - name: Killing the worker leaves the API serving (failure-domain independence)
+        run: |
+          pkill -f "dist/worker.js"
+          sleep 3
+          curl --fail --silent --show-error http://127.0.0.1:8000/api/health > /dev/null
+          echo "API survived the worker dying"
+
+      - name: Print logs on failure
+        if: failure()
+        run: |
+          echo '--- api ---'; cat /tmp/api.log || true
+          echo '--- worker ---'; cat /tmp/worker.log || true
 
   frontend:
     name: Frontend Lint + Build
