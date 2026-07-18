@@ -325,6 +325,11 @@ jobs:
       OPENAI_EMBEDDING_MODEL: text-embedding-3-small
       ADMIN_JWT_SECRET: ci-admin-secret
       ENCRYPTION_KEY: ${{ secrets.CI_ENCRYPTION_KEY }}
+      # REQUIRED, and not obviously so: services/backblazeService.ts constructs an S3Client at
+      # MODULE LOAD, and the AWS SDK throws "Region is missing" on an empty region. So `import app`
+      # dies before listen without it — the process logs its config banner and then exits, which
+      # reads like a mysteriously dead server. This is the same reason backend-smoke carries it.
+      BACKBLAZE_REGION: ${{ secrets.CI_BACKBLAZE_REGION || 'eu-central-003' }}
       SOCKET_CROSS_PROCESS_EMIT: "true"
     steps:
       - name: Checkout
@@ -364,53 +369,96 @@ jobs:
           fi
           grep -q "REFUSING TO START" /tmp/refuse.log
 
+      # Start and wait are SEPARATE steps, mirroring backend-smoke. Combining them hid a real
+      # failure once: `curl … && break` falls through to `sleep 5`, which succeeds, so the loop
+      # exited 0 after every attempt failed — the step went green while the API was dead and a
+      # later step took the blame.
       - name: Start API-only process
+        run: PROCESS_ROLE=api node dist/server.js > /tmp/api.log 2>&1 &
+
+      - name: Wait for the API
         run: |
-          PROCESS_ROLE=api node dist/server.js > /tmp/api.log 2>&1 &
           for i in $(seq 1 24); do
-            curl --fail --silent http://127.0.0.1:8000/api/health && break
+            if curl --fail --silent --show-error http://127.0.0.1:8000/api/health > /dev/null; then
+              echo "API is healthy"
+              exit 0
+            fi
+            echo "Waiting for API ($i/24)..."
             sleep 5
           done
+          echo "::error::API failed to become healthy"
+          cat /tmp/api.log
+          exit 1
 
       - name: API-only process runs NO workers
-        # The Step 5 regression guard, observed at runtime rather than through the import graph:
-        # if the app ever statically reaches jobs/workers again, this count is non-zero.
+        # The Step 5 regression guard, observed at RUNTIME rather than through the import graph.
+        # `jobs/workers.ts` constructs its five Workers as module-load side effects, so if anything
+        # ever statically reaches it from `app.ts` again, this process would register consumers in
+        # Redis despite PROCESS_ROLE=api — and the split would silently stop being a split.
         run: |
-          node -e "
-            const http = require('http');
-            http.get('http://127.0.0.1:8000/api/health/queues', { headers: {} }, (res) => {
-              let body = '';
-              res.on('data', (c) => (body += c));
-              res.on('end', () => {
-                console.log('status', res.statusCode, body.slice(0, 400));
-                process.exit(0);
-              });
-            }).on('error', (e) => { console.error(e.message); process.exit(1); });
-          "
-          if grep -q "PROCESS_ROLE=api — workers are NOT started" /tmp/api.log; then
-            echo "API process correctly skipped worker startup"
-          else
+          if ! grep -q "PROCESS_ROLE=api — workers are NOT started" /tmp/api.log; then
             echo "::error::API-only process did not report skipping workers"
             cat /tmp/api.log
             exit 1
           fi
+          node -e "
+            const { aiQueue } = require('./dist/jobs/queues');
+            aiQueue.getWorkersCount()
+              .then((n) => {
+                console.log('ai-queue consumers registered in Redis:', n);
+                if (n !== 0) {
+                  console.error('::error::an API-only process registered ' + n + ' worker(s)');
+                  process.exit(1);
+                }
+                process.exit(0);
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
 
-      - name: Start worker process alongside, and confirm the API stays up
+      - name: Start worker process alongside
+        run: PROCESS_ROLE=worker node dist/worker.js > /tmp/worker.log 2>&1 &
+
+      - name: Wait for the worker, and confirm the API is unaffected
         run: |
-          PROCESS_ROLE=worker node dist/worker.js > /tmp/worker.log 2>&1 &
           for i in $(seq 1 24); do
-            curl --fail --silent http://127.0.0.1:8001/health > /dev/null && break
+            if curl --fail --silent --show-error http://127.0.0.1:8001/health > /dev/null; then
+              echo "Worker is healthy"
+              curl --silent http://127.0.0.1:8001/health | head -c 400; echo
+              curl --fail --silent --show-error http://127.0.0.1:8000/api/health > /dev/null
+              echo "API still healthy alongside the worker"
+              exit 0
+            fi
+            echo "Waiting for worker ($i/24)..."
             sleep 5
           done
-          curl --fail --silent http://127.0.0.1:8001/health | head -c 400
-          echo
-          curl --fail --silent --show-error http://127.0.0.1:8000/api/health
+          echo "::error::worker failed to become healthy"
+          cat /tmp/worker.log
+          exit 1
+
+      - name: The worker fleet is now consuming the queues
+        # The other half of the previous assertion: the consumers exist, they are just in the other
+        # process. Without this, "0 workers" above could pass simply because nothing works at all.
+        run: |
+          node -e "
+            const { aiQueue } = require('./dist/jobs/queues');
+            aiQueue.getWorkersCount()
+              .then((n) => {
+                console.log('ai-queue consumers registered in Redis:', n);
+                if (n < 1) {
+                  console.error('::error::worker process registered no consumers');
+                  process.exit(1);
+                }
+                process.exit(0);
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
 
       - name: Killing the worker leaves the API serving (failure-domain independence)
         run: |
-          pkill -f "dist/worker.js" || true
+          pkill -f "dist/worker.js"
           sleep 3
-          curl --fail --silent --show-error http://127.0.0.1:8000/api/health
+          curl --fail --silent --show-error http://127.0.0.1:8000/api/health > /dev/null
+          echo "API survived the worker dying"
 
       - name: Print logs on failure
         if: failure()
