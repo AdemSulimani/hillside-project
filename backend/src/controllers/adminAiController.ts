@@ -32,6 +32,13 @@ import {
   SHORTEST_ANSWER_APPEND,
 } from '../services/productDescriptionPromptService';
 import { assembleGuidelinesFromBlocks } from '../services/promptAssemblyService';
+import {
+  registerPromptBlockVersions,
+  type PromptBlockVersionSource,
+} from '../db/models/promptBlockVersion';
+import { knobBool } from '../config/knobs';
+
+const PROMPT_BLOCK_REGISTRY = knobBool('PROMPT_BLOCK_REGISTRY');
 
 async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot> {
   const ai = await ensureAIConfigForTenant(tenantId);
@@ -58,6 +65,39 @@ async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot
   };
 }
 
+/**
+ * P3-5 (RC-26): register prompt-block content into the immutable registry (migration 084).
+ *
+ * Best-effort by contract. A governance record must never fail an admin write — the mutation is
+ * already committed by the time this runs, so throwing here would report failure for work that
+ * succeeded. The reconcile sweep re-registers anything a failure here missed, which is precisely
+ * the redundancy that lets this be best-effort.
+ */
+async function registerBlockVersions(
+  items: Array<{ block_key: string; content: string }>,
+  source: PromptBlockVersionSource,
+  email: string | undefined,
+): Promise<void> {
+  if (!PROMPT_BLOCK_REGISTRY) return;
+  try {
+    await registerPromptBlockVersions(items, source, email ?? null);
+  } catch (err) {
+    console.warn('[adminAi] Prompt-block version registration failed', {
+      source,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * P3-5: registration rides HERE rather than at each of the seven tenant-side mutation sites.
+ * `recordAiVersion` is already called by every one of them and has just loaded the tenant's blocks
+ * for the snapshot, so this adds a governance record with no extra query and no site that can be
+ * forgotten — the failure mode that produced the orphan block in the first place.
+ *
+ * The catalog mutators register separately: they write `prompt_blocks.default_content`, which this
+ * tenant-scoped snapshot never sees.
+ */
 async function recordAiVersion(tenantId: string, email: string | undefined, note?: string): Promise<void> {
   const snapshot = await buildTenantAiSnapshot(tenantId);
   await insertAIConfigVersion({
@@ -66,6 +106,11 @@ async function recordAiVersion(tenantId: string, email: string | undefined, note
     note: note ?? null,
     createdByEmail: email ?? null,
   });
+  await registerBlockVersions(
+    snapshot.prompt_blocks.map((b) => ({ block_key: b.block_key, content: b.content })),
+    'admin_tenant',
+    email,
+  );
 }
 
 export async function getTenantAiConfig(req: Request, res: Response): Promise<void> {
@@ -403,6 +448,11 @@ export async function createCatalogBlock(req: Request, res: Response): Promise<v
     };
 
     const created = await insertCatalogPromptBlock(blockInput);
+    await registerBlockVersions(
+      [{ block_key: created.key, content: created.default_content }],
+      'admin_catalog',
+      req.admin?.email,
+    );
 
     let syncSummary: { tenants_updated: number; total_blocks_added: number } | null = null;
     if (sync_to_existing && created.is_active) {
@@ -453,6 +503,15 @@ export async function updateCatalogBlock(req: Request, res: Response): Promise<v
       sendError(res, 'Catalog block not found', 404);
       return;
     }
+    // P3-5: THE highest-value registration site. This route overwrites `default_content` with no
+    // record of the previous value anywhere — `recordAiVersion` snapshots tenant rows only, so a
+    // catalog edit was previously unrecoverable. And because locked blocks self-heal into every
+    // tenant, an edit here reaches all of them without any further admin action.
+    await registerBlockVersions(
+      [{ block_key: updated.key, content: updated.default_content }],
+      'admin_catalog',
+      req.admin?.email,
+    );
 
     let syncSummary: { tenants_updated: number; total_blocks_added: number } | null = null;
     if (sync_to_existing && updated.is_active) {

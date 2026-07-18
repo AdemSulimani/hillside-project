@@ -236,6 +236,50 @@ export function nameMatchesCatalogIndex(suspectedName: string, nameIndex: string
   return false;
 }
 
+/**
+ * P3-5 (RC-25, rules R6/R13): does this reply NAME a product that exists in the active catalog?
+ *
+ * WHY THIS IS NOT `nameMatchesCatalogIndex`. That function answers the opposite question — "is
+ * this short suspected name in the catalog" — and its `CONTAINMENT_MIN_LENGTH = 4` is calibrated
+ * for a suspect that is already known to be a product name. Passing a whole reply into it would
+ * accept any 4-char catalog name appearing anywhere in ordinary prose: over a 5k-row catalog a
+ * product called "Whey" or "Kafe" would match sentences that name no product at all. That is the
+ * `%shije%` over-match class P2-5 documented (an unanchored substring matching 46/257 rows), and
+ * it is why this is a sibling rather than a reuse. `normalizeText` itself is untouched — it is
+ * calibration-coupled to the 0.48 word_similarity threshold used elsewhere in this file.
+ *
+ * TWO GUARDS make a catalog name count as "distinctive enough to be a deliberate mention":
+ *   - multi-token (a two-word title is not something prose says by accident), OR
+ *   - at least MIN_DISTINCTIVE_CHARS long as a single token.
+ * plus WORD-BOUNDARY matching, so "mass" does not match "massive".
+ *
+ * The fail direction is deliberate. This predicate only ever SUPPRESSES an escalation on the
+ * negative-availability branch — the exact branch where R6/R13 mandate the reply the guard was
+ * punishing. It cannot suppress a generic uncertainty deflection, which
+ * `shouldEscalateUncertainAnswer` routes independently of this input.
+ */
+const MIN_DISTINCTIVE_CHARS = 8;
+
+/** Normalize to space-separated alphanumeric tokens so matching is word-boundary safe. */
+function tokenizeForMention(text: string): string {
+  return ` ${normalizeText(text).replace(/[^a-z0-9]+/g, ' ').trim()} `;
+}
+
+export function replyNamesActiveCatalogProduct(replyText: string, nameIndex: string[]): boolean {
+  const haystack = tokenizeForMention(replyText);
+  if (haystack.trim() === '') return false;
+
+  for (const catalogName of nameIndex) {
+    const needle = tokenizeForMention(catalogName);
+    const trimmed = needle.trim();
+    if (!trimmed) continue;
+    const isMultiToken = trimmed.includes(' ');
+    if (!isMultiToken && trimmed.length < MIN_DISTINCTIVE_CHARS) continue;
+    if (haystack.includes(needle)) return true;
+  }
+  return false;
+}
+
 export interface RescuedName {
   name: string;
   matchedCatalogName: string | null;

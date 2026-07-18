@@ -1,4 +1,4 @@
-import { knobBool, knobNumber } from '../config/knobs';
+import { knobBool, knobNumber, knobString } from '../config/knobs';
 import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import type { ProductImageRef } from './productImageRequestService';
@@ -46,26 +46,44 @@ import {
   type SummaryProduct,
 } from './conversationSummary';
 import {
-  countTenantPromptBlocks,
   forceSyncLockedBlocksForTenant,
   listTenantPromptBlocksRuntime,
   seedTenantPromptBlocksFromCatalog,
+  type TenantPromptBlockRow,
 } from '../db/models/promptBlock';
 import {
   PROMPT_ALLOWLIST_BUDGET,
   PROMPT_ASSEMBLY_MAX_CHARS,
   assembleGuidelinesFromBlocks,
   assertRequiredSections,
+  type AssemblyViolation,
 } from './promptAssemblyService';
 import { logSafe, logSafeStructured, redactPII } from '../utils/redact';
 import { logger } from '../utils/logger';
 import { createHash } from 'node:crypto';
 import { computeCost } from './modelPricing';
 import type {
+  PromptAssemblyProvenance,
+  PromptBlockProvenance,
   ReplyTelemetry,
   RetrievalTelemetry,
   RetrievalTelemetrySink,
 } from './aiTelemetry';
+import { promptBlockContentHash } from '../db/models/promptBlockVersion';
+import {
+  collectPromptAssemblyIssues,
+  raisePromptAssemblyAlerts,
+} from './promptAssemblyAlerts';
+import {
+  LOCKED_CATALOG_MARKER_KEY,
+  tenantSyncMarkerKey,
+} from './promptRegistryReconcile';
+import {
+  applySectionBudget,
+  joinSections,
+  type PromptSection,
+  type SectionPriority,
+} from './promptSectionBudget';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
 import {
   activeEmbeddingModel,
@@ -126,8 +144,13 @@ import {
   foldDialect,
 } from './dialectNormalization';
 import { GHEG_ALBANIAN_MARKERS, GHEG_LEXICONS, withGhegMarkers } from './ghegLexicons';
+import { lexicallyAsksAboutPrice } from './priceIntentLexicon';
 import { applyHistoryBudget } from './historyBudget';
-import { RESTRICTIONS_FOOTER_ALL_TENANTS, buildRestrictionsFooter } from './platformPolicy';
+import {
+  RESTRICTIONS_FOOTER_ALL_TENANTS,
+  buildRestrictionsFooter,
+  usesPlatformPolicyDefault,
+} from './platformPolicy';
 import { resolveStickyLocale } from './stickyLocale';
 
 export { USAGE_QUESTION_KEYWORDS, includesAnyKeyword, matchesUsageQuestionKeyword, containsSpeculativeHealthAdvice };
@@ -149,6 +172,20 @@ const LEDGER_PROMPT_PREVIEW_MAX_CHARS = 12000;
 // P2-4 (F2): when on, the FULL redacted system prompt is stored content-addressed in
 // ai_prompt_blobs (migration 082) and the ledger row's prompt.system_hash joins to it.
 const LEDGER_PROMPT_BLOBS = knobBool('LEDGER_PROMPT_BLOBS');
+/** P3-5 (RC-26/RC-17): stamp block-version + assembly provenance into the ledger row. */
+const PROMPT_BLOCK_REGISTRY = knobBool('PROMPT_BLOCK_REGISTRY');
+/** P3-5 (RC-26): raise a deduped ai_alerts row for an orphan key / assembly violation. */
+const PROMPT_ASSEMBLY_ALERTS = knobBool('PROMPT_ASSEMBLY_ALERTS');
+/** P3-5: skip the per-reply locked-block force-sync when the catalog marker is unchanged. */
+const PROMPT_SELF_HEAL_OFF_HOT_PATH = knobBool('PROMPT_SELF_HEAL_OFF_HOT_PATH');
+/** P3-5 (R4/R16): an explicit price word in the inbound counts as price intent on its own. */
+const PRICE_INTENT_LEXICAL_UNION = knobBool('PRICE_INTENT_LEXICAL_UNION');
+/**
+ * P3-5 (RC-26): whole-prompt budget mode — `off` | `shadow` | `enforce`. Declared `frozen`, so
+ * read once here: two replies in one conversation assembled under different budgets would not be
+ * comparable, which is exactly the drift the fingerprint exists to make visible.
+ */
+const PROMPT_SECTION_BUDGET_MODE = knobString('PROMPT_SECTION_BUDGET');
 // Log the live value once at startup so operators always know which threshold is active
 // (the .env.example default of 0.65 and an overriding SIMILARITY_THRESHOLD=0.75 both
 // used to be in circulation, causing silent config drift in deployed environments).
@@ -439,33 +476,91 @@ async function loadAIConfig(tenantId: string) {
   return normalized;
 }
 
-async function ensureTenantPromptBlocksSeeded(tenantId: string): Promise<void> {
-  const n = await countTenantPromptBlocks(tenantId);
-  if (n === 0) {
-    await seedTenantPromptBlocksFromCatalog(tenantId);
-    // P2-3 (F2): the versioned twin must be cleared alongside the legacy key — a DEL of only the
-    // legacy key leaves the AI_CONFIG_VERSIONED_CACHE read path serving the pre-heal blocks.
-    await redisConnection.del(
-      `tenant_prompt_blocks:${tenantId}`,
-      versionedPromptBlocksKey(tenantId),
+async function clearTenantPromptBlockCaches(tenantId: string): Promise<void> {
+  // P2-3 (F2): the versioned twin must be cleared alongside the legacy key — a DEL of only the
+  // legacy key leaves the AI_CONFIG_VERSIONED_CACHE read path serving the pre-heal blocks.
+  await redisConnection.del(
+    `tenant_prompt_blocks:${tenantId}`,
+    versionedPromptBlocksKey(tenantId),
+  );
+}
+
+/**
+ * P3-5 step 3: is this tenant's locked-block content already synced to the current catalog?
+ *
+ * A Redis GET of a global marker against a per-tenant one — no database work in the common case,
+ * where the catalog has not changed since the tenant last synced.
+ *
+ * A CACHE MISS COUNTS AS UP-TO-DATE, deliberately. The tempting reading ("we don't know, so sync
+ * to be safe") force-syncs every tenant on every cold start and after any eviction — which is
+ * precisely the per-reply herd this change exists to remove, just relocated to restart time. The
+ * bounded cost of the safe-looking-but-wrong alternative is worse than the bounded cost of this
+ * one: a genuinely stale tenant waits for the reconcile sweep, which force-syncs unconditionally.
+ */
+async function tenantLockedBlocksAreCurrent(tenantId: string): Promise<boolean> {
+  try {
+    const [marker, synced] = await redisConnection.mget(
+      LOCKED_CATALOG_MARKER_KEY,
+      tenantSyncMarkerKey(tenantId),
     );
-    return;
+    if (!marker) return true; // no published marker yet — see above
+    return marker === synced;
+  } catch {
+    // Redis unavailable. Same reasoning: do not turn a cache outage into a fleet-wide UPDATE storm
+    // against the database that is still up.
+    return true;
   }
+}
+
+/**
+ * Ensure the tenant has prompt blocks, and (legacy path) self-heal locked ones.
+ *
+ * `rows` is the already-loaded block list, which is what removes the COUNT: `rows.length === 0` is
+ * the same signal `countTenantPromptBlocks` was issuing a query to obtain. Returns true when the
+ * caller must reload, because seeding changed the row set underneath it.
+ */
+async function ensureTenantPromptBlocksSeeded(
+  tenantId: string,
+  rows: TenantPromptBlockRow[],
+): Promise<boolean> {
+  if (rows.length === 0) {
+    await seedTenantPromptBlocksFromCatalog(tenantId);
+    await clearTenantPromptBlockCaches(tenantId);
+    return true;
+  }
+
+  if (PROMPT_SELF_HEAL_OFF_HOT_PATH) {
+    // The force-sync moved to the reconcile sweep (services/promptRegistryReconcile.ts). It has to
+    // live SOMEWHERE: this per-reply UPDATE is what actually repairs the "an exact-string migration
+    // sync missed this tenant" class — migration 052 exists solely because of that class — so
+    // deleting it without a replacement would leave those tenants stale forever.
+    if (await tenantLockedBlocksAreCurrent(tenantId)) return false;
+  }
+
   // Self-healing: push any catalog changes to locked blocks that this tenant
   // may have missed (e.g. due to exact-string migration sync failures).
-  // Runs on every generateReply call but the UPDATE is a no-op when content
+  // Flag-off this runs on every generateReply call, but the UPDATE is a no-op when content
   // is already current, so the cost is a single cheap equality-check query.
   const updated = await forceSyncLockedBlocksForTenant(tenantId);
+  if (PROMPT_SELF_HEAL_OFF_HOT_PATH) {
+    // Record that this tenant is now current so the next reply takes the Redis-only path. Set on
+    // BOTH branches — a tenant we just repaired is as current as one that needed nothing, and
+    // marking only the quiet branch would make every repair cost a second redundant sync.
+    // Best-effort: a failed marker write costs one no-op UPDATE next turn, nothing more.
+    const marker = await redisConnection.get(LOCKED_CATALOG_MARKER_KEY).catch(() => null);
+    if (marker) {
+      await redisConnection.set(tenantSyncMarkerKey(tenantId), marker).catch(() => undefined);
+    }
+  }
   if (updated.length > 0) {
-    await redisConnection.del(
-      `tenant_prompt_blocks:${tenantId}`,
-      versionedPromptBlocksKey(tenantId),
-    );
+    await clearTenantPromptBlockCaches(tenantId);
     console.info('[aiService] Self-healed locked prompt blocks for tenant', {
       tenantId,
       updatedKeys: updated,
     });
+    return true;
   }
+  return false;
 }
 
 async function loadTenantPromptBlocksCached(tenantId: string) {
@@ -483,7 +578,11 @@ async function loadTenantPromptBlocksCached(tenantId: string) {
     );
     if (hit) return hit;
     const rows = await listTenantPromptBlocksRuntime(tenantId);
-    await cacheSetIfNewer(versionedKey, promptBlocksVersion(rows), rows);
+    // P3-5: never cache an EMPTY list. The seed-if-empty check below reads `rows.length === 0`, so
+    // caching an empty array would pin the "this tenant has no blocks" state for the full TTL and
+    // the seed would run on every reply while every reply also shipped an empty guidelines
+    // section. Harmless before P3-5 only because a COUNT query, not the cache, made that decision.
+    if (rows.length > 0) await cacheSetIfNewer(versionedKey, promptBlocksVersion(rows), rows);
     return rows;
   }
 
@@ -498,7 +597,8 @@ async function loadTenantPromptBlocksCached(tenantId: string) {
   }
 
   const rows = await listTenantPromptBlocksRuntime(tenantId);
-  await redisConnection.set(cacheKey, JSON.stringify(rows), 'EX', 900);
+  // P3-5: see the versioned branch above — an empty list must not be cached.
+  if (rows.length > 0) await redisConnection.set(cacheKey, JSON.stringify(rows), 'EX', 900);
   return rows;
 }
 
@@ -1496,6 +1596,28 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
   const inbound = message.trim();
   if (!inbound) return false;
 
+  const lexical = lexicallyAsksAboutPrice(inbound);
+
+  // P3-5 (R4/R16): UNION, not fallback — the audit's wording is "treat 'customer asked price' as a
+  // union of classifier + gap-assessor signals", and this is the pre-generation half of it.
+  //
+  // Why it must be pre-generation: `includePrice` (aiService:4267) is `customerAskedPrice ||
+  // customerAskedDiscount`, so a missed price intent means the catalog is injected with NO price
+  // lines at all. The model then cannot state a price, and the fail-closed gap assessor truthfully
+  // reports `missing_info: ["çmimi"]` and escalates. EV-010 is therefore NOT an assessor false
+  // positive — the assessor was right; the price was genuinely absent from its context. Filtering
+  // price out of `missing_info` (the other fix the audit floats) would suppress a TRUE signal and
+  // ship a reply that never answers the question. The root cause is upstream, and this is it.
+  //
+  // Safe by construction: it can only ADD prices, and only when the customer's own message
+  // contains an explicit price word — which is precisely what R4's "price only when explicitly
+  // asked" means. It also SKIPS the classifier call entirely on the clearest cases, so the common
+  // path gets cheaper rather than more expensive.
+  if (PRICE_INTENT_LEXICAL_UNION && lexical) {
+    console.info('[price_classifier] lexical=true — skipping classifier', logSafe(inbound));
+    return true;
+  }
+
   try {
     const completion = await openai.chat.completions.create({
       model: OPENAI_CLASSIFIER_MODEL,
@@ -1538,42 +1660,8 @@ export async function customerAskedAboutPrice(message: string): Promise<boolean>
     });
   }
 
-  const t = inbound
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '');
-  return [
-    'price',
-    'cost',
-    'how much',
-    'cheapest',
-    'most expensive',
-    'lowest price',
-    'highest price',
-    'compare price',
-    'price comparison',
-    'sa kushton',
-    'kushton',
-    'kushtojne',
-    'kushtojn',
-    'kushtoi',
-    'kushtuan',
-    'sa ben',
-    'sa eshte cmimi',
-    'sa eshte qmimi',
-    'cmim',
-    'çmim',
-    'qmim',
-    'me i lire',
-    'me e lire',
-    'me i shtrenjte',
-    'me e shtrenjte',
-    'krahasim cmimesh',
-    'krahasim qmimesh',
-    'krahaso cmimet',
-    '$',
-    '€',
-  ].some((needle) => t.includes(needle));
+  // Classifier errored or returned an unparseable shape — the legacy fallback, unchanged.
+  return lexical;
 }
 
 const DISCOUNT_REQUEST_KEYWORDS = [
@@ -4252,12 +4340,22 @@ export async function generateReply(
     };
   }
 
-  await ensureTenantPromptBlocksSeeded(tenantId);
-  const tenantPromptBlocks = await loadTenantPromptBlocksCached(tenantId);
+  // P3-5 step 3: LOAD FIRST, then seed/heal. The old order issued a `countTenantPromptBlocks`
+  // query before every single reply purely to answer a question the loaded rows answer for free.
+  let tenantPromptBlocks = await loadTenantPromptBlocksCached(tenantId);
+  if (await ensureTenantPromptBlocksSeeded(tenantId, tenantPromptBlocks)) {
+    tenantPromptBlocks = await loadTenantPromptBlocksCached(tenantId);
+  }
   // P2-5 (RC-26): drops are reported, never silent — a truncated or filtered prompt that looks
   // complete is exactly how the orphan block survived unnoticed in 6/6 tenants.
   const droppedBlocks: Array<{ key: string; reason: string }> = [];
   const unknownTokens: string[] = [];
+  // P3-5 (RC-26/RC-17): block-version provenance. Hashed IN-PROCESS from content already in
+  // memory — the reply path never reads or writes `prompt_block_versions`. A lazy per-reply
+  // upsert would put a Postgres write on the hottest path AND destroy the governance alarm, by
+  // self-registering every hash on first sight so "content that reached production through a path
+  // that never registered" would become unobservable.
+  const promptBlockProvenance: PromptBlockProvenance[] = [];
   const assembledGuidelines = assembleGuidelinesFromBlocks(
     tenantPromptBlocks,
     { language },
@@ -4265,6 +4363,14 @@ export async function generateReply(
       hasImages,
       onDropped: (key, reason) => droppedBlocks.push({ key, reason }),
       onUnknownToken: (token) => unknownTokens.push(token),
+      onBlock: ({ blockKey, content, rendered, dropReason }) => {
+        promptBlockProvenance.push({
+          key: blockKey,
+          hash: promptBlockContentHash(content),
+          rendered,
+          ...(dropReason ? { drop_reason: dropReason } : {}),
+        });
+      },
     },
   );
   if (droppedBlocks.length > 0 || unknownTokens.length > 0) {
@@ -4274,93 +4380,123 @@ export async function generateReply(
     );
   }
 
-  let systemPrompt = buildRetailAISystemPrompt(
-    tenant.name,
-    config,
-    resolvedProductCatalogContext,
-    assembledGuidelines,
-    tenant.niche,
-    tenant.description,
-    tenant.delivery_methods,
+  // P3-5 (RC-26): the prompt is assembled as a DECLARED SECTION LIST rather than a `+=` string.
+  //
+  // Same bytes: each section carries its own leading separator and `joinSections` is plain
+  // concatenation in declaration order, so an unbounded budget reproduces the previous prompt
+  // exactly (pinned by promptSectionBudget.test.ts). What the list adds is a priority per section,
+  // which is what makes the RC-26 ceiling enforceable instead of merely reported — you cannot
+  // truncate "by declared priority" if nothing ever declared one.
+  //
+  // PRIORITIES. `protected` is the persona/catalog/guidelines core, the business-rules footer, and
+  // the grounding contract. `high` is the anti-fabrication vision guidance. `normal` is situational
+  // instruction. `low` is the brevity/format polish — the honest test being whether losing the
+  // section makes the reply WORDIER (droppable) or WRONG (not).
+  //
+  // The injected product catalog lives inside the `protected` base section, deliberately: the
+  // guards validate replies against the FULL ACTIVE CATALOG, so a product trimmed out of the
+  // prompt becomes one the model cannot see but the guard still accepts — "we don't carry that"
+  // about an in-stock item, passing every check. See promptSectionBudget.ts.
+  const promptSections: PromptSection[] = [];
+  const section = (id: string, text: string, priority: SectionPriority): void => {
+    if (text) promptSections.push({ id, text, priority });
+  };
+
+  section(
+    'base',
+    buildRetailAISystemPrompt(
+      tenant.name,
+      config,
+      resolvedProductCatalogContext,
+      assembledGuidelines,
+      tenant.niche,
+      tenant.description,
+      tenant.delivery_methods,
+    ),
+    'protected',
   );
 
   if (inboundNeedsSharedContentInstruction(inboundMessage)) {
     // P2-5 (DP-pc-18): locale-selected — this used to inject Albanian into English prompts,
     // contradicting the language lock carried by the same prompt.
-    systemPrompt += SHARED_CONTENT_SYSTEM_APPEND_BY_LOCALE[language];
+    section('shared_content', SHARED_CONTENT_SYSTEM_APPEND_BY_LOCALE[language], 'normal');
     if (inboundTextIsPostShare(inboundMessage)) {
-      systemPrompt += SHARED_POST_VISION_APPEND_BY_LOCALE[language];
+      section('shared_post_vision', SHARED_POST_VISION_APPEND_BY_LOCALE[language], 'normal');
     }
   }
 
   if (hasImages && productNotInCatalog) {
-    systemPrompt += `
+    section('image_not_in_catalog', `
 
 Product not in catalog (IMPORTANT):
 - The customer's photo does not match any product in the catalog.
 - Tell the customer honestly and briefly that you do not carry this product.
 - Do NOT ask for a clearer photo, product name, or any additional details.
 - Do NOT describe ingredients, benefits, or other general information about the product.
-- You may offer to help find something else from the catalog.`;
+- You may offer to help find something else from the catalog.`, 'high');
   } else if (hasImages && shouldAskImageClarification) {
-    systemPrompt += `
+    section('image_match_uncertain', `
 
 Product-image match uncertainty (IMPORTANT):
 - The customer's photo could not be matched to the catalog with high confidence.
 - Do NOT claim you have the exact product shown unless match confidence is high.
 - Ask a brief clarifying question (clearer photo showing the label, product name, or which item if multiple visible).
 - You may mention similar catalog items only if listed in the product catalog context, with honest uncertainty.
-- Never invent product names, prices, or availability.`;
+- Never invent product names, prices, or availability.`, 'high');
   }
 
   const aggregationInstructions = buildCategoryAggregationInstructions(queryScope, products.length);
-  if (aggregationInstructions) {
-    systemPrompt += aggregationInstructions;
-  }
+  section('category_aggregation', aggregationInstructions, 'normal');
 
   // When the customer is asking for other/more/different products, add an explicit guard
   // against the AI incorrectly saying a previously recommended product "is not in the
   // catalog". The catalog section here is a fresh search result — it does NOT contain
   // everything that was shown in prior turns, but that does not make prior products invalid.
   if (isOtherOptionsRequest) {
-    systemPrompt += `
+    section('other_options', `
 
 Customer is asking for more/other products in the same category (IMPORTANT):
 - Present the products listed in the catalog section above as fresh alternatives.
 - Do NOT say that any product you recommended in a previous conversation turn "is not in the catalog" or "is not available" — prior recommendations were real catalog products. The current catalog section is a new search result, not a replacement of what came before.
 - Do NOT recommend products from a completely different category unless the customer explicitly asks to change categories.
-- If you found no new alternatives to show, say so honestly rather than inventing products or switching categories without being asked.`;
+- If you found no new alternatives to show, say so honestly rather than inventing products or switching categories without being asked.`, 'normal');
   }
 
-  systemPrompt += SHORTEST_ANSWER_APPEND;
-  systemPrompt += PRODUCT_DESCRIPTION_CONCISE_APPEND;
+  // The four style appends are the `low` tier, and they are declared in the order they must be
+  // KEPT — the budget drops the last-declared first, so under pressure the most situational
+  // (targeted description, compact price list) go before the two always-on brevity rules.
+  section('shortest_answer', SHORTEST_ANSWER_APPEND, 'low');
+  section('description_concise', PRODUCT_DESCRIPTION_CONCISE_APPEND, 'low');
   if (customerAskedPrice && products.length > 5) {
-    systemPrompt += PRICE_LIST_COMPACT_APPEND;
+    section('price_list_compact', PRICE_LIST_COMPACT_APPEND, 'low');
   }
   if (descriptionQuestionTurn) {
-    systemPrompt += PRODUCT_DESCRIPTION_TARGETED_APPEND;
+    section('description_targeted', PRODUCT_DESCRIPTION_TARGETED_APPEND, 'low');
   }
   if (attributeIntent.is_attribute_question) {
-    systemPrompt += `
+    section('attribute_question', `
 
 Product attribute question (IMPORTANT):
 - Answer using catalog facts, the aggregated attribute summary, and any "Verified packaging details read from product images" block when present.
 - List every distinct attribute value across ALL matching products in scope.
 - Keep it compact: give the values directly with no preamble and no restating of the question; group products that share a value rather than repeating it.
-- If the requested attribute is missing from BOTH the catalog and the verified packaging details, say you do not have that detail — do not guess.`;
+- If the requested attribute is missing from BOTH the catalog and the verified packaging details, say you do not have that detail — do not guess.`, 'normal');
   }
 
   if (imageDerivedAttributeContext) {
-    systemPrompt += `
+    section('image_derived_attributes', `
 
 Using packaging-derived details (IMPORTANT — source precedence):
 - Prefer the structured catalog data above. When a detail is missing there but appears in the "Verified packaging details read from product images" block, you MAY answer using that value.
 - These packaging values were read directly from the product's own photos by the vision system, so they are reliable enough to state — briefly note that the detail comes from the product image/label (e.g. "based on the product packaging, ...").
 - Only use values listed in that block. Never infer, estimate, or guess a value that is not shown there or in the catalog. If a detail is absent from both sources, say you do not have it.
-- Do not contradict the structured catalog: if the catalog already states a value, use the catalog value.`;
+- Do not contradict the structured catalog: if the catalog already states a value, use the catalog value.`, 'high');
   }
 
-  const systemPromptTokenEstimate = estimateTokens(systemPrompt);
+  // Same value as before the section refactor: the estimate has always measured the prompt as it
+  // stands at THIS point, before the closing append, footer and grounding directive are added.
+  // (P2-5 documented that as defect (a) — it is read only in the warn payload below.)
+  const systemPromptTokenEstimate = estimateTokens(joinSections(promptSections));
   const inboundTokenEstimate = estimateTokens(inboundMessage.trim());
   const olderHistorySummaryTokens = estimateTokens(olderHistorySummary ?? '');
   const historyMessageTokenEstimates = conversationHistory.map((msg) =>
@@ -4455,7 +4591,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
       '__CLOSING_SENTENCE__',
       closingSentence,
     );
-    systemPrompt += `\n\n${closingAppend}`;
+    section('closing_reply', `\n\n${closingAppend}`, 'normal');
   }
 
   // Operator restrictions and platform policy are appended after all product, guideline and
@@ -4468,10 +4604,11 @@ Using packaging-derived details (IMPORTANT — source precedence):
   // Only the P2-1 grounding directive is appended after this footer, and deliberately so: it
   // constrains the OUTPUT CONTRACT (what may be asserted and how the reply is shaped), not the
   // business policy, so it cannot dilute operator or platform rules.
+  // `protected`: the whole point of the footer is last-position priority over everything above it.
+  // Dropping the business rules to save chars would invert the ladder the prompt itself declares,
+  // and the item's own edge case says required sections are never the truncated ones.
   const restrictionsFooter = buildRestrictionsFooter(config, language);
-  if (restrictionsFooter) {
-    systemPrompt += restrictionsFooter;
-  }
+  section('restrictions_footer', restrictionsFooter, 'protected');
 
   // P2-1 (RC-03): the facts_used contract applies only to the non-vision text path and is skipped
   // for custom (fine-tuned) models that may not support structured outputs. When active, the model
@@ -4480,7 +4617,35 @@ Using packaging-derived details (IMPORTANT — source precedence):
   // default prompt is unchanged.
   const useFactsContract = FACTS_USED_CONTRACT && !hasImages && !config.custom_model_id;
   if (useFactsContract) {
-    systemPrompt += GROUNDING_DIRECTIVE;
+    // `protected`: without the directive the model does not emit `facts_used`, so
+    // `parseFactsUsedCompletion` throws a GenerationContractError and the reply becomes a retry.
+    // Truncating this does not degrade the answer — it deletes it.
+    section('grounding_directive', GROUNDING_DIRECTIVE, 'protected');
+  }
+
+  // P3-5: the prompt is complete. Join it, applying the ceiling under `enforce`.
+  //
+  // `shadow` computes exactly what `enforce` would drop and records it in ledger provenance while
+  // emitting the untruncated prompt — the item's migration path says to measure the prompt-size
+  // distribution before cutting anything, and a mode that reports without acting is how that
+  // measurement is obtained from real traffic rather than guessed.
+  const sectionBudget = applySectionBudget(
+    promptSections,
+    PROMPT_SECTION_BUDGET_MODE === 'off' ? Infinity : PROMPT_ASSEMBLY_MAX_CHARS,
+  );
+  let systemPrompt =
+    PROMPT_SECTION_BUDGET_MODE === 'enforce' ? sectionBudget.prompt : joinSections(promptSections);
+  if (PROMPT_SECTION_BUDGET_MODE === 'enforce' && sectionBudget.droppedIds.length > 0) {
+    console.warn(
+      '[aiService] System prompt over budget — sections dropped by declared priority',
+      JSON.stringify({
+        tenantId,
+        conversationId,
+        droppedIds: sectionBudget.droppedIds,
+        totalChars: sectionBudget.totalChars,
+        maxChars: PROMPT_ASSEMBLY_MAX_CHARS,
+      }),
+    );
   }
 
   // P2-5 (RC-26) defect (a): `systemPromptTokenEstimate` / `inboundTokenEstimate` were computed
@@ -4493,8 +4658,9 @@ Using packaging-derived details (IMPORTANT — source precedence):
   // Reports; never throws and never truncates here. Block-level budgeting happens inside
   // `assembleGuidelinesFromBlocks`, which knows the priority order and can protect the footer —
   // an over-budget prompt is a degradation, a prompt missing platform policy is a policy breach.
+  let promptViolations: AssemblyViolation[] = [];
   if (PROMPT_ALLOWLIST_BUDGET) {
-    const promptViolations = assertRequiredSections(systemPrompt, {
+    promptViolations = assertRequiredSections(systemPrompt, {
       expectPlatformPolicy: RESTRICTIONS_FOOTER_ALL_TENANTS,
       expectGroundingDirective: useFactsContract,
       maxChars: PROMPT_ASSEMBLY_MAX_CHARS,
@@ -4514,6 +4680,46 @@ Using packaging-derived details (IMPORTANT — source precedence):
           inboundTokenEstimate: Math.ceil(inboundTokenEstimate),
         }),
       );
+    }
+  }
+
+  // P3-5 (RC-25/RC-26): the structural assembly outcome, recorded per reply.
+  //
+  // `platform_policy_present` is computed from the FOOTER STRING, not from the flag: the flag says
+  // what we intended, the footer says what the model was actually given. RC-25's claim was that
+  // the business rules reach 1 of 6 tenants — answering that needs the observed value, and a
+  // divergence between the two is itself the finding.
+  //
+  // Recorded on EVERY reply, not only on violations. "No violation" and "the assertion never ran"
+  // are different states, and only the first is evidence.
+  const platformPolicyRendered = restrictionsFooter.includes('PLATFORM POLICY');
+  const promptAssemblyProvenance: PromptAssemblyProvenance = {
+    footer_present: restrictionsFooter.length > 0,
+    platform_policy_present: platformPolicyRendered,
+    platform_policy_source: !platformPolicyRendered
+      ? 'none'
+      : usesPlatformPolicyDefault(config)
+        ? 'code_rulebook'
+        : 'tenant_override',
+    grounding_directive_present: useFactsContract,
+    violations: promptViolations.map((v) => ({ kind: v.kind, detail: v.detail })),
+    unknown_tokens: unknownTokens,
+    // Recorded in `shadow` too — that is the whole point of shadow: `dropped` says what ENFORCE
+    // would have cut, while the prompt actually sent was untruncated.
+    sections: PROMPT_SECTION_BUDGET_MODE === 'off' ? undefined : sectionBudget.sections,
+    over_budget: systemPrompt.length > PROMPT_ASSEMBLY_MAX_CHARS,
+  };
+
+  // P3-5 (RC-26): the same facts, as a durable deduped alert rather than only a console.warn.
+  // Fire-and-forget — a governance alert must never delay or fail a customer reply.
+  if (PROMPT_ASSEMBLY_ALERTS) {
+    const issues = collectPromptAssemblyIssues({
+      droppedBlocks,
+      violations: promptAssemblyProvenance.violations,
+      unknownTokens,
+    });
+    if (issues.length > 0) {
+      void raisePromptAssemblyAlerts(tenantId, issues).catch(() => undefined);
     }
   }
 
@@ -4616,6 +4822,11 @@ Using packaging-derived details (IMPORTANT — source precedence):
       // Masked, size-capped copy of the SYSTEM prompt (persona/blocks/footer/injected directives —
       // the §15.2 reconstruction target). redactPII keeps structure while masking any embedded PII.
       preview: redactedSystemPrompt.slice(0, LEDGER_PROMPT_PREVIEW_MAX_CHARS),
+      // P3-5: the block versions and the structural outcome. Behind the flag so the ledger's row
+      // shape is unchanged until the registry exists to resolve the hashes against — a hash with
+      // nothing to resolve it to is noise, not provenance.
+      blocks: PROMPT_BLOCK_REGISTRY ? promptBlockProvenance : null,
+      assembly: PROMPT_BLOCK_REGISTRY ? promptAssemblyProvenance : null,
     },
     model: {
       requested: model,

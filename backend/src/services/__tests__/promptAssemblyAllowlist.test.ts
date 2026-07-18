@@ -400,3 +400,117 @@ describe('Step 3 ↔ Step 4 interaction — footer + allowlist together (the man
     );
   });
 });
+
+/**
+ * P3-5 (RC-26/RC-17): the `onBlock` provenance callback.
+ *
+ * A callback rather than a widened return type, because `assembleGuidelinesFromBlocks` returns a
+ * `string` to the reply path, the admin preview and `conciseResponseRules.test.ts` — churning all
+ * of them for information one caller wants would be the wrong trade. Mirrors `onDropped`.
+ *
+ * The subtle requirement is that a block kept by the loop can still be dropped by the BUDGET
+ * afterwards, so `onBlock` must report the FINAL state. Reporting mid-loop would record a block as
+ * rendered that never reached the model — a lie the ledger would then preserve forever.
+ */
+describe('P3-5 — onBlock provenance', () => {
+  const orphanRow = block('guidelines.offers_promotions', 'Refer to the Active offers section.');
+
+  it('reports every considered block exactly once, rendered or not', () => {
+    const rows = [
+      block('guidelines.language', 'Language rules.'),
+      block('guidelines.recommendations', 'Rec rules.', { enabled: false }),
+      orphanRow,
+    ];
+    const seen: Array<{ blockKey: string; rendered: boolean; dropReason?: string }> = [];
+    assembleGuidelinesFromBlocks(rows, { language: 'sq' }, {
+      hasImages: false,
+      allowlist: true,
+      onBlock: ({ blockKey, rendered, dropReason }) => seen.push({ blockKey, rendered, dropReason }),
+    });
+
+    assert.equal(seen.length, 3);
+    assert.equal(seen.filter((s) => s.blockKey === 'guidelines.language').length, 1);
+  });
+
+  it('attributes each non-render to its actual cause', () => {
+    const rows = [
+      block('guidelines.language', 'Language rules.'),
+      block('guidelines.recommendations', 'Rec rules.', { enabled: false }),
+      block('guidelines.vision_product_images', 'Vision rules.'),
+      orphanRow,
+      block('guidelines.discount_policy', '   '),
+    ];
+    const byKey = new Map<string, { rendered: boolean; dropReason?: string }>();
+    assembleGuidelinesFromBlocks(rows, { language: 'sq' }, {
+      hasImages: false,
+      allowlist: true,
+      onBlock: ({ blockKey, rendered, dropReason }) => byKey.set(blockKey, { rendered, dropReason }),
+    });
+
+    assert.deepEqual(byKey.get('guidelines.language'), { rendered: true, dropReason: undefined });
+    assert.deepEqual(byKey.get('guidelines.recommendations'), { rendered: false, dropReason: 'disabled' });
+    assert.deepEqual(byKey.get('guidelines.vision_product_images'), { rendered: false, dropReason: 'vision_absent' });
+    assert.deepEqual(byKey.get('guidelines.offers_promotions'), { rendered: false, dropReason: 'allowlist' });
+    // A blanked block is its own reason: it is a configuration mistake, and invisible in the
+    // assembled prompt by definition. Calling it `disabled` would blame a toggle nobody flipped.
+    assert.deepEqual(byKey.get('guidelines.discount_policy'), { rendered: false, dropReason: 'empty' });
+  });
+
+  it('a block the BUDGET removed is reported as dropped, not as rendered', () => {
+    const rows = [
+      block('guidelines.language', 'L'.repeat(50)),
+      block('custom_promo', 'C'.repeat(500)),
+    ];
+    const byKey = new Map<string, { rendered: boolean; dropReason?: string }>();
+    const out = assembleGuidelinesFromBlocks(rows, { language: 'sq' }, {
+      hasImages: false,
+      allowlist: true,
+      maxChars: 100,
+      onBlock: ({ blockKey, rendered, dropReason }) => byKey.set(blockKey, { rendered, dropReason }),
+    });
+
+    assert.ok(!out.includes('C'.repeat(500)), 'precondition: the budget actually cut it');
+    assert.deepEqual(byKey.get('custom_promo'), { rendered: false, dropReason: 'budget' });
+    assert.deepEqual(byKey.get('guidelines.language'), { rendered: true, dropReason: undefined });
+  });
+
+  it('reports the content AS STORED, not placeholder-expanded', () => {
+    // The registry stores templates. Reporting expanded text would give one block a different hash
+    // per reply locale, and neither would match — every reply an unknown version.
+    const rows = [block('guidelines.language', 'Reply in {{LANGUAGE_NAME}}.')];
+    const contents: string[] = [];
+    for (const language of ['sq', 'en'] as const) {
+      assembleGuidelinesFromBlocks(rows, { language }, {
+        hasImages: false,
+        allowlist: true,
+        onBlock: ({ content }) => contents.push(content),
+      });
+    }
+    assert.deepEqual(contents, ['Reply in {{LANGUAGE_NAME}}.', 'Reply in {{LANGUAGE_NAME}}.']);
+  });
+
+  it('is reported flag-off too — provenance does not depend on the allowlist', () => {
+    // Flag-off the orphan RENDERS; that is exactly the state worth having on record.
+    const byKey = new Map<string, boolean>();
+    assembleGuidelinesFromBlocks([orphanRow], { language: 'sq' }, {
+      hasImages: false,
+      allowlist: false,
+      onBlock: ({ blockKey, rendered }) => byKey.set(blockKey, rendered),
+    });
+    assert.equal(byKey.get('guidelines.offers_promotions'), true);
+  });
+
+  it('omitting onBlock changes nothing about the assembled output', () => {
+    const rows = [block('guidelines.language', 'Language rules.'), orphanRow];
+    const withCb = assembleGuidelinesFromBlocks(rows, { language: 'sq' }, {
+      hasImages: false,
+      allowlist: true,
+      onBlock: () => undefined,
+    });
+    const without = assembleGuidelinesFromBlocks(rows, { language: 'sq' }, {
+      hasImages: false,
+      allowlist: true,
+    });
+    assert.equal(withCb, without);
+  });
+});

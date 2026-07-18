@@ -33,6 +33,41 @@ export interface LedgerPromptProvenance {
   token_estimate: number;
   /** Size-capped, PII-masked copy of the system prompt (the reconstruction target). */
   preview: string;
+  /**
+   * P3-5 (RC-26): the exact prompt-block versions that produced this reply, by content hash —
+   * each resolvable through `prompt_block_versions` (migration 084). Non-rendered blocks are
+   * retained with `rendered: false` so a REJECTED orphan is distinguishable from an ABSENT one.
+   *
+   * Nested in this JSONB column rather than given a top-level column of its own: block versions
+   * are a per-PROMPT fact whose only query is "what produced this reply" — already a `prompt`
+   * read — unlike `config_fingerprint`, which is a per-PROCESS fact needing a fleet-wide indexed
+   * slice. A column would also be NULL on most rows, since the gate-drop / ack / [NO_REPLY]
+   * ledger paths carry no prompt at all. Same shape as `usage.calls` above.
+   */
+  blocks?: LedgerBlockVersion[] | null;
+  /** P3-5: the structural assembly outcome (what rendered, what was violated, what was cut). */
+  assembly?: LedgerAssemblyProvenance | null;
+}
+
+/** P3-5: one guideline block considered by prompt assembly. */
+export interface LedgerBlockVersion {
+  key: string;
+  /** sha256 of the block content AS STORED — never the placeholder-expanded text. */
+  hash: string;
+  rendered: boolean;
+  drop_reason?: 'allowlist' | 'budget' | 'disabled' | 'vision_absent' | 'empty';
+}
+
+/** P3-5: structural assembly facts. Booleans and enums only — see the redaction note below. */
+export interface LedgerAssemblyProvenance {
+  footer_present: boolean;
+  platform_policy_present: boolean;
+  platform_policy_source: 'tenant_override' | 'code_rulebook' | 'none';
+  grounding_directive_present: boolean;
+  violations: Array<{ kind: string; detail: string }>;
+  unknown_tokens: string[];
+  sections?: Array<{ id: string; chars: number; dropped: boolean }>;
+  over_budget: boolean;
 }
 
 export interface LedgerModelParams {
@@ -179,6 +214,14 @@ export function redactLedgerRecord(record: LedgerRecord): LedgerRecord {
   if (!REDACT_PII) return record;
   return {
     ...record,
+    // P3-5: the spread carries `blocks` and `assembly` through UNREDACTED, and that is the
+    // decision, not an omission. Both are block keys, sha256 hashes, booleans and enums. The only
+    // free text is `assembly.unknown_tokens` — regex-constrained to [A-Z0-9_]+ by
+    // `expandPromptPlaceholders`, so it cannot carry a phone number or an address — and
+    // `violations[].detail`, which is a section name or an "N > M" size pair. Stated explicitly in
+    // the style of the receipt_snapshot / config_fingerprint notes below, so a reviewer sees a
+    // judgement rather than an accident. Anything added here that CAN carry customer text must be
+    // routed through `redactValue` instead.
     prompt: record.prompt
       ? { ...record.prompt, preview: redactPII(record.prompt.preview) }
       : null,

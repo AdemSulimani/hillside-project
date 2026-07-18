@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   type AppliedRow,
   type LedgerRow,
@@ -249,5 +251,90 @@ describe('backfillAppliedSeqSql', () => {
     assert.match(sql, /ORDER BY run_at ASC, id ASC/);
     assert.match(sql, /WHERE applied_seq IS NULL/);
     assert.match(sql, /UPDATE _migrations/);
+  });
+});
+
+/**
+ * P3-5: migration 084 read off disk.
+ *
+ * A file-content assertion, following the house pattern of the eval fences and
+ * `replyPathSourceInvariants` — the same reason those exist: the property is a property of the
+ * SOURCE, and no unit test over an in-memory fixture can observe it.
+ *
+ * The `convert_to` check is the load-bearing one. `pgcrypto`'s `digest(text, ...)` hashes the
+ * string in the DATABASE's server encoding, while the runtime hashes UTF-8. Every guideline block
+ * is Albanian and the platform rulebook is full of EUR signs, so on a non-UTF8 `server_encoding`
+ * a bare `digest(content, 'sha256')` would give essentially every backfilled row a hash the
+ * runtime never reproduces — 100% phantom "unregistered content", poisoning the exact governance
+ * alarm the table exists to raise. `convert_to(content, 'UTF8')` pins the byte sequence.
+ */
+describe('migration 084 — prompt_block_versions', () => {
+  const sql = readFileSync(
+    join(__dirname, '..', '..', 'db', 'migrations', '084_prompt_block_versions.sql'),
+    'utf8',
+  );
+
+  it('hashes through convert_to(...,\'UTF8\') so SQL and Node agree on any server_encoding', () => {
+    // Scanned over the COMMENT-STRIPPED source. The file's own header explains the hazard by
+    // quoting the bad form, so a scan of the raw text is tripped by the documentation of the very
+    // thing it checks for. (Same class as the eval fences' "comments must not contain the pinned
+    // identifiers" rule — here the fix is to strip rather than to reword.)
+    //
+    // NOT `stripSqlNoise`: that also removes string literals — deliberately, so a `COMMIT` inside
+    // a dollar-quoted prompt body cannot trip the hostile-token scanner — which would take the
+    // `'UTF8'` this assertion is looking for with it.
+    const code = sql
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('--'))
+      .join('\n');
+    assert.match(code, /convert_to\(\s*\w+\.?\w*,\s*'UTF8'\s*\)/);
+    assert.ok(
+      !/digest\(\s*[a-z_.]*content\s*,\s*'sha256'\s*\)/.test(code),
+      'digest() must wrap convert_to(content, \'UTF8\'), not the raw text column',
+    );
+  });
+
+  it('is additive only — creates and inserts, never drops or deletes', () => {
+    for (const destructive of [/\bDROP\s+TABLE\b/i, /\bDROP\s+COLUMN\b/i, /\bDELETE\s+FROM\b/i, /\bTRUNCATE\b/i]) {
+      assert.ok(!destructive.test(sql), `084 must not contain ${destructive}`);
+    }
+  });
+
+  it('is idempotent — safe to re-run at every boot', () => {
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS prompt_block_versions/);
+    assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS/);
+    assert.match(sql, /ON CONFLICT \(block_key, content_hash\) DO NOTHING/);
+  });
+
+  it('needs no -- migrate:no-transaction annotation', () => {
+    // It runs inside the batch transaction: no CREATE INDEX CONCURRENTLY, no ALTER TYPE ... ADD
+    // VALUE, no bare COMMIT. Asserted through the runner's own detector rather than by eye.
+    assert.deepEqual(detectHostileTokens(stripSqlNoise(sql)), []);
+    assert.equal(parseAnnotations(sql).noTransaction, false);
+  });
+
+  it('backfills from BOTH the catalog and the tenant copies', () => {
+    // Catalog default_content is what the catalog INTENDS; tenant content is what actually renders,
+    // and they diverge (unlocked blocks are per-tenant editable, and the older exact-string
+    // migration syncs missed rows — migration 052 exists because of that). Registering only the
+    // catalog would leave the text most replies actually used unregistered.
+    assert.match(sql, /FROM prompt_blocks/);
+    assert.match(sql, /FROM tenant_prompt_blocks/);
+  });
+
+  it('has a paired .down.sql, and it says what reverting destroys', () => {
+    // The tempting call is "no down file — this table is governance history". But `runDown`
+    // reverts from the top of the stack, so an irreversible tip blocks reverting EVERY migration
+    // beneath it, permanently, for every future structural change. That cost is paid forever to
+    // protect a table only MIGRATE_ALLOW_DOWN=1 can reach and that production rollback
+    // ("re-deploy the previous tag") never touches. So it is paired — and documented, because
+    // superseded block versions exist nowhere else and 084's backfill cannot reconstruct them.
+    const downPath = join(__dirname, '..', '..', 'db', 'migrations', '084_prompt_block_versions.down.sql');
+    assert.ok(existsSync(downPath), 'an irreversible tip blocks every migration beneath it');
+
+    const down = readFileSync(downPath, 'utf8');
+    assert.match(down, /DROP TABLE IF EXISTS prompt_block_versions/);
+    assert.match(down, /IF EXISTS/, 'guarded drops only');
+    assert.match(down, /superseded/i, 'the down file must state what is lost');
   });
 });

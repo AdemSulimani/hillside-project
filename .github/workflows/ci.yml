@@ -192,12 +192,15 @@ jobs:
         run: cat /tmp/backend.log
 
   migration-shape:
-    # P3-3 (RC-23): prove the runner on the two shapes dev cannot easily produce —
-    # a full up/down/up round-trip converges to an identical schema, and a ledger
-    # carrying orphan rows (files deleted, rows remain — the offers branch, EV-037)
-    # migrates + verifies cleanly. Own fresh pgvector DB; no OpenAI env (migrate
-    # and verify never call the API).
-    name: Migration Round-trip + Orphan Shape
+    # P3-3 (RC-23): prove the runner on the shapes dev cannot easily produce — the REAL tree
+    # applies clean from scratch and verifies strict, and a ledger carrying orphan rows (files
+    # deleted, rows remain — the offers branch, EV-037) migrates + verifies cleanly. Own fresh
+    # pgvector DB; no OpenAI env (migrate and verify never call the API).
+    #
+    # P3-5: the up/down/up round-trip that used to live here moved to a synthetic tree in the
+    # integration suite — see the note further down for why the real tree was never entitled to
+    # make a reversibility claim.
+    name: Migration Apply + Orphan Shape
     runs-on: ubuntu-latest
     needs: backend
     services:
@@ -237,33 +240,26 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Snapshot schema (before round-trip)
-        run: node dist/db/schemaSnapshot.js > /tmp/schema-before.txt
-
       - name: Apply full tree
         run: npm run migrate
 
       - name: Verify ledger
         run: npm run migrate:verify -- --strict
 
-      - name: Snapshot schema (after full apply)
-        run: node dist/db/schemaSnapshot.js > /tmp/schema-full.txt
-
-      - name: Down — revert the reversible tip (083 provenance + 082 blobs)
-        run: npm run migrate:down -- --steps=2
-        env:
-          MIGRATE_ALLOW_DOWN: "1"
-
-      - name: Re-apply + verify (round-trip converges)
-        run: |
-          npm run migrate
-          npm run migrate:verify -- --strict
-
-      - name: Assert schema identical after up/down/up
-        run: |
-          node dist/db/schemaSnapshot.js > /tmp/schema-roundtrip.txt
-          diff /tmp/schema-full.txt /tmp/schema-roundtrip.txt \
-            && echo "schema identical after up/down/up"
+      # P3-5: the up/down/up round-trip moved to a SYNTHETIC tree, in
+      # src/__integration__/migrateRunner.integration.test.ts.
+      #
+      # This step used to run `migrate:down --steps=2` against the REAL tree, which silently
+      # assumed the two newest migrations are always structural and reversible. `runDown` reverts
+      # from the top of the stack and refuses the whole range if any file in it lacks a paired
+      # down file — so the first DATA migration to land at the tip breaks it, and by house rule
+      # (data/prompt migrations get no down file; their inverse is the P3-5 registry) that was
+      # always going to happen. 085 is the one that did; any of the 19 prompt-content migrations
+      # would have.
+      #
+      # Up/down/up convergence is a property of the RUNNER, so it is asserted on a tree the test
+      # controls. What the real tree still proves here — that it applies clean from scratch,
+      # verifies strict, and tolerates orphan ledger rows — is below and unchanged.
 
       - name: Seed orphan _migrations rows (deleted-file rows remain)
         run: |

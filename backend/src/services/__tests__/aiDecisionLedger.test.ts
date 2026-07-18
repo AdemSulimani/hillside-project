@@ -421,3 +421,115 @@ describe('aiDecisionLedger — read-side column list (P3-4)', () => {
     assert.ok(!ledgerSelectList().includes('l.'));
   });
 });
+
+/**
+ * P3-5 (RC-26/RC-17): prompt-block version + assembly provenance.
+ *
+ * These ride INSIDE the existing `prompt` JSONB column rather than getting a column of their own
+ * (block versions are a per-prompt fact whose only query is "what produced this reply" — already a
+ * `prompt` read — unlike `config_fingerprint`, a per-process fact needing a fleet-wide slice).
+ * That choice means no migration, but it also means the fields are only carried by a spread in
+ * `redactLedgerRecord` and by the mapper. Both are silent if they break, so both are pinned here.
+ */
+describe('aiDecisionLedger — P3-5 prompt provenance', () => {
+  const BLOCKS = [
+    { key: 'guidelines.language', hash: 'a'.repeat(64), rendered: true },
+    {
+      key: 'guidelines.offers_promotions',
+      hash: 'b'.repeat(64),
+      rendered: false,
+      drop_reason: 'allowlist' as const,
+    },
+  ];
+  const ASSEMBLY = {
+    footer_present: true,
+    platform_policy_present: true,
+    platform_policy_source: 'code_rulebook' as const,
+    grounding_directive_present: false,
+    violations: [{ kind: 'over_budget', detail: '35000 > 34000' }],
+    unknown_tokens: ['LEGACY_TOKEN'],
+    sections: [{ id: 'base', chars: 20_000, dropped: false }],
+    over_budget: true,
+  };
+
+  function recordWithProvenance() {
+    const telemetry = fcd0af7eTelemetry();
+    telemetry.prompt.blocks = BLOCKS;
+    telemetry.prompt.assembly = ASSEMBLY;
+    return buildLedgerRecord({
+      tenantId: 'tenant-1',
+      conversationId: 'conv-1',
+      correlationId: 'inbound-msg-6',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      messageId: 'msg-1',
+      telemetry,
+      decisionEvents: [],
+      guardVerdicts: {},
+    });
+  }
+
+  it('the mapper carries blocks and assembly onto the record', () => {
+    const record = recordWithProvenance();
+    assert.deepEqual(record.prompt?.blocks, BLOCKS);
+    assert.deepEqual(record.prompt?.assembly, ASSEMBLY);
+  });
+
+  it('a REJECTED orphan is distinguishable from an ABSENT one', () => {
+    // The whole reason dropped blocks stay in the array. `rendered: false` + a drop reason says
+    // "the allowlist caught it"; the key being missing entirely says "it is gone from the DB".
+    // Conflating them would make the fix and the cleanup indistinguishable in the ledger.
+    const record = recordWithProvenance();
+    const orphan = record.prompt?.blocks?.find((b) => b.key === 'guidelines.offers_promotions');
+    assert.ok(orphan, 'the orphan must be RECORDED, not omitted');
+    assert.equal(orphan?.rendered, false);
+    assert.equal(orphan?.drop_reason, 'allowlist');
+  });
+
+  it('both fields reach the `prompt` bind parameter and survive JSON round-trip', () => {
+    // The suite has no DB, so this is the only place a silently-dropped field would show up.
+    const params = insertParams(recordWithProvenance());
+    const prompt = JSON.parse(params[8] as string);
+    assert.deepEqual(prompt.blocks, BLOCKS);
+    assert.deepEqual(prompt.assembly, ASSEMBLY);
+  });
+
+  it('redaction preserves them — they carry no customer text', () => {
+    // Block keys, sha256 hashes, booleans, enums; the only free text is a [A-Z0-9_]+ placeholder
+    // token and a section name / size pair. Stated as a decision in redactLedgerRecord, pinned here.
+    const redacted = redactLedgerRecord(recordWithProvenance());
+    assert.deepEqual(redacted.prompt?.blocks, BLOCKS);
+    assert.deepEqual(redacted.prompt?.assembly, ASSEMBLY);
+  });
+
+  it('the footer/policy booleans survive into the outbox payload', () => {
+    // The RC-25 "6/6 tenants" acceptance is an aggregate over these, so they have to be readable
+    // from the relayed payload, not just the in-process record.
+    const payload = JSON.parse(
+      JSON.stringify(buildLedgerOutboxPayload(recordWithProvenance())),
+    ) as { prompt: { assembly: typeof ASSEMBLY } };
+    assert.equal(payload.prompt.assembly.platform_policy_present, true);
+    assert.equal(payload.prompt.assembly.platform_policy_source, 'code_rulebook');
+  });
+
+  it('pre-P3-5 telemetry yields present-and-null, not absent', () => {
+    // A replayed old job must read as "we looked and there was nothing", never as a reply that
+    // dropped every block.
+    const record = buildLedgerRecord({
+      tenantId: 'tenant-1',
+      conversationId: 'conv-1',
+      correlationId: 'c',
+      replySlot: 'main',
+      decisionKind: 'reply',
+      messageId: 'm',
+      telemetry: fcd0af7eTelemetry(),
+      decisionEvents: [],
+      guardVerdicts: {},
+    });
+    assert.equal(record.prompt?.blocks, null);
+    assert.equal(record.prompt?.assembly, null);
+    const prompt = JSON.parse(insertParams(record)[8] as string);
+    assert.ok('blocks' in prompt && prompt.blocks === null);
+    assert.ok('assembly' in prompt && prompt.assembly === null);
+  });
+});

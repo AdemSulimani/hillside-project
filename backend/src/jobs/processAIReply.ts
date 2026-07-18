@@ -123,6 +123,7 @@ import { extractCustomerNameFromMessages } from '../services/orderCustomerDetail
 import {
   buildOrderConfirmationDeliveryLine,
   ensureOrderConfirmationDeliveryAndFollowUp,
+  stripModelDeliveryEtaMentions,
 } from '../services/orderConfirmationFormatting';
 import { sanitizeOutboundMessageText } from '../services/outboundMessageFormatting';
 import { isProductRecommendationOrComparisonQuestion } from '../services/productDescriptionPromptService';
@@ -143,6 +144,7 @@ import {
 import {
   getFullCatalogNameIndex,
   getFullCatalogPriceSet,
+  replyNamesActiveCatalogProduct,
   verifySuspectedNamesAgainstCatalog,
 } from '../services/catalogGuardReferenceService';
 import {
@@ -677,6 +679,19 @@ const UNCERTAIN_ANSWER_FALLBACK_ENABLED =
  */
 const GUARD_VALIDATE_AGAINST_FULL_CATALOG =
   (process.env.GUARD_VALIDATE_AGAINST_FULL_CATALOG ?? 'false').trim().toLowerCase() === 'true';
+
+/**
+ * P3-5 (RC-25, rules R6/R13): extend the SAME full-catalog widening to the uncertain-answer
+ * guard's alternatives carve-out, which `GUARD_VALIDATE_AGAINST_FULL_CATALOG` left behind on
+ * this-turn's retrieval window. Flag-off is the legacy `matchedProducts.length > 0` byte-for-byte.
+ */
+const UNCERTAIN_GUARD_CATALOG_ALTERNATIVES = knobBool('UNCERTAIN_GUARD_CATALOG_ALTERNATIVES');
+
+/**
+ * P3-5 (RC-26, rule R10): run the model-authored-ETA strip on ordinary replies too, not only on
+ * classifier-detected order confirmations. Strip-only — never injects a delivery line.
+ */
+const ETA_STRIP_ALL_REPLIES = knobBool('ETA_STRIP_ALL_REPLIES');
 
 /**
  * P0-3 (RC-01): when ON, the product-information gap gate escalates only on
@@ -4090,6 +4105,26 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         deliveryLine,
         orderFollowUp,
       );
+    } else if (ETA_STRIP_ALL_REPLIES) {
+      // P3-5 (RC-26, rule R10): "Do not promise delivery times unless confirmed."
+      //
+      // The strip and the inject are two different jobs, and only the inject belongs to order
+      // confirmations. Before this, BOTH ran only on classifier-detected confirmation turns — so a
+      // model-authored "arrives in 2 days" in an ordinary product or availability reply was sent
+      // untouched, which is the enforcement gap the audit recorded ("covers only
+      // classifier-detected order-confirmation replies"). A wrong ETA is a promise the business
+      // did not make, and it is no less wrong for arriving on a non-confirmation turn.
+      //
+      // Deliberately STRIP-ONLY here: `deliveryLine` is passed so the tenant's configured ETA is
+      // recognised and preserved, but nothing is injected. Volunteering a delivery time on a turn
+      // the customer never asked about would be the opposite error — and R10 says "unless
+      // confirmed", not "always state it".
+      const tenantForEta = await findTenantById(tenantId);
+      const configuredEta = tenantForEta?.delivery_time ?? null;
+      finalReplyText = stripModelDeliveryEtaMentions(
+        finalReplyText,
+        configuredEta ? buildOrderConfirmationDeliveryLine(configuredEta, replyLocale) : null,
+      );
     }
   }
   if (inboundText) {
@@ -4366,6 +4401,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   let groundingGateReason = 'hallucinated_product_name';
   let groundingGateFailClosed = false;
   let groundingGateDetails: Record<string, unknown> | null = null;
+  /**
+   * P3-5 (R6/R13): declared `name` facts the consolidated gate did NOT flag as ungrounded — i.e.
+   * products the reply named that the gate confirmed against the active catalog. Read far below by
+   * the uncertain-answer carve-out. Stays 0 when the gate is off or ineligible, in which case that
+   * carve-out falls back to the deterministic name-index scan.
+   */
+  let groundedDeclaredNameCount = 0;
 
   if (GROUNDING_GATE_CONSOLIDATED) {
     const gateEligible = !knowledgeGapEscalated && !isOosCannedReply && !isOrderConfirmationReply;
@@ -4398,6 +4440,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       // exists to prevent. Recording the declared count separates the two.
       const declaredAttributeCount = (factsUsed ?? []).filter((f) => f.type === 'attribute').length;
       const observedAttributes = verdict.ungroundedAttributes ?? verdict.shadowAttributes ?? [];
+      // P3-5 (R6/R13): declared names minus the ones the gate could not ground = names this reply
+      // stated that ARE real active products. The gate has already done the catalog resolution, so
+      // reusing its result costs nothing and is more precise than a text scan over the prose.
+      groundedDeclaredNameCount = Math.max(
+        0,
+        (factsUsed ?? []).filter((f) => f.type === 'name').length - verdict.ungroundedNames.length,
+      );
       recordDecision({
         classifier: 'grounding_gate',
         raw_score: verdict.ungroundedPrices.length + verdict.ungroundedNames.length,
@@ -4680,19 +4729,73 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   // (mirrors the price/name hallucination guards) so the alert can link to it.
   let uncertainAnswerEscalated = false;
   let uncertainAnswerDetails: Record<string, unknown> | null = null;
+
+  // P3-5 (RC-25/RC-26, rules R6/R13): the carve-out's reference set.
+  //
+  // THE DEFECT. `hasMatchingProductsInContext` was `matchedProducts.length > 0` — THIS TURN's
+  // retrieval window. The guard's own doc comment states the intent as "the catalog context
+  // contained matching alternatives the AI could offer", and the two diverge exactly when
+  // retrieval misses. R6 ("if a product is not available, clearly say so") and R13 ("say it is
+  // unavailable and suggest 2-3 alternatives") MANDATE that reply — and the guard replaced it
+  // with a holding message and paused the conversation, a pause with no automatic exit. The
+  // prompt told the model to do something the pipeline then punished it for.
+  //
+  // THE FIX is the same widening P0-2 gave the price and name guards: also accept "the reply
+  // named a product that exists in the FULL ACTIVE CATALOG". Note what this is NOT — it is not
+  // "the tenant has any active product", which would make the predicate true for every stocked
+  // tenant and silently delete the negative-availability lane rather than fix it.
+  //
+  // Two sources, most precise first:
+  //   1. the consolidated gate already RESOLVED the model's declared `name` facts against the
+  //      active catalog, so a declared name it did not flag is a confirmed real product;
+  //   2. otherwise a deterministic word-boundary scan over the cached active-name index.
+  const uncertainGuardAlreadyEscalated =
+    knowledgeGapEscalated ||
+    priceHallucinationEscalated ||
+    productNameHallucinationEscalated ||
+    groundingGateEscalated;
+
+  // Computed ONLY when the guard can actually read it. `shouldEscalateUncertainAnswer` consults
+  // `hasMatchingProductsInContext` on exactly one branch — negative-availability, after four
+  // earlier short-circuits — so evaluating it unconditionally would put a catalog fetch on every
+  // normal reply for a value thrown away. The retrieval window being empty is also a precondition:
+  // a populated window already suppresses, and the catalog scan could only agree with it.
+  let replyNamedRealProduct = false;
+  if (
+    UNCERTAIN_GUARD_CATALOG_ALTERNATIVES &&
+    matchedProducts.length === 0 &&
+    containsNegativeAvailabilityPhrase &&
+    !uncertainGuardAlreadyEscalated &&
+    !isOosCannedReply &&
+    !isOrderConfirmationReply
+  ) {
+    if (groundedDeclaredNameCount > 0) {
+      replyNamedRealProduct = true;
+    } else {
+      try {
+        const nameIndex = await getFullCatalogNameIndex(tenantId);
+        replyNamedRealProduct = replyNamesActiveCatalogProduct(finalReplyText, nameIndex);
+      } catch (err) {
+        // Reference fetch failure must never WIDEN escalation beyond the legacy behaviour: fall
+        // back to false, which is exactly what the pre-P3-5 code passed in this situation.
+        console.warn('[UNCERTAIN ANSWER GUARD] Catalog name index unavailable — using legacy scope', {
+          tenantId,
+          conversationId,
+          err,
+        });
+      }
+    }
+  }
+
   if (
     shouldEscalateUncertainAnswer({
       replyText: finalReplyText,
       enabled: UNCERTAIN_ANSWER_FALLBACK_ENABLED,
-      alreadyEscalated:
-        knowledgeGapEscalated ||
-        priceHallucinationEscalated ||
-        productNameHallucinationEscalated ||
-        groundingGateEscalated,
+      alreadyEscalated: uncertainGuardAlreadyEscalated,
       isOosCannedReply,
       isOrderFlowReply: isOrderConfirmationReply,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
-      hasMatchingProductsInContext: matchedProducts.length > 0,
+      hasMatchingProductsInContext: matchedProducts.length > 0 || replyNamedRealProduct,
     })
   ) {
     logger.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {

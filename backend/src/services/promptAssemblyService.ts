@@ -1,3 +1,4 @@
+import { knobBool, knobNumber } from '../config/knobs';
 import type { TenantPromptBlockRow } from '../db/models/promptBlock';
 
 /** Mirrors `ReplyLocale` in aiService (kept separate to avoid circular imports). */
@@ -27,8 +28,7 @@ const VISION_BLOCK_KEY = 'guidelines.vision_product_images';
  *     point shared by both callers (the production reply path and the admin preview).
  * Fixing the SQL remains worth doing; it is deliberately deferred, not dropped.
  */
-export const PROMPT_ALLOWLIST_BUDGET =
-  (process.env.PROMPT_ALLOWLIST_BUDGET ?? 'false').trim().toLowerCase() === 'true';
+export const PROMPT_ALLOWLIST_BUDGET = knobBool('PROMPT_ALLOWLIST_BUDGET');
 
 /**
  * Chars, not tokens, throughout: there is no tokenizer in this codebase and `estimateTokens` is
@@ -50,16 +50,22 @@ export const PROMPT_ALLOWLIST_BUDGET =
  * measured live prompts at 26–33K chars, so 34K reports genuine outliers rather than the status
  * quo; with a realistic 8K catalog and Step 3's ~2.2K footer the assembled prompt lands ~30.9K
  * (pinned by the interaction test).
+ *
+ * P3-5 (step 0): both used to be read by a local `readCharBudget(name, fallback)` doing
+ * `process.env[name]` — an indirection that ACCIDENTALLY DEFEATED the manifest's own guard.
+ * `knobs.test.ts`'s "no numeric knob is also parsed inline" check greps for the literal
+ * `process.env.KEY` / `process.env['KEY']`, which a variable index never matches. The two parsers
+ * then disagreed for real: `readCharBudget` accepted any positive integer, so
+ * `PROMPT_GUIDELINES_MAX_CHARS=5` truncated every non-protected block at runtime while
+ * `config:check` reported it out-of-band — exactly the two-sources-of-truth defect P2-7 removed.
+ * They now read through `knobNumber`, so the band in the manifest is the band in force.
+ *
+ * Still module consts, not per-call reads: they are declared `frozen` (a mid-process change to a
+ * prompt budget would make two replies in one conversation incomparable), and the assembly tests
+ * import them as values.
  */
-function readCharBudget(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-export const PROMPT_GUIDELINES_MAX_CHARS = readCharBudget('PROMPT_GUIDELINES_MAX_CHARS', 20000);
-export const PROMPT_ASSEMBLY_MAX_CHARS = readCharBudget('PROMPT_ASSEMBLY_MAX_CHARS', 34000);
+export const PROMPT_GUIDELINES_MAX_CHARS = knobNumber('PROMPT_GUIDELINES_MAX_CHARS');
+export const PROMPT_ASSEMBLY_MAX_CHARS = knobNumber('PROMPT_ASSEMBLY_MAX_CHARS');
 
 /**
  * Every guideline block key ever defined in a migration — the allowlist's source of truth.
@@ -199,7 +205,41 @@ export interface GuidelineAssemblyOptions {
   onUnknownToken?: (token: string) => void;
   /** P2-5: called for each block the allowlist or the budget removed. */
   onDropped?: (blockKey: string, reason: 'allowlist' | 'budget') => void;
+  /**
+   * P3-5: called ONCE for every block this assembly considered — rendered or not — with the
+   * content as STORED. This is the ledger's block-version provenance.
+   *
+   * A callback rather than a changed return type on purpose: `assembleGuidelinesFromBlocks`
+   * returns a `string` to two callers (the reply path and the admin preview) and to
+   * `conciseResponseRules.test.ts`; widening the return would churn all of them for information
+   * only one caller wants. Mirrors `onDropped` / `onUnknownToken` above.
+   *
+   * `content` is the STORED template, pre-placeholder-expansion — see
+   * `promptBlockContentHash`'s contract for why hashing the expanded text would make every
+   * reply report an unknown version.
+   */
+  onBlock?: (block: {
+    blockKey: string;
+    content: string;
+    rendered: boolean;
+    dropReason?: PromptBlockDropReason;
+  }) => void;
 }
+
+/**
+ * Why a block considered by the assembly did not reach the prompt.
+ *
+ * `empty` is its own reason rather than being folded into one of the others: a block whose content
+ * expands to nothing is a CONFIGURATION mistake (someone blanked it, or every placeholder in it
+ * resolved away), and it is invisible in the assembled prompt by definition. Recording it as
+ * `disabled` would misattribute it to a deliberate toggle.
+ */
+export type PromptBlockDropReason =
+  | 'allowlist'
+  | 'budget'
+  | 'disabled'
+  | 'vision_absent'
+  | 'empty';
 
 export function assembleGuidelinesFromBlocks(
   rows: TenantPromptBlockRow[],
@@ -215,23 +255,68 @@ export function assembleGuidelinesFromBlocks(
     return a.block_key.localeCompare(b.block_key);
   });
 
+  // P3-5: every block this assembly LOOKED at, with the content as stored. Emitted through
+  // `onBlock` at the end rather than inline, because a block kept by the loop can still be dropped
+  // by the budget below — reporting it as rendered mid-loop would be a lie the ledger then records.
+  const considered: Array<{
+    blockKey: string;
+    content: string;
+    rendered: boolean;
+    dropReason?: PromptBlockDropReason;
+  }> = [];
+  const reject = (row: TenantPromptBlockRow, dropReason: PromptBlockDropReason): void => {
+    considered.push({ blockKey: row.block_key, content: row.content, rendered: false, dropReason });
+  };
+
   const kept: Array<{ key: string; text: string }> = [];
   for (const row of sorted) {
-    if (!row.enabled) continue;
-    if (row.block_key === VISION_BLOCK_KEY && !opts.hasImages) continue;
+    if (!row.enabled) {
+      reject(row, 'disabled');
+      continue;
+    }
+    if (row.block_key === VISION_BLOCK_KEY && !opts.hasImages) {
+      reject(row, 'vision_absent');
+      continue;
+    }
     // P2-5 (RC-26): reject blocks with no migration-defined parent — the orphan
     // `guidelines.offers_promotions` is exactly this.
     if (applyAllowlist && !isAllowedBlockKey(row.block_key)) {
       opts.onDropped?.(row.block_key, 'allowlist');
+      reject(row, 'allowlist');
       continue;
     }
     const expanded = expandPromptPlaceholders(row.content, map, opts.onUnknownToken).trim();
-    if (expanded) kept.push({ key: row.block_key, text: expanded });
+    if (expanded) {
+      kept.push({ key: row.block_key, text: expanded });
+      considered.push({ blockKey: row.block_key, content: row.content, rendered: true });
+    } else {
+      reject(row, 'empty');
+    }
   }
 
-  if (!applyAllowlist) return kept.map((k) => k.text).join('\n\n');
+  const emit = (budgetDropped?: ReadonlySet<string>): void => {
+    if (!opts.onBlock) return;
+    for (const block of considered) {
+      if (block.rendered && budgetDropped?.has(block.blockKey)) {
+        opts.onBlock({ ...block, rendered: false, dropReason: 'budget' });
+      } else {
+        opts.onBlock(block);
+      }
+    }
+  };
 
-  return applyGuidelineBudget(kept, maxChars, opts.onDropped);
+  if (!applyAllowlist) {
+    emit();
+    return kept.map((k) => k.text).join('\n\n');
+  }
+
+  const budgetDropped = new Set<string>();
+  const assembled = applyGuidelineBudget(kept, maxChars, (blockKey, reason) => {
+    if (reason === 'budget') budgetDropped.add(blockKey);
+    opts.onDropped?.(blockKey, reason);
+  });
+  emit(budgetDropped);
+  return assembled;
 }
 
 const JOINER = '\n\n';

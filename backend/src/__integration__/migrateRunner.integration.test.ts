@@ -255,30 +255,77 @@ describe('runMigrations — orphan-row tolerance (pre-reconciliation shape)', ()
 });
 
 describe('runMigrations + runDown — up/down/up round-trip', () => {
+  /**
+   * Round-tripped on a SYNTHETIC tree, not the real migration list.
+   *
+   * It used to enumerate the real tip ("revert the top two — 083 provenance + 082 blobs"), which
+   * silently encoded an assumption nobody had guaranteed: that the newest migration is always
+   * structural and reversible. `runDown` reverts from the top of the stack and refuses the whole
+   * range if ANY file in it lacks a paired down file — so the first DATA migration to land at the
+   * tip breaks this test, and per the house rule (data/prompt migrations get no down file, their
+   * inverse is the P3-5 registry) that was always going to happen. 085 is simply the one that did
+   * it; any of the 19 prompt-content migrations would have.
+   *
+   * Up/down/up convergence is a property of the RUNNER, so it belongs on a tree this test
+   * controls. The real tree is still covered — by apply + `assertMonotonicApplied` + checksum
+   * drift + orphan tolerance above — just not by a reversibility claim it was never entitled to
+   * make.
+   */
   it('reverting the reversible tip and re-applying yields an identical schema', async () => {
+    const dir = fixtureDir({
+      '001_base.sql': 'CREATE TABLE IF NOT EXISTS rt_base (id int);',
+      '002_add_table.sql': 'CREATE TABLE IF NOT EXISTS rt_extra (id int);',
+      '002_add_table.down.sql': 'DROP TABLE IF EXISTS rt_extra;',
+      '003_add_column.sql': 'ALTER TABLE rt_base ADD COLUMN IF NOT EXISTS note text;',
+      '003_add_column.down.sql': 'ALTER TABLE rt_base DROP COLUMN IF EXISTS note;',
+    });
     const { pool, name } = await freshDb();
     try {
-      await runMigrations({ pool, dir: MIGRATIONS_DIR, strict: true });
+      await runMigrations({ pool, dir, strict: true });
       const before = await schemaSnapshot(pool);
 
-      // Revert the top two (083 provenance columns + 082 ai_prompt_blobs), both reversible.
-      const reverted = await runDown({ pool, dir: MIGRATIONS_DIR, steps: 2 });
+      const reverted = await runDown({ pool, dir, steps: 2 });
       assert.equal(reverted, 2);
-      // The provenance columns and the table are gone.
+      // The added column and the added table are gone; the base table is untouched.
       const gone = await pool.query(`
         SELECT
           (SELECT count(*) FROM information_schema.columns
-            WHERE table_name='_migrations' AND column_name='applied_seq') AS seq_cols,
+            WHERE table_name='rt_base' AND column_name='note') AS added_col,
           (SELECT count(*) FROM information_schema.tables
-            WHERE table_schema='public' AND table_name='ai_prompt_blobs') AS blob_tbl
+            WHERE table_schema='public' AND table_name='rt_extra') AS added_tbl,
+          (SELECT count(*) FROM information_schema.tables
+            WHERE table_schema='public' AND table_name='rt_base') AS base_tbl
       `);
-      assert.equal(Number(gone.rows[0].seq_cols), 0);
-      assert.equal(Number(gone.rows[0].blob_tbl), 0);
+      assert.equal(Number(gone.rows[0].added_col), 0);
+      assert.equal(Number(gone.rows[0].added_tbl), 0);
+      assert.equal(Number(gone.rows[0].base_tbl), 1);
 
       // Re-apply → schema identical to before the round-trip.
-      await runMigrations({ pool, dir: MIGRATIONS_DIR, strict: true });
+      await runMigrations({ pool, dir, strict: true });
       const after2 = await schemaSnapshot(pool);
       assert.equal(after2, before, 'schema identical after up/down/up');
+    } finally {
+      await dropDb(pool, name);
+    }
+  });
+
+  it('a data migration at the tip blocks reverting everything beneath it', async () => {
+    // The behaviour that moved the test above onto a synthetic tree, asserted directly so it is a
+    // documented property rather than a surprise. `runDown` refuses the whole RANGE, not just the
+    // unpaired file — so one irreversible tip makes the reversible migrations under it
+    // unreachable. This is why a data/prompt migration must never be assumed round-trippable, and
+    // why the real tree is verified by apply + ledger assertions instead.
+    const dir = fixtureDir({
+      '001_structural.sql': 'CREATE TABLE IF NOT EXISTS rt_s (id int);',
+      '001_structural.down.sql': 'DROP TABLE IF EXISTS rt_s;',
+      '002_data.sql': "INSERT INTO rt_s (id) VALUES (1) ON CONFLICT DO NOTHING;",
+    });
+    const { pool, name } = await freshDb();
+    try {
+      await runMigrations({ pool, dir, strict: true });
+      // Even steps:2 — which would reach the reversible 001 — is refused because 002 is in range.
+      await assert.rejects(() => runDown({ pool, dir, steps: 2 }), /no paired down file/);
+      await assert.rejects(() => runDown({ pool, dir, steps: 1 }), /no paired down file/);
     } finally {
       await dropDb(pool, name);
     }
