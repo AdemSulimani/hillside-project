@@ -20,6 +20,7 @@ import {
 } from '../db/models/conversation';
 import {
   decideOrderStage,
+  deriveEffectiveOrderStage,
   detectNewOrderSignalLexical,
   detectOrderConsentLexical,
   normalizeStage,
@@ -131,6 +132,7 @@ import {
 } from '../services/catalogGuardReferenceService';
 import {
   evaluateConsolidatedGrounding,
+  GenerationContractError,
   type GroundingGateDeps,
 } from '../services/groundingGate';
 import { detectCrossMessagePriceInconsistency } from '../services/conversationFactConsistencyGuard';
@@ -156,6 +158,7 @@ import {
   SensitivePathEscalatedError,
 } from '../services/sensitivePathFailClosed';
 import {
+  ProviderUnavailableError,
   rearmTurnDeadline,
   runWithTurnResilience,
   shouldDegradeTurn,
@@ -228,22 +231,6 @@ function normalizeEscalationMessage(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
-}
-
-/**
- * P2-2: the order_stage the FSM should evaluate this turn. Trust the persisted column when it has
- * been set; for a legacy row whose column is still NULL, derive it deterministically from history
- * (the same signals the legacy gate uses) so the decision is independent of the lazy-seed timing.
- */
-function deriveEffectiveOrderStage(
-  persisted: string | null | undefined,
-  dataConfirmationSent: boolean,
-  intent: { product_name: string | null; is_ready_to_order: boolean },
-): OrderStage {
-  if (persisted != null) return normalizeStage(persisted);
-  if (dataConfirmationSent) return 'awaiting_confirmation';
-  if (intent.product_name != null || intent.is_ready_to_order === true) return 'collecting';
-  return 'browsing';
 }
 
 function extractPhoneNumberCandidate(text: string): string | null {
@@ -1470,7 +1457,20 @@ end
 return 0
 `;
 
-export async function processAIReply(data: AIReplyJobData): Promise<void> {
+/**
+ * P2-6 (F1): BullMQ attempt position, threaded from the worker so the final attempt of a
+ * provider-caused failure can resolve to the degradation floor instead of dead-lettering into
+ * customer silence. Absent (direct calls, tests) → treated as final: when in doubt, the customer
+ * gets the holding message rather than nothing.
+ */
+export interface AIReplyAttemptInfo {
+  /** `job.attemptsMade` as seen inside the processor (BullMQ v5: includes the current attempt). */
+  made: number;
+  /** `job.opts.attempts` — the configured maximum. */
+  total: number;
+}
+
+export async function processAIReply(data: AIReplyJobData, attempt?: AIReplyAttemptInfo): Promise<void> {
   // P1-5 (C-108): every OpenAI call this job makes — classifiers, embeddings, and the main
   // reply — is recorded (model + usage + USD cost, no text) into an AsyncLocalStorage context
   // the ledger writer folds into `usage.calls`, so per-reply COGS covers all ~18–25 calls,
@@ -1503,13 +1503,13 @@ export async function processAIReply(data: AIReplyJobData): Promise<void> {
       },
       () =>
         runWithReceiptSnapshot(data.receiptSnapshot, () =>
-          runWithTurnResilience(OPENAI_TURN_DEADLINE_MS, () => processAIReplyInner(data)),
+          runWithTurnResilience(OPENAI_TURN_DEADLINE_MS, () => processAIReplyInner(data, attempt)),
         ),
     ),
   );
 }
 
-async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
+async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemptInfo): Promise<void> {
   const { tenantId, channelId, conversationId, traceId } = data;
   logger.info('[ai.reply] processAIReply start', { traceId, tenantId, conversationId });
 
@@ -1637,6 +1637,17 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
       .eval(CONVERSATION_LOCK_RELEASE_SCRIPT, 1, conversationLockKey, conversationLockToken)
       .catch(() => undefined);
   };
+
+  // P2-6 (F1): the degradation floor is defined deep inside the try (it closes over the loaded
+  // conversation/channel/history), so the outer catch below can only reach it through this hoisted
+  // reference — which doubles as the "prerequisites are loaded" guard: still null ⇒ the throw
+  // happened before the floor could safely run.
+  let degradeFloorFn: (() => Promise<boolean>) | null = null;
+  // Flipped to false at the send transition: a throw after that point may have a reply on the
+  // wire, and stacking a holding message on top of (or instead of) a delivered reply is worse
+  // than the retry/DLQ path.
+  let preSendPhase = true;
+  const isFinalAttempt = attempt == null || attempt.made >= attempt.total;
 
   try {
 
@@ -2088,9 +2099,11 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
    * then swallowed it into a confident-looking fail-open default. A reply built on that is a reply
    * whose safety guards silently did not run, so we do not send it.
    *
-   * Shape deliberately mirrors `escalateSensitivePathOnDetectorError` above: pause + human_replied
-   * =false + alert committed in ONE transaction FIRST (so the guarantee holds even if the send
-   * fails), then a best-effort holding send that can never propagate.
+   * Structure (NOT effects) mirrors `escalateSensitivePathOnDetectorError` above: the durable
+   * part is committed in ONE transaction FIRST (so it holds even if the send fails), then a
+   * best-effort holding send that can never propagate. The committed part here is the ALERT
+   * ONLY — deliberately NO pause and NO human_replied write (see the block comment inside the
+   * transaction below; the tests in providerDegradation.test.ts pin exactly this).
    *
    * NOTE the `if (canned) … else …` pair rather than `stageCannedReply` alone: that helper returns
    * null whenever AI_REPLY_STAGE_BEFORE_SEND is off — its default — so relying on it by itself
@@ -2186,8 +2199,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     }
     client.release();
 
-    // Committed above ⇒ the floor's guarantee (paused, human notified, human_replied=false) is
-    // already met. Everything below is BEST-EFFORT and must never propagate.
+    // Committed above ⇒ the floor's durable guarantee — the retryable provider_unavailable alert
+    // (and nothing else: no pause, no human_replied write) — is already met. Everything below is
+    // BEST-EFFORT and must never propagate.
     try {
       if (!holdingSendAllowed) {
         console.info('[ai.reply] degraded-turn escalation skipping holding send', {
@@ -2266,6 +2280,7 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     }
     return true;
   };
+  degradeFloorFn = degradeToHoldingAndEscalate;
 
   // P0-4 (RC-19): wraps a SENSITIVE detector call so a transport/parse throw fails CLOSED.
   // Flag off → rethrow to the umbrella (legacy warn + continue → normal reply). Flag on →
@@ -4721,6 +4736,10 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
   // pre-send spend starve it (a starved order detection forfeits a commissionable order).
   rearmTurnDeadline(OPENAI_TURN_DEADLINE_MS);
 
+  // P2-6 (F1): past this point a throw may race an in-flight send — the outer catch must not
+  // substitute the holding floor for a reply that might already be on the wire.
+  preSendPhase = false;
+
   let sendResult:
     | Awaited<ReturnType<typeof sendMessage>>
     | null = null;
@@ -4867,7 +4886,12 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
             client,
           );
           await setConversationAiPaused(conversationId, tenantId, true, client, groundingGateReason);
-          await setConversationHumanReplied(conversationId, tenantId, false, client);
+          // Deliberately NO human_replied write here (unlike the uncertain-answer block above):
+          // it is the sticky "any human reply ever" flag and the sole human-participation input
+          // to use-case billability. Forcing it false on a gate escalation (incl. a transient
+          // grounding_check_unavailable) would re-qualify a human-touched conversation for the
+          // use-case fee once the alert is resolved with resume_ai. Pinned by
+          // replyPathSourceInvariants.test.ts.
         }
         if (qualityFailing && flagReason) {
           flipQualityAlert = await createAIAlert(
@@ -5351,7 +5375,9 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
         client,
       );
       await setConversationAiPaused(conversationId, tenantId, true, client, groundingGateReason);
-      await setConversationHumanReplied(conversationId, tenantId, false, client);
+      // Deliberately NO human_replied write — see the staged-flip twin above: wiping the sticky
+      // billing flag on a gate escalation re-qualifies human-touched conversations for use-case
+      // billing. Pinned by replyPathSourceInvariants.test.ts.
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -6074,6 +6100,50 @@ async function processAIReplyInner(data: AIReplyJobData): Promise<void> {
     await redisConnection.set(orderDetectionDoneKey, '1', 'EX', 6 * 3600).catch(() => undefined);
   }
 
+  } catch (err) {
+    // P2-6 (F1): the pre-send gate floors only turns whose generation RETURNED after a recorded
+    // provider failure — a hard throw (the main completion itself, or any reply-path call after
+    // the fail-open catches) used to propagate past it, so a sustained outage exhausted BullMQ's
+    // 3 attempts into DLQ + ai_reply_undelivered and the customer got SILENCE, never the
+    // templated holding reply. Route exactly the LAST attempt of a provider-caused, pre-send
+    // failure to the same floor:
+    //  - earlier attempts still rethrow — a transient blip retries into a REAL reply, which is
+    //    strictly better than holding copy;
+    //  - non-provider errors (DB faults, code bugs) always rethrow — masking them behind a
+    //    holding message would hide real defects from the DLQ;
+    //  - SensitivePathEscalatedError is already a safe terminal outcome (alert + pause
+    //    committed) — flooring it would stack a second alert on a paused conversation;
+    //  - post-send throws (preSendPhase=false) rethrow — a reply may already be on the wire.
+    const providerCaused =
+      err instanceof ProviderUnavailableError ||
+      err instanceof GenerationContractError ||
+      turnProviderFailures().length > 0;
+    if (
+      gracefulDegradeMode() &&
+      isFinalAttempt &&
+      preSendPhase &&
+      providerCaused &&
+      !(err instanceof SensitivePathEscalatedError) &&
+      degradeFloorFn != null
+    ) {
+      logger.error(
+        '[ai.reply] final attempt failed on a provider fault pre-send — degrading to the floor instead of dead-lettering',
+        err,
+        { tenantId, conversationId, attempt: attempt ?? null },
+      );
+      try {
+        await degradeFloorFn();
+        return;
+      } catch (floorErr) {
+        // The floor itself failed (e.g. the alert txn) — surface the ORIGINAL provider fault to
+        // the failure classifier; the floor error is secondary.
+        logger.error('[ai.reply] degradation floor failed on the final attempt', floorErr, {
+          tenantId,
+          conversationId,
+        });
+      }
+    }
+    throw err;
   } finally {
     // Always release the per-conversation lock and the per-tenant concurrency
     // slot, even if the job threw or returned early at any point in the try

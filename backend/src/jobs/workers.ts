@@ -94,7 +94,13 @@ export const aiWorker = new Worker<AIReplyJobData | EvaluateUseCaseJobData>(
       await processEvaluateConversationUseCase(job.data as EvaluateUseCaseJobData);
       return;
     }
-    await processAIReply(job.data as AIReplyJobData);
+    // P2-6 (F1): attempt position lets the final attempt of a provider-caused failure resolve
+    // to the degradation floor instead of dead-lettering into customer silence. BullMQ v5:
+    // inside the processor `attemptsMade` already includes the current attempt.
+    await processAIReply(job.data as AIReplyJobData, {
+      made: job.attemptsMade ?? 1,
+      total: job.opts?.attempts ?? 1,
+    });
   },
   {
     connection: createWorkerConnection(),
