@@ -196,6 +196,17 @@ export const KNOBS: readonly KnobSpec[] = [
   // P2-7 each was duplicated as a literal inside validateEnv's log strings, which is how the
   // validator became a drift source in its own right.
   num('LEDGER_RETENTION_DAYS', 'int', 90, { min: 1, max: 3650 }, 'frozen', 'How long AI decision-ledger rows are retained'),
+  // P2-audit follow-up: four decision knobs that were still bare `parseInt(process.env...)` reads
+  // after P2-7 — the exact inline-parse drift class this manifest exists to kill. Declared here so
+  // they get band validation, boot reporting, example-drift protection and fingerprint coverage.
+  num('LEDGER_RETENTION_INTERVAL_MS', 'int', 3_600_000, { min: 60_000, max: 86_400_000 }, 'frozen',
+    'How often the ledger retention sweep runs (P2-4)'),
+  num('GROUNDING_GATE_STRIP_FLOOR', 'int', 24, { min: 0, max: 2000 }, 'frozen',
+    'Min grounded chars that must survive a targeted strip before the gate escalates the turn (P2-1)'),
+  num('FACTS_CONTRACT_MAX_TOKENS', 'int', 1200, { min: 256, max: 16_000 }, 'frozen',
+    'max_tokens for the facts_used contract completion; truncation is a retryable failure (P2-1)'),
+  num('SUMMARY_SLOT_BACKED_MAX_TAIL_CHARS', 'int', 600, { min: 1, max: 10_000 }, 'frozen',
+    "Char cap on the slot-backed summary's extractive tail (P2-3)"),
   num('PROMPT_GUIDELINES_MAX_CHARS', 'int', 20_000, { min: 1000, max: 200_000 }, 'frozen', 'Char budget for the assembled guideline blocks (P2-5)'),
   num('PROMPT_ASSEMBLY_MAX_CHARS', 'int', 34_000, { min: 1000, max: 400_000 }, 'frozen', 'Char budget above which the assembled prompt is reported (P2-5)'),
   num('OPENAI_MAX_RETRIES', 'int', 3, { min: 0, max: 10 }, 'frozen', 'Retries for every OpenAI call'),

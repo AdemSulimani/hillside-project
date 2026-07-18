@@ -50,6 +50,7 @@ import {
   buildLedgerRecord,
   enqueueLedgerViaOutbox,
   writeLedgerBestEffort,
+  type BuildLedgerRecordInput,
 } from './aiDecisionLedgerWriter';
 import {
   compareSnapshotToLive,
@@ -687,12 +688,9 @@ const GROUNDING_GATE_CONSOLIDATED =
 /**
  * Minimum grounded characters that must survive a targeted strip before the gate escalates the
  * whole turn to a holding message instead. Keeps a reply that is nothing but a fabricated fact
- * from being sent as an empty/degenerate message. Env-overridable.
+ * from being sent as an empty/degenerate message. Read through the P2-7 manifest.
  */
-const GROUNDING_GATE_STRIP_FLOOR = (() => {
-  const n = parseInt(process.env.GROUNDING_GATE_STRIP_FLOOR || '24', 10);
-  return Number.isFinite(n) && n >= 0 ? n : 24;
-})();
+const GROUNDING_GATE_STRIP_FLOOR = knobNumber('GROUNDING_GATE_STRIP_FLOOR');
 
 /**
  * P0-4 (RC-19, RC-22): when ON, the pre-reply sensitive-escalation subsystem fails
@@ -1524,6 +1522,22 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   const ledgerCorrelationId = data.messageExternalId;
 
   /**
+   * P2-4 (F1): every ledger row this job writes — answered turns included, not just gate drops —
+   * carries the receipt-vs-live comparison by default. An answered turn that raced a mid-window
+   * toggle was previously invisible: only drop rows recorded the snapshot, so "processed under
+   * state that had changed since receipt" could never be queried for the turns that were actually
+   * ANSWERED. Null until the gate state is loaded (pre-gate drops keep their explicit payloads —
+   * an explicit `receiptSnapshot` in the input always wins over this default).
+   */
+  let liveGateStateForLedger: (() => Partial<LiveGateState>) | null = null;
+  const answeredReceiptComparison = () =>
+    liveGateStateForLedger
+      ? compareSnapshotToLive(data.receiptSnapshot, liveGateStateForLedger(), Date.now())
+      : null;
+  const buildJobLedgerRecord = (input: BuildLedgerRecordInput) =>
+    buildLedgerRecord({ receiptSnapshot: answeredReceiptComparison() ?? undefined, ...input });
+
+  /**
    * P2-4 Part 2 (RC-06): leave an artifact when this job DROPS a received message.
    *
    * Every gate below is `console.info` + bare `return`, and the file's first ledger write is ~500
@@ -1551,7 +1565,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   ): void => {
     const comparison = compareSnapshotToLive(data.receiptSnapshot, live, Date.now());
     void writeLedgerBestEffort(
-      buildLedgerRecord({
+      buildJobLedgerRecord({
         tenantId,
         conversationId,
         correlationId: ledgerCorrelationId,
@@ -1794,6 +1808,8 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       ? new Date(conversation.human_override_until).toISOString()
       : null,
   });
+  // P2-4 (F1): from here on, every ledger row defaults to the receipt-vs-live comparison.
+  liveGateStateForLedger = liveGateState;
 
   if (conversation.ai_paused) {
     // P0-5 (RC-14) part 3: a rate_limit_exceeded pause auto-expires once the delivered-only
@@ -2474,7 +2490,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           });
         }
         void writeLedgerBestEffort(
-          buildLedgerRecord({
+          buildJobLedgerRecord({
             tenantId,
             conversationId,
             correlationId: ledgerCorrelationId,
@@ -2614,7 +2630,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           });
         }
         void writeLedgerBestEffort(
-          buildLedgerRecord({
+          buildJobLedgerRecord({
             tenantId,
             conversationId,
             correlationId: ledgerCorrelationId,
@@ -2826,7 +2842,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
             `[DELIVERY_ETA_AUTO_REPLY] tenantId: ${tenantId} conversationId: ${conversationId} delivery_time: ${configuredDeliveryTime}`,
           );
           void writeLedgerBestEffort(
-            buildLedgerRecord({
+            buildJobLedgerRecord({
               tenantId,
               conversationId,
               correlationId: ledgerCorrelationId,
@@ -2948,7 +2964,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           });
         }
         void writeLedgerBestEffort(
-          buildLedgerRecord({
+          buildJobLedgerRecord({
             tenantId,
             conversationId,
             correlationId: ledgerCorrelationId,
@@ -3136,7 +3152,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
               conversationId,
             });
             void writeLedgerBestEffort(
-              buildLedgerRecord({
+              buildJobLedgerRecord({
                 tenantId,
                 conversationId,
                 correlationId: ledgerCorrelationId,
@@ -3234,7 +3250,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     // P1-5: a [NO_REPLY] still made a decision — record it so billing-class divergence (a turn the
     // AI chose not to answer) is visible in the ledger, not silent.
     void writeLedgerBestEffort(
-      buildLedgerRecord({
+      buildJobLedgerRecord({
         tenantId,
         conversationId,
         correlationId: ledgerCorrelationId,
@@ -4708,7 +4724,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     // reached on this path, so without this the ledger would only ever show a healthy breaker —
     // exactly the state nobody needs to investigate.
     void writeLedgerBestEffort(
-      buildLedgerRecord({
+      buildJobLedgerRecord({
         tenantId,
         conversationId,
         correlationId: ledgerCorrelationId,
@@ -4816,7 +4832,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       onFlip: async (client, message, sendSucceeded) => {
         await enqueueLedgerViaOutbox(
           client,
-          buildLedgerRecord({
+          buildJobLedgerRecord({
             tenantId,
             conversationId,
             correlationId: ledgerCorrelationId,
@@ -5081,7 +5097,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     // ON CONFLICT (idempotency_key) DO NOTHING, so reusing 'main' would let this suppressed row
     // permanently mask the delivered row a later retry writes.
     void writeLedgerBestEffort(
-      buildLedgerRecord({
+      buildJobLedgerRecord({
         tenantId,
         conversationId,
         correlationId: ledgerCorrelationId,
@@ -5145,7 +5161,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     // P1-5: the legacy path has no flip transaction to hook, so write the ledger row best-effort
     // (direct, redacted, never throws) after the message persists.
     void writeLedgerBestEffort(
-      buildLedgerRecord({
+      buildJobLedgerRecord({
         tenantId,
         conversationId,
         correlationId: ledgerCorrelationId,

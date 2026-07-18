@@ -109,7 +109,7 @@ describe('P2-6 degradation gate', () => {
   });
 
   it('degrades on every cause, including the ones the breaker ignores', async () => {
-    for (const cause of ['provider_error', 'call_timeout', 'turn_starved', 'breaker_open', 'rate_limit'] as const) {
+    for (const cause of ['provider_error', 'call_timeout', 'turn_starved', 'turn_truncated', 'breaker_open', 'rate_limit'] as const) {
       const outcome = await runTurn({
         degradeEnabled: true,
         guards: async () => {

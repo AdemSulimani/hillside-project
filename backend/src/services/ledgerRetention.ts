@@ -24,10 +24,7 @@ import { pruneLedger } from '../db/models/aiDecisionLedger';
 // is — the drift class this item exists to remove.
 const RETENTION_DAYS = knobNumber('LEDGER_RETENTION_DAYS');
 
-const SWEEP_INTERVAL_MS = (() => {
-  const n = parseInt(process.env.LEDGER_RETENTION_INTERVAL_MS ?? '3600000', 10);
-  return Number.isFinite(n) && n > 0 ? n : 3_600_000;
-})();
+const SWEEP_INTERVAL_MS = knobNumber('LEDGER_RETENTION_INTERVAL_MS');
 
 /** Batch size per DELETE. Bounded so a backlog sweep never holds a long transaction. */
 const BATCH_SIZE = 5_000;

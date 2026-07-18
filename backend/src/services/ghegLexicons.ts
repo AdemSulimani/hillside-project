@@ -156,8 +156,10 @@ export const GHEG_POST_PURCHASE_EXTRA_PATTERNS: RegExp[] = [
  * The Gheg forms below are all orthographically impossible in English.
  */
 export const GHEG_ALBANIAN_MARKERS: readonly string[] = [
-  // Copula / auxiliaries. ('kem' dropped — too short to be safe as a bare substring.)
-  'osht', 'asht', 'jom', 'kena',
+  // Copula / auxiliaries. ('kem' dropped — too short to be safe as a bare substring; 'asht'
+  // padded — bare 'asht' sits inside "ashtray"/"washtub", the exact RC-10 class this file's
+  // header warns about.)
+  'osht', ' asht ', 'jom', 'kena',
   // Interrogatives — 'qfar'/'qka'/'qysh' have no English substring collisions (q is never
   // followed by f/k/y in English).
   'qysh', 'qfar', 'qka',
@@ -188,6 +190,8 @@ export const ENGLISH_CONTROL_MESSAGES: readonly string[] = [
   'Do you have sports nutrition?',
   'Is bone broth available?',
   'Can it be shipped on Sunday?',
+  'Is there an ashtray in the set?',
+  'Do you sell a washtub?',
   'I want to order this product',
   'What is the price of this?',
   'Is it in stock?',
@@ -205,7 +209,8 @@ export const ENGLISH_CONTROL_MESSAGES: readonly string[] = [
  *
  * They are deliberately NOT added to the legacy `looksLikeOrderAffirmation`
  * (processAIReply): that function is called on BOTH flag branches and is NOT stage-gated,
- * so a token there would fire on any turn. `ghegLexicons.test.ts` pins it unchanged.
+ * so a token there would fire on any turn. Pinned by `replyPathSourceInvariants.test.ts`
+ * (the legacy list must stay free of the Gheg-progressive/filler forms added here).
  */
 export const GHEG_ORDER_CONSENT_EXTRA_PATTERNS: RegExp[] = [
   // Leading Gheg filler before the affirmation — "Aha okej ...", "E po mire ...".
