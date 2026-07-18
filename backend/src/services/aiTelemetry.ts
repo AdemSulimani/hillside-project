@@ -39,6 +39,37 @@ export interface RetrievalTelemetrySink {
   value?: RetrievalTelemetry;
 }
 
+/** P3-5: one guideline block considered by prompt assembly. */
+export interface PromptBlockProvenance {
+  key: string;
+  /** sha256 of the block content AS STORED (never the placeholder-expanded text). */
+  hash: string;
+  rendered: boolean;
+  /** Present only when `rendered` is false. */
+  drop_reason?: 'allowlist' | 'budget' | 'disabled' | 'vision_absent' | 'empty';
+}
+
+/**
+ * P3-5: the structural assembly outcome.
+ *
+ * The presence booleans are recorded EXPLICITLY rather than inferred from `prompt.preview`: the
+ * preview is capped (12K of a 26-33K prompt) and PII-redacted, so a `LIKE '%PLATFORM POLICY%'`
+ * over it is unreliable by construction. RC-25's acceptance — "the footer renders for 6/6
+ * tenants" — has to be a plain aggregate over these, not a substring search over a truncation.
+ */
+export interface PromptAssemblyProvenance {
+  footer_present: boolean;
+  platform_policy_present: boolean;
+  /** `tenant_override` distinguishes a tenant's own rules from the code-owned rulebook. */
+  platform_policy_source: 'tenant_override' | 'code_rulebook' | 'none';
+  grounding_directive_present: boolean;
+  violations: Array<{ kind: string; detail: string }>;
+  unknown_tokens: string[];
+  /** P3-5 step 4: per-section char accounting; `dropped` is set only under `enforce`. */
+  sections?: Array<{ id: string; chars: number; dropped: boolean }>;
+  over_budget: boolean;
+}
+
 export interface ReplyTelemetry {
   prompt: {
     /** sha256 of the full assembled messages array. */
@@ -53,6 +84,16 @@ export interface ReplyTelemetry {
     tokenEstimate: number;
     /** Size-capped, PII-masked copy of the SYSTEM prompt (the reconstruction target). */
     preview: string;
+    /**
+     * P3-5: the exact block versions this reply's guidelines were assembled from, by content
+     * hash — resolvable through `prompt_block_versions` (migration 084). Dropped blocks stay in
+     * the list with `rendered: false`, which is what distinguishes "the orphan was REJECTED at
+     * render" from "the orphan is gone from the database" — the difference between the fix
+     * working and the cleanup having landed.
+     */
+    blocks?: PromptBlockProvenance[] | null;
+    /** P3-5: the structural outcome of assembly — what rendered, what was violated, what was cut. */
+    assembly?: PromptAssemblyProvenance | null;
   };
   model: {
     requested: string;

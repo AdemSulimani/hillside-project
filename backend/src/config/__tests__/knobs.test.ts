@@ -508,6 +508,60 @@ describe('manifest hygiene', () => {
     );
   });
 
+  it('no numeric manifest knob is read through a DYNAMIC process.env[...] index', () => {
+    // P3-5 (step 0): the check above greps for the LITERAL `process.env.KEY` / `process.env['KEY']`,
+    // so an indirection through a variable slips past it entirely. That is not hypothetical —
+    // promptAssemblyService had
+    //
+    //     function readCharBudget(name: string, fallback: number) { const raw = process.env[name]; ... }
+    //     export const PROMPT_GUIDELINES_MAX_CHARS = readCharBudget('PROMPT_GUIDELINES_MAX_CHARS', 20000);
+    //
+    // which honoured any positive integer while `config:check` reported the same value out-of-band.
+    // A knob whose runtime value and whose validator disagree is worse than an undeclared one,
+    // because the manifest makes it LOOK governed.
+    //
+    // Scoped deliberately: a dynamic read is only an offence when the SAME FILE also names a
+    // declared numeric knob as a string literal. Generic `envInt(name, fallback)` helpers over
+    // UNDECLARED keys (app.ts's RATE_LIMIT_*, migrate.ts's MIGRATE_*) are legitimate and stay green
+    // — the manifest makes no claim about a knob it does not declare.
+    const numeric = KNOBS.filter((k) => k.kind === 'int' || k.kind === 'float');
+    const root = join(__dirname, '..', '..');
+    const skip = new Set(['config', '__tests__', 'node_modules', 'dist']);
+    const offenders: string[] = [];
+    // `process.env[` NOT followed by a quote ⇒ a computed index.
+    const dynamicRead = /process\.env\[\s*[^'"\s\]]/;
+
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (skip.has(entry.name)) continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) { walk(full); continue; }
+        if (!entry.name.endsWith('.ts')) continue;
+
+        const source = readFileSync(full, 'utf8');
+        const code = source
+          .split('\n')
+          .filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*'));
+        if (!code.some((line) => dynamicRead.test(line))) continue;
+
+        for (const spec of numeric) {
+          if (code.some((line) => line.includes(`'${spec.key}'`) || line.includes(`"${spec.key}"`))) {
+            offenders.push(`${spec.key} in ${relative(root, full)}`);
+          }
+        }
+      }
+    };
+    walk(root);
+
+    assert.deepEqual(
+      offenders,
+      [],
+      `these files read process.env through a computed index while naming a declared numeric knob:` +
+        `\n  ${offenders.join('\n  ')}\n` +
+        'Use knobNumber() — a variable index evades the literal-grep check above.',
+    );
+  });
+
   it('a clean env produces no fatal and no warn beyond the recommended secrets', () => {
     const findings = applyMode(detect(baseEnv()), 'strict', false);
     assert.deepEqual(findings.filter((f) => f.severity === 'fatal'), []);

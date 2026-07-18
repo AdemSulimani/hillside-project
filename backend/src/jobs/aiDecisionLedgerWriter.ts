@@ -136,6 +136,13 @@ export function buildLedgerRecord(input: BuildLedgerRecordInput): LedgerRecord {
           char_count: t.prompt.charCount,
           token_estimate: t.prompt.tokenEstimate,
           preview: t.prompt.preview,
+          // P3-5 (RC-26): which block versions produced this reply, and whether the footer /
+          // platform policy / grounding directive actually rendered. `?? null` rather than a
+          // spread so the field is present-and-null on a pre-P3-5 telemetry blob instead of
+          // absent — "we looked and there was nothing" reads differently from "nobody looked",
+          // and a replayed old job must not be mistaken for a reply that dropped every block.
+          blocks: t.prompt.blocks ?? null,
+          assembly: t.prompt.assembly ?? null,
         }
       : null,
     model: t

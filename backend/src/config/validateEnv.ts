@@ -263,6 +263,35 @@ function logPosture(): void {
     );
   }
 
+  // P3-5: prompt versioning & governance.
+  const sectionBudget = eff('PROMPT_SECTION_BUDGET');
+  const blockRegistry = flag('PROMPT_BLOCK_REGISTRY');
+  const selfHealOff = flag('PROMPT_SELF_HEAL_OFF_HOT_PATH');
+  console.info(
+    `[prompt-governance] PROMPT_BLOCK_REGISTRY=${
+      blockRegistry ? 'on (per-reply block versions + assembly outcome in the ledger)' : 'off (no prompt provenance)'
+    }; PROMPT_ASSEMBLY_ALERTS=${
+      flag('PROMPT_ASSEMBLY_ALERTS') ? 'on (orphan/violation raises a deduped alert)' : 'off (console.warn only)'
+    }; PROMPT_SELF_HEAL_OFF_HOT_PATH=${
+      selfHealOff ? 'on (marker-gated; sweep repairs drift)' : 'off (COUNT + force-sync on EVERY reply)'
+    }; PROMPT_SECTION_BUDGET=${sectionBudget}${
+      sectionBudget === 'enforce' ? ` (ceiling ${eff('PROMPT_ASSEMBLY_MAX_CHARS')} chars ENFORCED)` : ''
+    }; UNCERTAIN_GUARD_CATALOG_ALTERNATIVES=${
+      flag('UNCERTAIN_GUARD_CATALOG_ALTERNATIVES')
+        ? 'on (R6/R13 alternatives checked against the full catalog)'
+        : "off (carve-out keys on this turn's retrieval window)"
+    }`,
+  );
+  if (selfHealOff && !blockRegistry) {
+    // Worth a warning rather than a note: the sweep returns immediately when the registry flag is
+    // off, so this combination removes the per-reply repair without enabling its replacement.
+    console.warn(
+      '[prompt-governance] PROMPT_SELF_HEAL_OFF_HOT_PATH is on but PROMPT_BLOCK_REGISTRY is off — ' +
+        'the reconcile sweep no-ops without the registry, so no catalog marker is published and ' +
+        'no drifted tenant is repaired. Enable PROMPT_BLOCK_REGISTRY first.',
+    );
+  }
+
   // P2-6: provider-failure isolation. `OPENAI_TIMEOUT_MS` is PER ATTEMPT, so state the real
   // worst-case a reader would otherwise have to compute from two knobs.
   const degrade = flag('GRACEFUL_DEGRADE_MODE');

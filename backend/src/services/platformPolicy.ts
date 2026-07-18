@@ -39,9 +39,13 @@
 // Type-only import so there is no runtime import cycle back into aiService — the same pattern
 // `cannedReplyText.ts` and `stickyLocale.ts` use.
 import type { ReplyLocale } from './aiService';
+import { knobBool } from '../config/knobs';
 
-export const RESTRICTIONS_FOOTER_ALL_TENANTS =
-  (process.env.RESTRICTIONS_FOOTER_ALL_TENANTS ?? 'false').trim().toLowerCase() === 'true';
+// P3-5 (step 0): read through the manifest rather than the inline idiom. The bool idiom cannot
+// drift on the PARSE (knobs.test.ts says so, and it is right), but it does drift on VISIBILITY —
+// an inline read is absent from the "overridden from default" boot line unless someone remembers
+// to duplicate it, and this flag decides whether the platform rulebook reaches a reply at all.
+export const RESTRICTIONS_FOOTER_ALL_TENANTS = knobBool('RESTRICTIONS_FOOTER_ALL_TENANTS');
 
 /** A single platform rule. `id` is stable across locales so the pair can be asserted complete. */
 export interface PlatformRule {

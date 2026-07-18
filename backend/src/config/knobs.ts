@@ -468,6 +468,106 @@ export const KNOBS: readonly KnobSpec[] = [
   bool('DIALECT_NORMALIZATION', false, 'Unified dialect/diacritic normalization (P2-5)'),
   bool('RESTRICTIONS_FOOTER_ALL_TENANTS', false, 'Render the platform rulebook footer for every tenant (P2-5/RC-26)'),
   bool('PROMPT_ALLOWLIST_BUDGET', false, 'Allowlisted + token-budgeted prompt assembly (P2-5/RC-26)'),
+
+  // --- P3-5 (RC-26/RC-25/RC-17): prompt versioning & governance ------------------------------
+  bool('PROMPT_BLOCK_REGISTRY', false,
+    'Record per-reply prompt-block versions + assembly outcome in the ledger (P3-5, migration 084)', {
+      rationale:
+        'Prompt content is the model\'s entire behavioural surface and had no history: catalog ' +
+        'edits overwrote `default_content` with no record, and 19 prompt-mutating migrations have ' +
+        'no inverse. This stamps the sha256 of every block AS STORED into ledger provenance, ' +
+        'resolvable through prompt_block_versions. Flag-on adds two JSONB sub-objects to the ' +
+        'existing `prompt` column and no schema change; the reply path never reads or writes the ' +
+        'registry, so a hash unknown to it after a reconcile sweep is a real alarm rather than a ' +
+        'race.',
+    }),
+  bool('PROMPT_ASSEMBLY_ALERTS', false,
+    'Raise a deduped ai_alerts row on an orphan block key / required-section violation (P3-5/RC-26)', {
+      rationale:
+        'The allowlist already rejects the orphan, but only into a console.warn — which is how the ' +
+        'orphan survived unnoticed in 6/6 tenants in the first place. Dedup is keyed on ' +
+        '(tenant, kind, detail, catalog marker), NOT a TTL: the condition is structural, so one ' +
+        'alert per catalog epoch is exactly right and it self-clears when the block is fixed.',
+    }),
+  bool('PROMPT_SELF_HEAL_OFF_HOT_PATH', false,
+    'Skip the per-reply locked-block force-sync when the catalog marker is unchanged (P3-5)', {
+      rationale:
+        '`ensureTenantPromptBlocksSeeded` runs a COUNT plus an UPDATE...FROM join before EVERY ' +
+        'generateReply. Flag-on loads first (the COUNT is redundant with rows.length) and consults ' +
+        'a Redis catalog marker, so an unchanged catalog costs one GET and zero queries. A marker ' +
+        'cache MISS counts as up-to-date deliberately — treating it as "needs sync" would ' +
+        'force-sync the whole fleet on every cold start, which is the herd this removes. The ' +
+        'reconcile sweep is what repairs a genuinely stale tenant.',
+    }),
+  num('PROMPT_REGISTRY_RECONCILE_INTERVAL_MS', 'int', 900_000, { min: 60_000, max: 86_400_000 }, 'frozen',
+    'Cadence of the prompt-registry reconcile sweep (P3-5)', {
+      rationale:
+        'The sweep registers unregistered content, verifies stored hashes against a Node ' +
+        'recomputation, and force-syncs drifted tenants. 15 min bounds how long a stale tenant ' +
+        'waits once the per-reply force-sync is off, while staying far below any prompt-edit ' +
+        'cadence a human produces.',
+    }),
+  {
+    // Enum, not a bool: `shadow` is load-bearing. The item's own migration path says to measure the
+    // prompt-size distribution from the ledger BEFORE cutting anything, and a bool cannot express
+    // "compute what would drop, record it, change nothing" without a second flag. Mirrors the
+    // proven GROUNDING_GATE_ATTRIBUTE_FACTS / ORDER_STAGE_MACHINE / QUALITY_EVAL_MODE shape.
+    key: 'PROMPT_SECTION_BUDGET',
+    kind: 'enum',
+    values: ['off', 'shadow', 'enforce'],
+    requiredness: { kind: 'optional', default: 'off' },
+    binding: 'frozen',
+    description:
+      'Whole-prompt section budget: off | shadow (measure + record only) | enforce (P3-5/RC-26)',
+    rationale:
+      'RC-26: the system prompt is 26-33K chars and UNBUDGETED while only history is capped. ' +
+      'P2-5 truncates the guideline blocks alone; the ceiling on the whole prompt reports and ' +
+      'nothing more. Under `enforce`, PROMPT_ASSEMBLY_MAX_CHARS becomes the enforcing ceiling and ' +
+      'sections are dropped by DECLARED priority. The injected product catalog is protected and ' +
+      'never cut: the guards validate the reply against the FULL active catalog, so a product ' +
+      'silently trimmed out of the prompt becomes "not available" in the reply while the guard ' +
+      'passes it — RC-02, reintroduced through the budget.',
+  },
+  bool('ETA_STRIP_ALL_REPLIES', false,
+    'Strip model-authored delivery ETAs from ordinary replies too, not just order confirmations (P3-5/RC-26, rule R10)', {
+      binding: 'per-call',
+      rationale:
+        'R10 ("no delivery-time promises unless confirmed") was enforced only on ' +
+        'classifier-detected order-confirmation turns, because the strip shared a function with ' +
+        'the canonical-ETA INJECT. They are different jobs: only the inject belongs to ' +
+        'confirmations. Flag-on runs the strip alone on other turns — a fabricated "arrives in 2 ' +
+        'days" in a product or availability reply is a promise the business never made, and it is ' +
+        'no less wrong for arriving on a non-confirmation turn. Never injects: volunteering an ETA ' +
+        'unasked would be the opposite error.',
+    }),
+  bool('PRICE_INTENT_LEXICAL_UNION', false,
+    'Treat an explicit price word in the customer message as price intent, without waiting for the classifier to agree (P3-5/RC-26, rules R4+R16)', {
+      rationale:
+        'The lexical keyword list already existed but was reachable ONLY when the LLM price ' +
+        'classifier threw — so a confident `false` overrode a price word in plain sight. EV-010 ' +
+        '(alert dcf5c812): "Me qfar shije i keni edhe sa kushtojn" — the classifier anchored on ' +
+        'the flavour half while `kushtojn` sat in the list. Because `includePrice` is ' +
+        '`customerAskedPrice || customerAskedDiscount`, a miss injects a catalog with NO price ' +
+        'lines, the model cannot state a price, and the fail-closed gap assessor correctly reports ' +
+        'missing_info:["çmimi"] and escalates. So R16 is not an assessor false positive to be ' +
+        'filtered away — it is this, upstream. Flag-on can only ADD prices, only when the ' +
+        'customer literally used a price word, and it skips the classifier call on those turns.',
+    }),
+  bool('UNCERTAIN_GUARD_CATALOG_ALTERNATIVES', false,
+    'Key the uncertain-answer carve-out on the full active catalog, not this turn\'s retrieval window (P3-5/RC-25)', {
+      // `frozen`, NOT `per-call`. GUARD_VALIDATE_AGAINST_FULL_CATALOG — the flag this one extends —
+      // is declared per-call while actually being read into a module const, one of the ~8 binding
+      // misdeclarations the P2 audit recorded. Copying its declaration would have made a ninth.
+      // Binding documents the READ LIFETIME, and this is read once at module load.
+      binding: 'frozen',
+      rationale:
+        'R6/R13 mandate "say it is unavailable, then suggest alternatives", and the guard escalates ' +
+        'exactly that reply whenever retrieval happened to return nothing this turn — the guard\'s ' +
+        'own doc comment says "the catalog contained alternatives" while the code says ' +
+        '`matchedProducts.length > 0`. Flag-on additionally accepts "the reply named a product that ' +
+        'exists in the full active catalog", the same full-catalog treatment P0-2 gave the price ' +
+        'and name guards. Per-call to match GUARD_VALIDATE_AGAINST_FULL_CATALOG.',
+    }),
   bool('AI_AUTO_RESUME', false, 'Automatic AI resume from eligible pauses (P0-5/RC-14)', { binding: 'per-call' }),
   bool('OUTBOX_RELAY_ENABLED', false, 'Transactional outbox relay (P1-1)'),
   bool('OUTBOX_DISPATCH_ENABLED', false, 'Outbox dispatch of staged side-effects (P1-1)'),

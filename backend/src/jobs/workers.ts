@@ -45,11 +45,14 @@ import { resolveWorkerConcurrency } from './workerConcurrency';
 import { registerLocalWorker } from '../services/localWorkerRegistry';
 import { runLedgerRetentionSweep } from '../services/ledgerRetention';
 import { tick as runDeadLetterMetricsTick } from '../services/deadLetterMonitor';
+import { runPromptRegistryReconcile } from '../services/promptRegistryReconcile';
 import {
   LEDGER_RETENTION_JOB,
   DLQ_METRICS_JOB,
+  PROMPT_REGISTRY_JOB,
   initLedgerRetentionScheduler,
   initDeadLetterMetricsScheduler,
+  initPromptRegistryScheduler,
   removeDeadLetterMetricsScheduler,
 } from './maintenanceSchedulers';
 
@@ -179,6 +182,13 @@ export const defaultWorker = new Worker<
       await runDeadLetterMetricsTick();
       return;
     }
+    // P3-5: registers unregistered prompt content, verifies stored hashes, refreshes the locked
+    // catalog marker, and force-syncs drifted tenants — the replacement for the per-reply
+    // self-heal, so it must be a fleet-singleton rather than a per-process interval.
+    if (job.name === PROMPT_REGISTRY_JOB) {
+      await runPromptRegistryReconcile();
+      return;
+    }
     if (job.name === 'embeddingReconcile') {
       await processReconcileProductEmbeddings();
       return;
@@ -296,6 +306,10 @@ void initOutboxRelayScheduler().catch((err) => {
 
 void initLedgerRetentionScheduler().catch((err) => {
   console.error('[jobs] Failed to register ledger retention scheduler', err);
+});
+
+void initPromptRegistryScheduler().catch((err) => {
+  console.error('[jobs] Failed to register prompt registry scheduler', err);
 });
 
 // The scheduler record lives in Redis, so turning the flag off must actively REMOVE it — otherwise

@@ -23,6 +23,7 @@ import { knobNumber } from '../config/knobs';
 
 export const LEDGER_RETENTION_JOB = 'ledgerRetentionSweep';
 export const DLQ_METRICS_JOB = 'deadLetterMetrics';
+export const PROMPT_REGISTRY_JOB = 'promptRegistryReconcile';
 
 const DLQ_METRICS_INTERVAL_MS = (() => {
   const raw = process.env.DLQ_METRICS_INTERVAL_MS;
@@ -64,6 +65,28 @@ export async function initDeadLetterMetricsScheduler(): Promise<void> {
   console.info('[jobs] Dead-letter metrics scheduler registered', {
     everyMs: DLQ_METRICS_INTERVAL_MS,
   });
+}
+
+/**
+ * P3-5: the prompt-registry reconcile sweep. Registered unconditionally, for the same reason as
+ * the ledger sweep above and one more: once `PROMPT_SELF_HEAL_OFF_HOT_PATH` is on, this sweep is
+ * the ONLY thing that repairs a tenant whose locked blocks drifted. A scheduler that only exists
+ * while a second, unrelated flag is on would make that repair silently conditional. The sweep
+ * itself returns immediately when `PROMPT_BLOCK_REGISTRY` is off, so an unconfigured fleet pays
+ * one no-op job per tick.
+ */
+export async function initPromptRegistryScheduler(): Promise<void> {
+  const everyMs = knobNumber('PROMPT_REGISTRY_RECONCILE_INTERVAL_MS');
+  await defaultQueue.upsertJobScheduler(
+    PROMPT_REGISTRY_JOB,
+    { every: everyMs },
+    {
+      name: PROMPT_REGISTRY_JOB,
+      data: {} as Record<string, never>,
+      opts: { removeOnComplete: 10, removeOnFail: 50 },
+    },
+  );
+  console.info('[jobs] Prompt registry reconcile scheduler registered', { everyMs });
 }
 
 /**
