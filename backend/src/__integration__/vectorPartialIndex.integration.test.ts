@@ -34,8 +34,30 @@ const ROWS = 300;
 
 describe('per-tenant partial HNSW index (real Postgres)', () => {
   let tenantId: string;
+  let fillerTenantId: string;
   let indexName: string;
   let preExisting: Set<string>;
+
+  async function seedTenant(name: string, rows: number): Promise<string> {
+    const id = crypto.randomUUID();
+    await pool.query('INSERT INTO tenants (id, name, niche) VALUES ($1, $2, $3)', [
+      id,
+      `${name}-${id.slice(0, 8)}`,
+      'test',
+    ]);
+    // Server-side random 1536-dim vectors; the `WHERE g = g` correlates the aggregate subquery to
+    // the outer row so every product gets a DIFFERENT vector (an uncorrelated subquery would be
+    // evaluated once and break the recall assertion).
+    await pool.query(
+      `INSERT INTO products (tenant_id, name, is_active, embedding)
+       SELECT $1, 'vpi-test-' || g, true,
+              (SELECT ('[' || string_agg(random()::text, ',') || ']')
+                 FROM generate_series(1, 1536) s WHERE g = g)::vector
+         FROM generate_series(1, ${rows}) g`,
+      [id],
+    );
+    return id;
+  }
 
   before(async () => {
     process.env.VECTOR_TENANT_PARTIAL_INDEX = 'true';
@@ -48,24 +70,20 @@ describe('per-tenant partial HNSW index (real Postgres)', () => {
     );
     preExisting = new Set(pre.map((r) => r.relname));
 
-    tenantId = crypto.randomUUID();
+    tenantId = await seedTenant('vpi-test', ROWS);
     indexName = tenantIndexName(tenantId);
-    await pool.query('INSERT INTO tenants (id, name, niche) VALUES ($1, $2, $3)', [
-      tenantId,
-      `vpi-test-${tenantId.slice(0, 8)}`,
-      'test',
-    ]);
-    // Server-side random 1536-dim vectors; the `WHERE g = g` correlates the aggregate subquery to
-    // the outer row so every product gets a DIFFERENT vector (an uncorrelated subquery would be
-    // evaluated once and break the recall assertion).
-    await pool.query(
-      `INSERT INTO products (tenant_id, name, is_active, embedding)
-       SELECT $1, 'vpi-test-' || g, true,
-              (SELECT ('[' || string_agg(random()::text, ',') || ']')
-                 FROM generate_series(1, 1536) s WHERE g = g)::vector
-         FROM generate_series(1, ${ROWS}) g`,
-      [tenantId],
-    );
+    // The FILLER tenant is what makes the planner assertion below deterministic on ANY database.
+    // Index choice is cost-based, and on a freshly-migrated DB (CI) the products table would hold
+    // ONLY our tenant's rows — the global index and the partial index then cover identical row
+    // sets, the costs tie, and the planner is free to pick the global one (which is exactly what
+    // the first CI run did). With 5x filler rows the global index is always strictly larger than
+    // the tenant's partial index, which is also the real multi-tenant shape the mechanism exists
+    // for. The filler qualifies for its own index too (>= MIN_ROWS) — harmless; cleanup diffs
+    // against `preExisting`.
+    fillerTenantId = await seedTenant('vpi-filler', ROWS * 5);
+    // Fresh stats: the bulk inserts above may precede any autoanalyze, and a cost-based assertion
+    // should not depend on autovacuum timing.
+    await pool.query('ANALYZE products');
   });
 
   after(async () => {
@@ -83,6 +101,7 @@ describe('per-tenant partial HNSW index (real Postgres)', () => {
       }
     }
     await pool.query('DELETE FROM tenants WHERE id = $1', [tenantId]).catch(() => undefined);
+    await pool.query('DELETE FROM tenants WHERE id = $1', [fillerTenantId]).catch(() => undefined);
     await pool.end();
   });
 
@@ -109,13 +128,20 @@ describe('per-tenant partial HNSW index (real Postgres)', () => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      // At 300 rows the planner happily fetches everything via the tenant btree and sorts — cheap
-      // and correct, but not the property under test. The property is USABILITY: only the inlined
-      // literal makes the partial HNSW index legal for this query. Disabling seqscan AND sort
-      // leaves an ordering-providing index as the only way to satisfy ORDER BY <=> ... LIMIT, so
-      // the plan must name an HNSW index — and the assertion below demands it is the TENANT's.
+      // The property under test is USABILITY, not preference: only the inlined literal makes the
+      // partial HNSW index LEGAL for this query (a bound $1 never can). Which of two usable HNSW
+      // indexes the planner then PREFERS belongs to pgvector's cost model and flips with stats,
+      // row counts and versions — the first CI run picked the global index on a fresh DB where
+      // both covered identical rows, and the model can prefer global even at 6x the rows. So the
+      // choice is made deterministic: seqscan and sort off (an ordering-providing index is the
+      // only way to satisfy ORDER BY <=> ... LIMIT), and the global index dropped INSIDE this
+      // transaction — a catalog-only change, restored instantly by the ROLLBACK below, nothing is
+      // rebuilt. What remains legal is exactly the set the literal-inlining earns: the tenant's
+      // own partial index. If inlining stopped implying the index predicate, this plan would have
+      // no index at all.
       await client.query('SET LOCAL enable_seqscan = off');
       await client.query('SET LOCAL enable_sort = off');
+      await client.query('DROP INDEX idx_products_embedding');
       const { rows } = await client.query(
         `EXPLAIN (FORMAT JSON)
          SELECT id FROM products
@@ -125,12 +151,16 @@ describe('per-tenant partial HNSW index (real Postgres)', () => {
           LIMIT 5`,
         [sample[0].embedding],
       );
-      await client.query('COMMIT');
+      // ROLLBACK, never COMMIT: it is what un-drops the global index.
+      await client.query('ROLLBACK');
       const plan = JSON.stringify(rows[0]['QUERY PLAN']);
       assert.ok(
         plan.includes(indexName),
         `plan must use ${indexName}; got: ${plan.slice(0, 400)}`,
       );
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
     } finally {
       client.release();
     }
