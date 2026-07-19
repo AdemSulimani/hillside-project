@@ -8,6 +8,8 @@
  *     self-register every hash on first sight — destroying the "content reached production through
  *     an unregistered path" alarm entirely). Prompt-content migrations and manual SQL also bypass
  *     the admin routes. This sweep is what makes their end-state recorded rather than lost.
+ *     Runs regardless of PROMPT_BLOCK_REGISTRY (P3 audit fix) — history capture must not depend
+ *     on the flag that merely surfaces it in the ledger.
  *
  *  2. VERIFY every stored hash against a Node recomputation of its own content. Migration 084's
  *     backfill computes hashes in SQL; the runtime computes them in Node. `convert_to(content,
@@ -84,7 +86,13 @@ export async function runPromptRegistryReconcile(): Promise<ReconcileSummary> {
     tenantsMarkedCurrent: 0,
   };
 
-  if (!knobBool('PROMPT_BLOCK_REGISTRY')) return summary;
+  // Steps 1–2 are UNCONDITIONAL (P3 audit fix). They are pure history capture — additive registry
+  // writes off the reply path — and gating them on PROMPT_BLOCK_REGISTRY meant an admin edit or
+  // prompt migration under default config overwrote content with no record: the exact RC-17/RC-26
+  // defect the registry exists to close. The flag now gates only what it names — per-reply ledger
+  // stamping — plus the marker/force-sync mechanics below, which also run for
+  // PROMPT_SELF_HEAL_OFF_HOT_PATH (the sweep is that flag's load-bearing replacement, so it must
+  // not depend on the registry flag).
 
   // ---- (1) register anything live but unregistered -----------------------------------------
   const live = await listLivePromptBlockContent();
@@ -125,6 +133,13 @@ export async function runPromptRegistryReconcile(): Promise<ReconcileSummary> {
       count: summary.hashMismatches,
       hint: 'check server_encoding; migration 084 hashes via convert_to(content, \'UTF8\')',
     });
+  }
+
+  // Steps 3–4 serve the hot-path mechanics: the marker lets replies skip the per-reply force-sync
+  // and the fleet-wide sync is that skip's replacement. With both flags off, today's per-reply
+  // force-sync still runs and nothing reads the marker — skip the redundant fleet work.
+  if (!knobBool('PROMPT_BLOCK_REGISTRY') && !knobBool('PROMPT_SELF_HEAL_OFF_HOT_PATH')) {
+    return summary;
   }
 
   // ---- (3) refresh the locked-catalog marker ------------------------------------------------

@@ -17,8 +17,9 @@ import { buildPriceSetFromCatalogRows } from '../../../services/catalogGuardRefe
 // existed solely for the source-text tripwire that asserted `groundingGate.ts` did NOT consume
 // `f.type === 'attribute'`. That tripwire fired when the lane landed, which was its whole purpose,
 // so it was deleted. The equivalent invariant now lives, inverted, in
-// `services/__tests__/groundingGate.test.ts` — it asserts BOTH type filters are present, so the
-// gap cannot be silently un-closed in either direction.
+// `services/__tests__/groundingGateAttributeLane.test.ts` (the "source tripwire" describe) — it
+// asserts BOTH type filters are present, so the gap cannot be silently un-closed in either
+// direction.
 
 const CATALOG_TEXT = [
   'MATCHING PRODUCTS:',

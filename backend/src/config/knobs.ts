@@ -564,7 +564,8 @@ export const KNOBS: readonly KnobSpec[] = [
         'resolvable through prompt_block_versions. Flag-on adds two JSONB sub-objects to the ' +
         'existing `prompt` column and no schema change; the reply path never reads or writes the ' +
         'registry, so a hash unknown to it after a reconcile sweep is a real alarm rather than a ' +
-        'race.',
+        'race. Gates ONLY that ledger stamping: version registration itself (admin writes, the ' +
+        'reconcile sweep) is unconditional, so prompt history accrues even with this off.',
     }),
   bool('PROMPT_ASSEMBLY_ALERTS', false,
     'Raise a deduped ai_alerts row on an orphan block key / required-section violation (P3-5/RC-26)', {

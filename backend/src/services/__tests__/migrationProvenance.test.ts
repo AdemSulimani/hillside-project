@@ -1,14 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   type AppliedRow,
   type LedgerRow,
   assertMonotonicApplied,
   backfillAppliedSeqSql,
+  countExecutableStatements,
   detectHostileTokens,
   findChecksumDrift,
+  findMultiStatementNoTransactionFiles,
   findTransactionHostileFiles,
   parseAnnotations,
   planSegments,
@@ -336,5 +338,54 @@ describe('migration 084 — prompt_block_versions', () => {
     assert.match(down, /DROP TABLE IF EXISTS prompt_block_versions/);
     assert.match(down, /IF EXISTS/, 'guarded drops only');
     assert.match(down, /superseded/i, 'the down file must state what is lost');
+  });
+});
+
+describe('countExecutableStatements / findMultiStatementNoTransactionFiles (P3 audit)', () => {
+  it('counts statements after noise stripping — comment/dollar-quoted semicolons do not count', () => {
+    assert.equal(countExecutableStatements('CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (c);'), 1);
+    assert.equal(countExecutableStatements('SELECT 1; SELECT 2;'), 2);
+    assert.equal(countExecutableStatements('-- a comment; with a semicolon\nSELECT 1;'), 1);
+    assert.equal(
+      countExecutableStatements("DO $$ BEGIN PERFORM 1; PERFORM 2; END $$;"),
+      1,
+      'semicolons inside a dollar-quoted body are not statement boundaries',
+    );
+    assert.equal(countExecutableStatements('SELECT 1'), 1, 'no trailing semicolon still counts');
+    assert.equal(countExecutableStatements('   \n-- only a comment\n'), 0);
+  });
+
+  it('flags an annotated file with more than one executable statement', () => {
+    const files = {
+      '090_bad.sql':
+        '-- migrate:no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (c);\nANALYZE t;',
+      '091_good.sql': '-- migrate:no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS j ON t (d);',
+      '092_plain.sql': 'SELECT 1;\nSELECT 2;', // unannotated multi-statement is fine (batch txn)
+    };
+    const errors = findMultiStatementNoTransactionFiles(Object.keys(files), reader(files));
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /090_bad\.sql/);
+    assert.match(errors[0], /2 executable/);
+    assert.match(errors[0], /implicit transaction/);
+  });
+
+  it('is silent when every annotated file holds exactly one statement', () => {
+    const files = {
+      '090_a.sql': '-- migrate:no-transaction\nALTER TYPE mood ADD VALUE IF NOT EXISTS \'ok\';',
+    };
+    assert.deepEqual(findMultiStatementNoTransactionFiles(Object.keys(files), reader(files)), []);
+  });
+
+  it('every annotated file in the REAL tree satisfies the single-statement rule', () => {
+    // Regression sentinel: today the tree has zero annotated files; if one ever lands, this walks
+    // the real directory and holds it to the rule the runner enforces at preflight.
+    const dir = join(__dirname, '..', '..', 'db', 'migrations');
+    if (!existsSync(dir)) return;
+    const read = (f: string) => readFileSync(join(dir, f), 'utf8');
+    const annotated = readdirSync(dir)
+      .filter((f) => f.endsWith('.sql') && !f.endsWith('.down.sql'))
+      .filter((f) => parseAnnotations(read(f)).noTransaction);
+    const errors = findMultiStatementNoTransactionFiles(annotated, read);
+    assert.deepEqual(errors, []);
   });
 });

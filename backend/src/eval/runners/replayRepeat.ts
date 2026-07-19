@@ -27,6 +27,9 @@
  *   npx tsx src/eval/runners/replayRepeat.ts                       # dry run, no calls, no cost
  *   npx tsx src/eval/runners/replayRepeat.ts --live --tenant=<uuid> --runs=8 --max-calls=100
  */
+// Operator CLI, not a CI module: load backend/.env first (FIRST import — later imports may
+// freeze knob/env reads at module load). CI-side eval modules stay dotenv-free by fence.
+import 'dotenv/config';
 import pool from '../../db/pool';
 import { GOLDEN_ANSWERABLE } from '../corpora/goldenGapGate';
 import { summarizeReplays, type ReplayCaseResult } from '../harness/replaySummary';

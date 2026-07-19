@@ -2,9 +2,10 @@
  * P3-6 — background-job COGS capture.
  *
  * THE GAP THIS CLOSES. `openaiCallTracker` records every OpenAI call made inside a tracking
- * context, and `processAIReply` enters one per reply. Nothing else does — so product imports,
- * catalog image fingerprinting and the admin AI test burn tokens that appear in no cost figure
- * anywhere. That matters more than the call count suggests: a single product import runs an
+ * context, and `processAIReply` enters one per reply. Nothing else did — product imports, catalog
+ * image fingerprinting and the admin AI test burned tokens that appeared in no cost figure
+ * anywhere; all are now wrapped in `withJobCostTracking` at their call sites.
+ * That matters more than the call count suggests: a single product import runs an
  * 8000-char extraction at 4096 max_tokens, and the 5k-product tenant on the roadmap will run
  * thousands of them in a burst that currently shows up as a mysterious OpenAI invoice line.
  *
