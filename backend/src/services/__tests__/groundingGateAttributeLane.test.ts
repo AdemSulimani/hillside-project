@@ -347,6 +347,24 @@ describe('P3-1 attribute lane — false-positive controls', () => {
     assert.doesNotMatch(v.text, /Mega mass/);
   });
 
+  it('carry check is WHOLE-TOKEN — a cross-token substring of the claim does not mark a sentence', async () => {
+    // Folded, "e kapa sheqerin" contains "pa sheqer" as a raw substring ("ka·pa sheqer·in") while
+    // never saying it as tokens. The locator (`locateClaimInProse` → `containsPhrase`) would never
+    // match this sentence, so the per-sentence carry check must not either: a substring check here
+    // stripped the innocent sentence too, leaving nothing and escalating a strippable reply.
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose:
+        'Mega mass 3kg Vanil është pa sheqer. Kur provova Mega mass 3kg Vanil, e kapa sheqerin menjëherë në shije.',
+      factsUsed: [MEGA_FACT],
+      deps: attrDeps(),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'stripped');
+    assert.doesNotMatch(v.text, /është pa sheqer/);
+    assert.match(v.text, /kapa sheqerin/, 'the sentence that never states the claim must survive');
+  });
+
   it('an unexcisable claim ESCALATES rather than shipping the remainder', async () => {
     // The claim and its product never co-occur in one sentence, so no surgical strip exists. We
     // know a refuted claim is in the text, so sending what is left is not an option.

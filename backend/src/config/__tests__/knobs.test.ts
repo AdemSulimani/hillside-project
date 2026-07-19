@@ -477,7 +477,10 @@ describe('manifest hygiene', () => {
     //     disagree about.
     const numeric = KNOBS.filter((k) => k.kind === 'int' || k.kind === 'float');
     const root = join(__dirname, '..', '..');
-    const skip = new Set(['config', '__tests__', 'node_modules', 'dist']);
+    // `__integration__` is skipped like `__tests__`: integration tests ASSIGN knob env as fixture
+    // setup (`process.env.X = '...'` before driving a service), which is not a second parser —
+    // the regex below cannot tell a write from a read.
+    const skip = new Set(['config', '__tests__', '__integration__', 'node_modules', 'dist']);
     const offenders: string[] = [];
 
     const walk = (dir: string): void => {
@@ -526,7 +529,8 @@ describe('manifest hygiene', () => {
     // — the manifest makes no claim about a knob it does not declare.
     const numeric = KNOBS.filter((k) => k.kind === 'int' || k.kind === 'float');
     const root = join(__dirname, '..', '..');
-    const skip = new Set(['config', '__tests__', 'node_modules', 'dist']);
+    // Same `__integration__` skip as above — fixture env assignment, not a parser.
+    const skip = new Set(['config', '__tests__', '__integration__', 'node_modules', 'dist']);
     const offenders: string[] = [];
     // `process.env[` NOT followed by a quote ⇒ a computed index.
     const dynamicRead = /process\.env\[\s*[^'"\s\]]/;

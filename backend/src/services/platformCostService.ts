@@ -10,7 +10,8 @@
  * `->>` yields SQL NULL, and COALESCE falls through — the same order the pure function takes.
  * Summing the two columns would DOUBLE-COUNT the main generation, which appears in both.
  */
-import pool from '../db/pool';
+// P3-2: replica-tolerant analytics reads. With DATABASE_REPLICA_URL unset this IS db/pool.
+import pool from '../db/readPool';
 import { queryCostDaily } from '../db/models/aiCostDaily';
 import { summarizeCogs, type CogsSummary, type CostRollupRow } from './costAggregation';
 import { UNATTRIBUTED_ROLE } from './costAggregation';
@@ -199,7 +200,7 @@ export async function getFleetCostSummary(from: Date, to: Date, limit = 50): Pro
        LEFT JOIN tenants t ON t.id = l.tenant_id
       WHERE l.created_at >= $1 AND l.created_at < $2
       GROUP BY 1, 2
-      ORDER BY 3 DESC
+      ORDER BY COALESCE(SUM(${TURN_COST_SQL}), 0) DESC
       LIMIT $3`,
     [from, to, limit],
   );
@@ -227,7 +228,7 @@ export async function getCostOutliers(
          FROM ai_decision_ledger
         WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3
           AND conversation_id IS NOT NULL
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 1`,
+        GROUP BY 1 ORDER BY SUM(${TURN_COST_SQL}) DESC LIMIT 1`,
       [tenantId, from, to],
     ),
     pool.query<{ conversation_id: string | null; calls: string }>(

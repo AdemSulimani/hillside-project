@@ -214,6 +214,25 @@ function logPosture(): void {
         'yield different replies (RC-03). Set FACTS_USED_CONTRACT=true for temp 0 + fixed seed.',
     );
   }
+  // P3-1: the attribute lane is wired inside the consolidated gate and reads declared facts, so
+  // without BOTH prerequisites the mode knob is silently inert — a dead guard that looks green.
+  const attributeMode = eff('GROUNDING_GATE_ATTRIBUTE_FACTS');
+  if (attributeMode !== 'off' && (!groundingGate || !factsContract)) {
+    console.warn(
+      `[grounding] GROUNDING_GATE_ATTRIBUTE_FACTS=${attributeMode} but ` +
+        `${groundingGate ? '' : 'GROUNDING_GATE_CONSOLIDATED=false '}${
+          groundingGate || factsContract ? '' : 'and '
+        }${factsContract ? '' : 'FACTS_USED_CONTRACT=false '}— the attribute lane never runs: ` +
+        'no verdicts, no shadow evidence, no enforcement. Enable both prerequisites or set the lane to off.',
+    );
+  }
+  if (attributeMode === 'shadow' && !flag('AI_DECISION_LEDGER_ENABLED')) {
+    console.warn(
+      '[grounding] GROUNDING_GATE_ATTRIBUTE_FACTS=shadow with AI_DECISION_LEDGER_ENABLED=false — ' +
+        'shadow verdicts are computed but never persisted, so the bake-in window accrues no evidence ' +
+        'for the enforce decision. Enable the ledger for the shadow period.',
+    );
+  }
 
   // P2-2: classifier consolidation.
   const orderStageMode = eff('ORDER_STAGE_MACHINE');
@@ -269,7 +288,9 @@ function logPosture(): void {
   const selfHealOff = flag('PROMPT_SELF_HEAL_OFF_HOT_PATH');
   console.info(
     `[prompt-governance] PROMPT_BLOCK_REGISTRY=${
-      blockRegistry ? 'on (per-reply block versions + assembly outcome in the ledger)' : 'off (no prompt provenance)'
+      blockRegistry
+        ? 'on (per-reply block versions + assembly outcome in the ledger)'
+        : 'off (no per-reply ledger provenance; registry still records admin/reconcile writes)'
     }; PROMPT_ASSEMBLY_ALERTS=${
       flag('PROMPT_ASSEMBLY_ALERTS') ? 'on (orphan/violation raises a deduped alert)' : 'off (console.warn only)'
     }; PROMPT_SELF_HEAL_OFF_HOT_PATH=${
@@ -282,15 +303,17 @@ function logPosture(): void {
         : "off (carve-out keys on this turn's retrieval window)"
     }`,
   );
-  if (selfHealOff && !blockRegistry) {
-    // Worth a warning rather than a note: the sweep returns immediately when the registry flag is
-    // off, so this combination removes the per-reply repair without enabling its replacement.
-    console.warn(
-      '[prompt-governance] PROMPT_SELF_HEAL_OFF_HOT_PATH is on but PROMPT_BLOCK_REGISTRY is off — ' +
-        'the reconcile sweep no-ops without the registry, so no catalog marker is published and ' +
-        'no drifted tenant is repaired. Enable PROMPT_BLOCK_REGISTRY first.',
-    );
-  }
+  // (The former PROMPT_SELF_HEAL_OFF_HOT_PATH-without-registry warning is gone: the reconcile
+  // sweep's marker/force-sync steps now run for either flag, so the combination is safe.)
+
+  // P3-2: read-replica seam posture (infra URL, REDIS_URL-style — not a manifest knob).
+  console.info(
+    `[db] DATABASE_REPLICA_URL=${
+      process.env.DATABASE_REPLICA_URL?.trim()
+        ? 'set (statistics/dashboard/cost reads → replica pool)'
+        : 'unset (all reads on the primary)'
+    }`,
+  );
 
   // P2-6: provider-failure isolation. `OPENAI_TIMEOUT_MS` is PER ATTEMPT, so state the real
   // worst-case a reader would otherwise have to compute from two knobs.

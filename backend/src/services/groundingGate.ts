@@ -35,7 +35,7 @@ import {
 import type { NameVerificationResult } from './catalogGuardReferenceService';
 import { normalizeText } from './productTitleNormalization';
 import { foldDialect } from './dialectNormalization';
-import { locateClaimInProse, parseAttributeClaim } from './attributeClaimLexicon';
+import { containsPhrase, locateClaimInProse, parseAttributeClaim } from './attributeClaimLexicon';
 // Everything below is from the PURE attribute module — the redis/pg-backed
 // catalogAttributeReferenceService is injected through `deps`, never imported here, so the gate
 // stays offline-testable and the eval suite's walked import graph stays clean.
@@ -275,7 +275,10 @@ function sentenceCarriesAttribute(
   if (!folded) return false;
   const norm = normalizeText(sentence);
   return ungroundedAttributes.some((attr) => {
-    if (!attr.proseSpan || !folded.includes(attr.proseSpan)) return false;
+    // Whole-token, matching how the claim was LOCATED (`locateClaimInProse` → `containsPhrase`).
+    // A substring check here was asymmetric with the locator: a cross-token substring (e.g.
+    // "pa sheqer" inside "…spa sheqerit…") could mark a sentence the locator never matched.
+    if (!attr.proseSpan || !containsPhrase(folded, attr.proseSpan)) return false;
     const ref = normalizeText(attr.matchedProduct ?? attr.productRef);
     return ref.length >= 3 && norm.includes(ref);
   });

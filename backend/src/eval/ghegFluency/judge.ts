@@ -31,6 +31,9 @@
  * Gheg. It does NOT judge factual grounding: that is P2-1's deterministic gate, and routing it
  * through a stochastic judge is precisely the mistake P2-1 exists to undo.
  */
+// Operator CLI, not a CI module: load backend/.env first (FIRST import — later imports may
+// freeze knob/env reads at module load). CI-side eval modules stay dotenv-free by fence.
+import 'dotenv/config';
 import { OPENAI_EVAL_MODEL, openai } from '../../services/openaiClient';
 import { GHEG_CORPUS_WITH_EV_010 } from './corpus';
 

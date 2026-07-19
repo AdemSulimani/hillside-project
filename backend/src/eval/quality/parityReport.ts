@@ -26,6 +26,9 @@
  * ACCEPTANCE for flipping `QUALITY_EVAL_MODE=off`: zero flag/would-flag disagreements and a max
  * absolute delta below a stated epsilon, over a stated volume. Both are printed.
  */
+// Operator CLI, not a CI module: load backend/.env first (FIRST import — later imports may
+// freeze knob/env reads at module load). CI-side eval modules stay dotenv-free by fence.
+import 'dotenv/config';
 import pool from '../../db/pool';
 import { scanLedger, type LedgerRow } from '../../db/models/aiDecisionLedger';
 import { getQualityThreshold } from '../../services/aiQualityContract';

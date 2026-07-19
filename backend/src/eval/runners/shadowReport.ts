@@ -17,6 +17,9 @@
  *   npx tsx src/eval/runners/shadowReport.ts --days=30 --tenant=<uuid> --json
  *   npx tsx src/eval/runners/shadowReport.ts --min-percent=99 --min-rows=500   # exit 1 if unmet
  */
+// Operator CLI, not a CI module: load backend/.env first (FIRST import — later imports may
+// freeze knob/env reads at module load). CI-side eval modules stay dotenv-free by fence.
+import 'dotenv/config';
 import pool from '../../db/pool';
 import { scanLedger, type LedgerRow } from '../../db/models/aiDecisionLedger';
 import {

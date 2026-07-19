@@ -8,6 +8,7 @@ import {
   type AppliedRow,
   backfillAppliedSeqSql,
   findChecksumDrift,
+  findMultiStatementNoTransactionFiles,
   findTransactionHostileFiles,
   parseAnnotations,
   planSegments,
@@ -18,7 +19,9 @@ import {
 // Session-level advisory lock: concurrent runners (deploy pre-up, container
 // boots, replicas) serialize instead of racing; the session releases it on
 // disconnect even if the process dies. Would not survive a move to PgBouncer
-// transaction pooling. Shared with the down/verify CLIs so all three serialize.
+// transaction pooling. Shared with the down CLI so the two writers serialize;
+// migrate:verify is read-only and deliberately lock-free (worst case it reports
+// "provenance incomplete" when raced by a live migrate — rerun it).
 export const MIGRATION_LOCK_KEY = '815051262';
 
 export interface RunMigrationsOptions {
@@ -152,6 +155,7 @@ export async function runMigrations(opts: RunMigrationsOptions = {}): Promise<vo
     const violations = [
       ...runMigrationChecks(files, applied), // P0-1: dup-ordinal + non-monotonic-pending
       ...findTransactionHostileFiles(pending, readSql), // P3-3: unannotated self-committing DDL
+      ...findMultiStatementNoTransactionFiles(pending, readSql), // P3 audit: NT ⇒ single statement
       ...(provFirst ? findChecksumDrift(appliedRows, readSqlOrNull) : []), // P3-3: edited applied file
     ];
     if (violations.length > 0) {

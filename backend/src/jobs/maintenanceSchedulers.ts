@@ -25,6 +25,7 @@ export const LEDGER_RETENTION_JOB = 'ledgerRetentionSweep';
 export const DLQ_METRICS_JOB = 'deadLetterMetrics';
 export const PROMPT_REGISTRY_JOB = 'promptRegistryReconcile';
 export const AI_COST_ROLLUP_JOB = 'aiCostRollup';
+export const VECTOR_PARTIAL_INDEX_JOB = 'vectorPartialIndexSweep';
 
 const DLQ_METRICS_INTERVAL_MS = (() => {
   const raw = process.env.DLQ_METRICS_INTERVAL_MS;
@@ -50,6 +51,25 @@ export async function initLedgerRetentionScheduler(): Promise<void> {
     },
   );
   console.info('[jobs] Ledger retention scheduler registered', { everyMs });
+}
+
+/**
+ * P3-2: per-tenant partial HNSW index reconcile. Registered unconditionally — the sweep itself
+ * no-ops when `VECTOR_TENANT_PARTIAL_INDEX` is off, and a scheduler that only exists when a flag
+ * was on at boot is the RC-06 drift class (the flag could be flipped between deploys).
+ */
+export async function initVectorPartialIndexScheduler(): Promise<void> {
+  const everyMs = knobNumber('VECTOR_PARTIAL_INDEX_INTERVAL_MS');
+  await defaultQueue.upsertJobScheduler(
+    VECTOR_PARTIAL_INDEX_JOB,
+    { every: everyMs },
+    {
+      name: VECTOR_PARTIAL_INDEX_JOB,
+      data: {} as Record<string, never>,
+      opts: { removeOnComplete: 10, removeOnFail: 50 },
+    },
+  );
+  console.info('[jobs] Vector partial-index scheduler registered', { everyMs });
 }
 
 /** Gated on the same `DLQ_METRICS_ENABLED` flag the in-process monitor used. */

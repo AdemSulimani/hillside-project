@@ -19,6 +19,7 @@
     "eval:fluency": "tsx src/eval/ghegFluency/judge.ts",
     "eval:live-replay": "tsx src/eval/runners/replayRepeat.ts",
     "eval:tier": "tsx src/eval/runners/tierDowngrade.ts",
+    "loadtest:fairness": "tsx src/loadtest/fairnessHarness.ts",
     "repair-product-text": "tsx src/scripts/repairProductTextEncoding.ts",
     "redact-alert-details": "tsx src/scripts/redactAlertDetails.ts",
     "migrate": "tsx src/db/migrate.ts",
@@ -76,6 +77,7 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^25.5.2",
     "@types/pg": "^8.20.0",
+    "socket.io-client": "^4.8.3",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }

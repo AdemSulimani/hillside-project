@@ -36,9 +36,8 @@ import {
   registerPromptBlockVersions,
   type PromptBlockVersionSource,
 } from '../db/models/promptBlockVersion';
-import { knobBool } from '../config/knobs';
-
-const PROMPT_BLOCK_REGISTRY = knobBool('PROMPT_BLOCK_REGISTRY');
+import { refreshLockedCatalogMarker } from '../services/promptRegistryReconcile';
+import { withJobCostTracking } from '../services/costRecorder';
 
 async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot> {
   const ai = await ensureAIConfigForTenant(tenantId);
@@ -73,12 +72,30 @@ async function buildTenantAiSnapshot(tenantId: string): Promise<TenantAiSnapshot
  * succeeded. The reconcile sweep re-registers anything a failure here missed, which is precisely
  * the redundancy that lets this be best-effort.
  */
+/**
+ * Best-effort marker bump so a locked-catalog edit reaches replies NOW rather than at the next
+ * reconcile tick (≤15 min): the reply path compares its tenant marker against this global one, so
+ * advancing it makes every tenant take the repair path on its next reply. Failure is tolerable —
+ * the sweep converges the marker on its own cadence.
+ */
+async function bumpLockedCatalogMarker(): Promise<void> {
+  try {
+    await refreshLockedCatalogMarker();
+  } catch (err) {
+    console.warn('[adminAi] locked-catalog marker refresh failed; the reconcile sweep will converge it', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function registerBlockVersions(
   items: Array<{ block_key: string; content: string }>,
   source: PromptBlockVersionSource,
   email: string | undefined,
 ): Promise<void> {
-  if (!PROMPT_BLOCK_REGISTRY) return;
+  // Unconditional (P3 audit fix) — not gated on PROMPT_BLOCK_REGISTRY. That flag gates per-reply
+  // ledger STAMPING; gating registration itself meant an admin edit under default config
+  // overwrote content with no record, the exact defect migration 084 exists to close.
   try {
     await registerPromptBlockVersions(items, source, email ?? null);
   } catch (err) {
@@ -398,15 +415,19 @@ export async function postTenantAiTest(req: Request, res: Response): Promise<voi
     }
 
     const model = config.custom_model_id?.trim() || OPENAI_CHAT_MODEL;
-    const completion = await openai.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: testMessage },
-      ],
-      temperature: 0.7,
-      max_tokens: 1024,
-    });
+    // P3 audit: `costRecorder`'s header names the admin AI test as uncaptured spend — this is the
+    // capture. `source='job'` (kind `admin_ai_test`), same fold as every other cost row.
+    const completion = await withJobCostTracking({ tenantId, job: 'admin_ai_test' }, () =>
+      openai.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: testMessage },
+        ],
+        temperature: 0.7,
+        max_tokens: 1024,
+      }),
+    );
 
     const reply = completion.choices[0]?.message?.content?.trim();
     if (!reply) {
@@ -453,6 +474,7 @@ export async function createCatalogBlock(req: Request, res: Response): Promise<v
       'admin_catalog',
       req.admin?.email,
     );
+    if (created.is_platform_locked) await bumpLockedCatalogMarker();
 
     let syncSummary: { tenants_updated: number; total_blocks_added: number } | null = null;
     if (sync_to_existing && created.is_active) {
@@ -512,6 +534,9 @@ export async function updateCatalogBlock(req: Request, res: Response): Promise<v
       'admin_catalog',
       req.admin?.email,
     );
+    // Unconditional, unlike the create path: an update can LOCK, UNLOCK or deactivate a block,
+    // and each of those changes the locked-catalog content hash.
+    await bumpLockedCatalogMarker();
 
     let syncSummary: { tenants_updated: number; total_blocks_added: number } | null = null;
     if (sync_to_existing && updated.is_active) {

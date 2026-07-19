@@ -158,3 +158,54 @@ describe('lockedCatalogMarker', () => {
     assert.equal(lockedCatalogMarker([]).length, 32);
   });
 });
+
+/**
+ * P3 audit fix — version registration is UNCONDITIONAL; PROMPT_BLOCK_REGISTRY gates only the
+ * per-reply ledger stamping. Source invariants (house convention, `costAnomaly.test.ts`): neither
+ * module is unit-runnable offline (their graphs reach db/pool + Redis), so pin the gating shape
+ * over the source text.
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+
+function readSource(...rel: string[]): string {
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i++) {
+    const candidate = path.join(dir, 'src', ...rel);
+    if (existsSync(candidate)) return readFileSync(candidate, 'utf8');
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(`could not locate src/${rel.join('/')}`);
+}
+
+describe('prompt-block version registration is not flag-gated (source invariants)', () => {
+  it('adminAiController registers on every admin write, regardless of PROMPT_BLOCK_REGISTRY', () => {
+    const source = readSource('controllers', 'adminAiController.ts');
+    assert.ok(
+      !/knobBool\(\s*'PROMPT_BLOCK_REGISTRY'\s*\)/.test(source),
+      'admin-write registration must not consult PROMPT_BLOCK_REGISTRY — gating it means an admin ' +
+        'edit under default config overwrites content with no record (the RC-17/RC-26 defect 084 closes)',
+    );
+    const calls = source.split('registerBlockVersions(').length - 1;
+    assert.ok(calls >= 3, `expected registerBlockVersions to remain wired at the mutation paths, saw ${calls} site(s)`);
+  });
+
+  it('the reconcile sweep registers and verifies before any flag gate', () => {
+    const source = readSource('services', 'promptRegistryReconcile.ts');
+    const gate = source.indexOf("knobBool('PROMPT_BLOCK_REGISTRY')");
+    const register = source.indexOf('listUnregisteredPairs(');
+    const verify = source.indexOf('listStoredVersionsForVerification(');
+    assert.ok(gate > 0 && register > 0 && verify > 0, 'expected the sweep to keep all three mechanisms');
+    assert.ok(
+      register < gate && verify < gate,
+      'steps 1–2 (register + hash-verify) must precede the flag gate — history capture is unconditional',
+    );
+    assert.ok(
+      /PROMPT_SELF_HEAL_OFF_HOT_PATH/.test(source),
+      'the marker/force-sync steps must also run for PROMPT_SELF_HEAL_OFF_HOT_PATH — the sweep is ' +
+        "that flag's load-bearing replacement and must not depend on the registry flag",
+    );
+  });
+});

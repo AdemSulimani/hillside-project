@@ -25,6 +25,9 @@
  * Suggested downgrade order, cheapest-risk first: `eval` (a scoring call, not customer prose) →
  * `intent` → `classifier` → `chat` last and probably never.
  */
+// Operator CLI, not a CI module: load backend/.env first (FIRST import — later imports may
+// freeze knob/env reads at module load). CI-side eval modules stay dotenv-free by fence.
+import 'dotenv/config';
 import { GHEG_CORPUS } from '../ghegFluency/corpus';
 import { GOLDEN_ANSWERABLE, GOLDEN_TRUE_GAPS } from '../corpora/goldenGapGate';
 import {
@@ -265,6 +268,12 @@ async function main(): Promise<void> {
     console.info(
       `  determinism: ${report.candidateDistinctRuns} distinct decision vector(s) across ${args.runs} run(s)`,
     );
+    if (args.runs < 2) {
+      console.warn(
+        '  ⚠️  --runs=1: the determinism gate is VACUOUS (one run cannot disagree with itself). ' +
+          'A PASS here says nothing about run-to-run stability — use --runs>=3 before acting on it.',
+      );
+    }
     const { baselineUsd: b, candidateUsd: cnd, savingRatio } = report.cost;
     console.info(
       `  cost: baseline $${b?.toFixed(6) ?? '?'} vs candidate $${cnd?.toFixed(6) ?? '?'}` +

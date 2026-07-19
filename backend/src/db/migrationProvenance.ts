@@ -163,6 +163,46 @@ export function findTransactionHostileFiles(
   return errors;
 }
 
+/**
+ * Executable statements in a file, counted after `stripSqlNoise` (so semicolons inside comments,
+ * string literals and dollar-quoted bodies don't count).
+ */
+export function countExecutableStatements(sql: string): number {
+  return stripSqlNoise(sql)
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0).length;
+}
+
+/**
+ * Preflight: an annotated `-- migrate:no-transaction` file must hold EXACTLY ONE executable
+ * statement. The runner executes an annotated file as one `client.query(sql)` in autocommit —
+ * but node-postgres sends multi-statement text as a single simple-protocol message, which
+ * Postgres wraps in an IMPLICIT transaction. Two statements therefore silently regain the
+ * transaction the annotation opted out of, and a `CREATE INDEX CONCURRENTLY` among them fails at
+ * apply time with "cannot run inside a transaction block".
+ */
+export function findMultiStatementNoTransactionFiles(
+  pendingFiles: string[],
+  readSql: (file: string) => string,
+): string[] {
+  const errors: string[] = [];
+  for (const file of pendingFiles) {
+    const sql = readSql(file);
+    if (!parseAnnotations(sql).noTransaction) continue;
+    const count = countExecutableStatements(sql);
+    if (count > 1) {
+      errors.push(
+        `migration ${file} is annotated '-- migrate:no-transaction' but contains ${count} executable ` +
+          `statements. node-postgres sends multi-statement text as ONE implicit transaction, so the ` +
+          `annotation is silently defeated (and transaction-hostile statements inside it fail at ` +
+          `apply time). Split it into one no-transaction file per statement.`,
+      );
+    }
+  }
+  return errors;
+}
+
 // ---------------------------------------------------------------------------
 // Checksum drift detection
 // ---------------------------------------------------------------------------
