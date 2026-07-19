@@ -11,13 +11,17 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
+  billedRevenue,
   detectCostAnomalies,
   rearmedKinds,
   type CostAnomalyKind,
   type CostAnomalyThresholds,
   type TenantCostFacts,
 } from '../costAnomaly';
+import { calculateProgressiveFee } from '../aiUseCaseService';
 
 const OFF: CostAnomalyThresholds = {
   marginRatio: 0,
@@ -36,6 +40,91 @@ const facts = (over: Partial<TenantCostFacts> = {}): TenantCostFacts => ({
   worstConversation: { conversationId: 'c1', usdCost: 0.5 },
   worstTurn: { conversationId: 'c1', calls: 20 },
   ...over,
+});
+
+/**
+ * The NULL-fee_amount trap. This half of the alerter had no test when it shipped, and the bug it
+ * guards against is not a rounding error — it INVERTS the alert. `ai_use_cases.fee_amount` is
+ * NULL until the month-end snapshot, the alerter runs on the current month, so a `SUM(fee_amount)`
+ * reports zero revenue for every tenant and fires margin-inversion on healthy ones for the first
+ * ~30 days of every month. Two assertions, because the defect has two halves: the DERIVATION
+ * (here) and the SQL SHAPE (the source invariant below).
+ */
+describe('billedRevenue — fees are derived from the count, never summed', () => {
+  it('a tenant with completed cases but NO stamped fees still has revenue', () => {
+    // Exactly the current-month state: cases resolved, fee_amount still NULL everywhere. If
+    // revenue came from the column this would be 0 and the ratio would be infinite.
+    const revenue = billedRevenue({
+      commission: 0,
+      useCaseCount: 100,
+      feeForCount: calculateProgressiveFee,
+    });
+    assert.equal(revenue, 50, '100 cases in the first band at EUR 0.50');
+    assert.ok(revenue > 0, 'the whole point: unstamped fees are still revenue');
+  });
+
+  it('adds commission to the derived fees', () => {
+    assert.equal(
+      billedRevenue({ commission: 12.5, useCaseCount: 100, feeForCount: calculateProgressiveFee }),
+      62.5,
+    );
+  });
+
+  it('walks the progressive tiers rather than assuming a flat rate', () => {
+    // 300 cases = 250 @ 0.50 + 50 @ 0.40 = 145. A flat first-band rate would give 150.
+    assert.equal(
+      billedRevenue({ commission: 0, useCaseCount: 300, feeForCount: calculateProgressiveFee }),
+      145,
+    );
+  });
+
+  it('is zero for a tenant with no activity, and never NaN on bad input', () => {
+    assert.equal(billedRevenue({ commission: 0, useCaseCount: 0, feeForCount: calculateProgressiveFee }), 0);
+    assert.equal(
+      billedRevenue({ commission: NaN, useCaseCount: -5, feeForCount: calculateProgressiveFee }),
+      0,
+      'a NaN revenue would make every ratio NaN and silently disable the alert',
+    );
+  });
+});
+
+/**
+ * Source invariant, following the house convention in `replyPathSourceInvariants.test.ts`:
+ * `costAnomalyMonitor` is not unit-importable (its graph reaches db/pool), so the SQL shape is
+ * pinned as an assertion over the source text, with a count guard so a refactor that moves the
+ * query cannot make this pass vacuously.
+ */
+describe('costAnomalyMonitor revenue query (source invariant)', () => {
+  const monitorSource = (() => {
+    let dir = process.cwd();
+    for (let i = 0; i < 6; i++) {
+      const candidate = path.join(dir, 'src', 'services', 'costAnomalyMonitor.ts');
+      if (existsSync(candidate)) return readFileSync(candidate, 'utf8');
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    throw new Error('could not locate costAnomalyMonitor.ts');
+  })();
+
+  it('counts completed use cases instead of summing the NULL-until-month-end fee column', () => {
+    assert.ok(
+      /COUNT\(\*\)[\s\S]{0,200}FROM ai_use_cases/.test(monitorSource),
+      'the revenue query must COUNT completed use cases',
+    );
+    assert.ok(
+      !/SUM\(\s*fee_amount\s*\)/i.test(monitorSource),
+      'SUM(fee_amount) is NULL for the current month — it reports zero revenue for every tenant ' +
+        'and fires margin-inversion on healthy ones. Derive from the count via calculateProgressiveFee.',
+    );
+  });
+
+  it('routes the derivation through billedRevenue (count guard)', () => {
+    const uses = monitorSource.split('billedRevenue').length - 1;
+    // import + call site. If this drops to 1 the call was inlined and the pure tests above stop
+    // describing production.
+    assert.ok(uses >= 2, `expected billedRevenue to be imported and called, saw ${uses} occurrence(s)`);
+  });
 });
 
 describe('detectCostAnomalies — the default-off guarantee', () => {

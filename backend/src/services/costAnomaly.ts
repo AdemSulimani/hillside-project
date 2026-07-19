@@ -12,6 +12,34 @@
  * feature ships as an alert storm on day one.
  */
 
+/**
+ * Billed revenue for a period, derived rather than summed.
+ *
+ * THE TRAP THIS ENCODES. `ai_use_cases.fee_amount` is NULL until the month-end snapshot job
+ * stamps it (CLAUDE.md §11: "Use-case fee amounts are not stamped at creation... Queries on
+ * fee_amount before month-end will see nulls"). The margin alerter runs on the CURRENT month, so
+ * a `SUM(fee_amount)` there returns 0 for every tenant — which does not merely lose precision, it
+ * inverts the alert: every healthy tenant looks like it earned nothing, and margin-inversion
+ * fires on all of them for the first ~30 days of every month. Revenue must therefore come from
+ * the completed-case COUNT through the progressive tiers, the same projection the credits
+ * dashboard uses for the running month.
+ *
+ * `feeForCount` is INJECTED rather than imported so this module stays a zero-import leaf —
+ * `calculateProgressiveFee` lives in `aiUseCaseService`, which imports `db/pool`, and pulling pg
+ * into this file would make the arithmetic untestable offline. Dependency injection instead of
+ * mocking is the house convention (the repo has no mocking framework).
+ */
+export function billedRevenue(args: {
+  commission: number;
+  useCaseCount: number;
+  feeForCount: (count: number) => number;
+}): number {
+  const commission = Number.isFinite(args.commission) ? args.commission : 0;
+  const count = Number.isFinite(args.useCaseCount) ? Math.max(0, args.useCaseCount) : 0;
+  const fees = args.feeForCount(count);
+  return commission + (Number.isFinite(fees) ? fees : 0);
+}
+
 export type CostAnomalyKind =
   | 'margin_inversion'
   | 'runaway_conversation'

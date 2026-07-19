@@ -20,6 +20,7 @@ import * as Sentry from '@sentry/node';
 import { knobBool, knobNumber } from '../config/knobs';
 import pool from '../db/pool';
 import {
+  billedRevenue,
   detectCostAnomalies,
   rearmedKinds,
   type CostAnomaly,
@@ -97,9 +98,11 @@ async function billedRevenueForPeriod(tenantId: string, from: Date, to: Date): P
            AND resolved_at >= $2 AND resolved_at < $3)::text AS use_case_count`,
     [tenantId, from, to],
   );
-  const commission = parseFloat(rows[0]?.commission ?? '0');
-  const useCaseCount = parseInt(rows[0]?.use_case_count ?? '0', 10);
-  return commission + calculateProgressiveFee(useCaseCount);
+  return billedRevenue({
+    commission: parseFloat(rows[0]?.commission ?? '0'),
+    useCaseCount: parseInt(rows[0]?.use_case_count ?? '0', 10),
+    feeForCount: calculateProgressiveFee,
+  });
 }
 
 async function dispatch(anomaly: CostAnomaly): Promise<void> {
