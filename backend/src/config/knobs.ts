@@ -146,6 +146,25 @@ export const KNOBS: readonly KnobSpec[] = [
   { key: 'OPENAI_INTENT_MODEL', kind: 'string', requiredness: { kind: 'optional', default: '(OPENAI_CHAT_MODEL)' }, binding: 'per-call', description: 'Purchase-intent detection model' },
   { key: 'OPENAI_PRODUCT_PROCESSING_MODEL', kind: 'string', requiredness: { kind: 'optional', default: '(OPENAI_CHAT_MODEL, else gpt-4o-mini)' }, binding: 'frozen', description: 'Model for product extraction from uploaded documents/images' },
   { key: 'OPENAI_FINETUNING_BASE_MODEL', kind: 'string', requiredness: { kind: 'optional', default: 'gpt-4o-mini-2024-07-18' }, binding: 'frozen', description: 'Base model for fine-tuning jobs' },
+  {
+    // P3-6. Declared here rather than read inline in `services/modelPricing.ts` — where it lived
+    // until now — because a price table is config that DECIDES A REPORTED NUMBER. Left as a bare
+    // `process.env` read it was invisible to `detectExampleDrift`, to `config:check`, and to the
+    // fleet fingerprint, so two instances carrying different tables would publish divergent COGS
+    // for identical traffic and nothing would say so. That is the same shape as SIMILARITY_
+    // THRESHOLD's inline NaN: not a wrong value, an UNGOVERNED one.
+    key: 'OPENAI_MODEL_PRICES',
+    kind: 'string',
+    requiredness: { kind: 'optional', default: '' },
+    binding: 'frozen',
+    description:
+      'Per-model token price overrides for COGS, JSON map of {model: {inputPerM, outputPerM, ' +
+      'cachedInputPerM?}} in USD per 1M tokens. Empty ⇒ the built-in table',
+    rationale:
+      'Prices change without a code change, so the table is externalizable by design (the P3-6 ' +
+      'edge case "Model price table drift"). Malformed JSON is ignored fail-open: a bad price ' +
+      'string must degrade the COST REPORT, never the reply path that imports this module.',
+  },
 
   // --- Decision thresholds (guards 2 + 3 + 6) -----------------------------------------------
   num('SIMILARITY_THRESHOLD', 'float', 0.65, { min: 0, max: 1 }, 'frozen',
@@ -220,6 +239,72 @@ export const KNOBS: readonly KnobSpec[] = [
   // they get band validation, boot reporting, example-drift protection and fingerprint coverage.
   num('LEDGER_RETENTION_INTERVAL_MS', 'int', 3_600_000, { min: 60_000, max: 86_400_000 }, 'frozen',
     'How often the ledger retention sweep runs (P2-4)'),
+
+  // --- P3-6: COGS rollup + budget alerting (RC-17/RC-03, OBS-2/C-108) ----------------------
+  // Every one is optional with a band and defaults to off/inert, so no new BOOT FATAL is
+  // introduced and `ci.yml`'s backend-smoke env block needs no change (CLAUDE.md §11).
+  // Declared with the P3-6 batch because it shares their defect (a bare process.env read) and
+  // their subject (cost): a cached verdict is a classifier call not made on a retry.
+  bool('CLASSIFIER_VERDICT_PERSISTENCE', false,
+    'Persist per-(conversation, inbound, detector) classifier verdicts in Redis so a job retry reuses them (P1-3)'),
+  bool('AI_COST_ROLLUP_ENABLED', false,
+    'Fold ai_decision_ledger usage into the ai_cost_daily COGS rollup (P3-6)'),
+  bool('AI_COST_JOB_CAPTURE', false,
+    'Record background-job OpenAI spend (product imports, image fingerprints) into ai_cost_daily (P3-6)'),
+  num('AI_COST_ROLLUP_INTERVAL_MS', 'int', 3_600_000, { min: 60_000, max: 86_400_000 }, 'frozen',
+    'How often the COGS rollup sweep runs (P3-6)'),
+  num('AI_COST_ROLLUP_WINDOW_DAYS', 'int', 3, { min: 1, max: 90 }, 'frozen',
+    'Trailing days of ledger re-folded on each COGS sweep', {
+      rationale:
+        'The sweep re-folds a window instead of tracking a watermark, so a missed tick or a late ' +
+        'outbox-drained ledger write self-heals on the next run. Must exceed the longest expected ' +
+        'gap between sweeps plus the outbox relay lag, or a late row lands in an already-swept ' +
+        'day and is never counted.',
+    }),
+  num('AI_COST_ROLLUP_SEAL_DAYS', 'int', 7, { min: 1, max: 90 }, 'frozen',
+    'Age at which a COGS day is frozen and never recomputed', {
+      rationale:
+        'MUST stay well below LEDGER_RETENTION_DAYS (90). Sealing is what stops a later sweep ' +
+        'from recomputing a day whose ledger rows have been partly pruned — that would silently ' +
+        'SHRINK a historical cost, failing in the direction that reads as an improvement.',
+    }),
+  num('AI_COST_ROLLUP_RETENTION_DAYS', 'int', 730, { min: 30, max: 3650 }, 'frozen',
+    'How long ai_cost_daily rows are retained', {
+      rationale:
+        'Deliberately OUTLIVES LEDGER_RETENTION_DAYS (90) — that asymmetry is the rollup\'s whole ' +
+        'justification. The ledger expires because it carries customer-derived prompt previews; ' +
+        'the rollup holds only model ids and counters, so it carries no such obligation and can ' +
+        'answer year-over-year margin questions the ledger structurally cannot.',
+    }),
+  bool('AI_COST_ANOMALY_ALERTS', false,
+    'Emit platform-ops alerts on COGS anomalies (margin inversion, runaway conversation, model drift) (P3-6)'),
+  bool('AI_COST_MODEL_DRIFT_ALERT', false,
+    'Alert when one role served two different models in a period, or an unpriced model appears (P3-6)', {
+      rationale:
+        'RC-17 made visible: the 900s delete-only ai_config cache can serve a stale custom_model_id, ' +
+        'so two workers answer the same tenant on different models mid-conversation. That was ' +
+        'undetectable until P1-5 captured model-id per call. The unpriced-model half is the price- ' +
+        'table drift canary — an unpriced call is counted but costs 0, so a new OpenAI model id ' +
+        'makes reported COGS drift DOWNWARD, which reads as an improvement.',
+    }),
+  num('AI_COST_MARGIN_ALERT_RATIO', 'float', 0, { min: 0, max: 10 }, 'frozen',
+    'Alert when a tenant\'s month COGS / its billed revenue reaches this ratio. 0 = off'),
+  num('AI_COST_CONVERSATION_ALERT_USD', 'float', 0, { min: 0, max: 1000 }, 'frozen',
+    'Alert when one conversation\'s AI spend reaches this many USD. 0 = off'),
+  num('AI_COST_TURN_CALL_ALERT', 'int', 0, { min: 0, max: 10_000 }, 'frozen',
+    'Alert when one turn makes this many OpenAI calls. 0 = off', {
+      rationale:
+        'Measured baseline is 18-21 calls/turn, so ~40 is the operator value that catches the ' +
+        'C-126 signature — hasAssistantAskedOrderClosingInConversation runs an uncached ' +
+        'classifier over every assistant message, twice per job, and grows with conversation depth.',
+    }),
+  num('AI_COST_ALERT_REARM_FACTOR', 'float', 0.9, { min: 0.1, max: 1 }, 'frozen',
+    'A tripped cost alert re-arms only once the measure falls below threshold x this factor', {
+      rationale:
+        'Two-level hysteresis (the redisMemoryMonitor shape), not the single-level breaker in ' +
+        'deadLetterMonitor: a ratio hovering exactly at its threshold would otherwise re-alert ' +
+        'on every tick.',
+    }),
   num('GROUNDING_GATE_STRIP_FLOOR', 'int', 24, { min: 0, max: 2000 }, 'frozen',
     'Min grounded chars that must survive a targeted strip before the gate escalates the turn (P2-1)'),
   num('NAME_GUARD_SIMILARITY_THRESHOLD', 'float', 0.48, { min: 0, max: 1 }, 'frozen',

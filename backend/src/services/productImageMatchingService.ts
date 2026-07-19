@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { openai, OPENAI_VISION_MODEL } from './openaiClient';
+import { withModelRole } from './openaiCallTracker';
 import { generateEmbedding } from './embeddingService';
 import {
   buildFingerprintText,
@@ -272,8 +273,12 @@ async function extractCustomerProductFromImages(
     }
   }
 
-  const completion = await openai.chat.completions.create({
-    model: OPENAI_VISION_MODEL || 'gpt-4o',
+  // P3-6: vision calls are the most expensive per-call item in the fan-out (image tokens), and in
+  // the default config OPENAI_VISION_MODEL resolves to the same id as every other role — so
+  // without this label an image turn's cost is indistinguishable from a text turn's.
+  const completion = await withModelRole('vision', () =>
+    openai.chat.completions.create({
+    model: OPENAI_VISION_MODEL,
     response_format: { type: 'json_object' },
     temperature: 0,
     max_tokens: 750,
@@ -290,7 +295,8 @@ async function extractCustomerProductFromImages(
         ],
       },
     ],
-  });
+    }),
+  );
 
   const raw = completion.choices[0]?.message?.content;
   if (!raw?.trim()) return null;
@@ -324,33 +330,35 @@ async function rerankAmbiguousVisualMatches(
   }));
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: OPENAI_VISION_MODEL || 'gpt-4o',
-      response_format: { type: 'json_object' },
-      temperature: 0,
-      max_tokens: 120,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Compare the customer product photo to catalog candidate images. Return JSON: { best_index: number (1-based from list), confidence: number 0-1, same_product: boolean, reason: string|null }. Pick best_index=0 if none match.',
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `Customer image vs candidates:\n${JSON.stringify(compareList)}`,
-            },
-            { type: 'image_url', image_url: { url: customerUrl } },
-            ...compareList.map((c) => ({
-              type: 'image_url' as const,
-              image_url: { url: c.catalog_image_url },
-            })),
-          ],
-        },
-      ],
-    });
+    const completion = await withModelRole('vision', () =>
+      openai.chat.completions.create({
+        model: OPENAI_VISION_MODEL,
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 120,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Compare the customer product photo to catalog candidate images. Return JSON: { best_index: number (1-based from list), confidence: number 0-1, same_product: boolean, reason: string|null }. Pick best_index=0 if none match.',
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `Customer image vs candidates:\n${JSON.stringify(compareList)}`,
+              },
+              { type: 'image_url', image_url: { url: customerUrl } },
+              ...compareList.map((c) => ({
+                type: 'image_url' as const,
+                image_url: { url: c.catalog_image_url },
+              })),
+            ],
+          },
+        ],
+      }),
+    );
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw?.trim()) return candidates;

@@ -30,6 +30,7 @@ import {
 } from '../services/productImageFingerprintService';
 import { isPgCheckViolation, isPgUniqueViolation, pgConstraintName } from '../utils/pgErrors';
 import { repairOptionalUtf8Text } from '../utils/textEncoding';
+import { withJobCostTracking } from '../services/costRecorder';
 
 function withRepairedTextFields<T extends Product>(product: T): T {
   return {
@@ -418,9 +419,12 @@ export async function uploadDocument(req: Request, res: Response): Promise<void>
     if (useAI) {
       try {
         const aiService = new AIProductProcessingService();
-        products = await service.processAndEnrich(
-          inputSource,
-          aiService.createEnricher(),
+        // P3-6: the extraction is an 8000-char prompt at 4096 max_tokens — the single largest
+        // call in the system — and it never reaches the reply ledger. Note the catch below: a
+        // failed AI import falls back to non-AI parsing and still returns 201, so without this
+        // the spend of a partially-failed import was doubly invisible.
+        products = await withJobCostTracking({ tenantId, job: 'product.import' }, () =>
+          service.processAndEnrich(inputSource, aiService.createEnricher()),
         );
       } catch {
         products = await service.process(inputSource);
@@ -484,9 +488,10 @@ export async function uploadOcrImage(req: Request, res: Response): Promise<void>
     if (useAI) {
       try {
         const aiService = new AIProductProcessingService();
-        product = await imageService.processWithAI(
-          inputSource,
-          aiService.createEnricher(),
+        // P3-6: same reasoning as the document import above — a vision extraction per uploaded
+        // product image, invisible to the reply ledger.
+        product = await withJobCostTracking({ tenantId, job: 'product.imageImport' }, () =>
+          imageService.processWithAI(inputSource, aiService.createEnricher()),
         );
       } catch {
         product = await imageService.process(inputSource);

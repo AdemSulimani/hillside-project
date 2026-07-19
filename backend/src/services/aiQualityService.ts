@@ -16,6 +16,7 @@
  */
 import { findTenantById } from '../db/models/tenant';
 import { openai, OPENAI_EVAL_MODEL } from './openaiClient';
+import { withModelRole } from './openaiCallTracker';
 import { logger } from '../utils/logger';
 import {
   buildQualityEvalSystemPrompt,
@@ -62,21 +63,26 @@ export async function evaluateReply(
     const tenant = await findTenantById(tenantId);
     const businessName = tenant?.name ?? 'the business';
 
-    const completion = await openai.chat.completions.create({
-      model: evalModel(),
-      messages: [
-        { role: 'system', content: buildQualityEvalSystemPrompt(businessName) },
-        {
-          role: 'user',
-          content: buildQualityEvalUserContent(inboundMessage, aiReply, productCatalogContext),
-        },
-      ],
-      // Deterministic: the quality score gates flagging/pausing against a fixed threshold,
-      // so sampling randomness would make the same reply flip between flagged and clean.
-      temperature: 0,
-      max_tokens: 256,
-      response_format: { type: 'json_object' },
-    });
+    // P3-6: `eval` is the first role a tier downgrade should target (it is a scoring call, not
+    // customer-facing prose), so it has to be separable from the classifier fan-out in the COGS
+    // split — and in the default config its model id is identical to every other role's.
+    const completion = await withModelRole('eval', () =>
+      openai.chat.completions.create({
+        model: evalModel(),
+        messages: [
+          { role: 'system', content: buildQualityEvalSystemPrompt(businessName) },
+          {
+            role: 'user',
+            content: buildQualityEvalUserContent(inboundMessage, aiReply, productCatalogContext),
+          },
+        ],
+        // Deterministic: the quality score gates flagging/pausing against a fixed threshold,
+        // so sampling randomness would make the same reply flip between flagged and clean.
+        temperature: 0,
+        max_tokens: 256,
+        response_format: { type: 'json_object' },
+      }),
+    );
 
     const content = completion.choices[0]?.message?.content;
     if (!content) {

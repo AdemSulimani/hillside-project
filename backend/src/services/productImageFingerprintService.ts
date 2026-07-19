@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { openai, OPENAI_EMBEDDING_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
+import { withModelRole } from './openaiCallTracker';
 import { generateEmbedding } from './embeddingService';
 import {
   upsertProductImageFingerprint,
@@ -118,22 +119,24 @@ export async function extractCatalogImageFingerprint(
     }
   }
 
-  const completion = await openai.chat.completions.create({
-    model: OPENAI_VISION_MODEL || 'gpt-4o',
-    response_format: { type: 'json_object' },
-    temperature: 0,
-    max_tokens: 700,
-    messages: [
-      { role: 'system', content: CATALOG_FINGERPRINT_SYSTEM },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Extract a visual fingerprint for catalog matching from this product image.' },
-          { type: 'image_url', image_url: { url: imageUrl } },
-        ],
-      },
-    ],
-  });
+  const completion = await withModelRole('vision', () =>
+    openai.chat.completions.create({
+      model: OPENAI_VISION_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 700,
+      messages: [
+        { role: 'system', content: CATALOG_FINGERPRINT_SYSTEM },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Extract a visual fingerprint for catalog matching from this product image.' },
+            { type: 'image_url', image_url: { url: imageUrl } },
+          ],
+        },
+      ],
+    }),
+  );
 
   const raw = completion.choices[0]?.message?.content;
   if (!raw?.trim()) {

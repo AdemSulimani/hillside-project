@@ -95,9 +95,15 @@ export interface LedgerUsage {
   completion_tokens: number | null;
   total_tokens: number | null;
   usd_cost: number | null;
-  /** P1-5 (C-108): EVERY OpenAI call this reply made (classifiers + embeddings + the main
-   * completion) — model ids and token counts only, no text. `usd_cost` above remains the
-   * main completion's cost; `calls_usd_cost` aggregates the priced calls below. */
+  /**
+   * P1-5 (C-108): EVERY OpenAI call this reply made (classifiers + embeddings + the main
+   * completion) — model ids and token counts only, no text.
+   *
+   * ⚠️ `usd_cost` ABOVE IS ALSO ONE OF THESE ENTRIES. It is the main completion's cost, and the
+   * main completion passes through the call tracker like every other call — so `calls_usd_cost`
+   * already contains it and `usd_cost + calls_usd_cost` double-counts the turn's single most
+   * expensive call. Use `services/costAggregation.turnCostUsd`, which encodes the rule once.
+   */
   calls?: Array<{
     kind: string;
     requested: string | null;
@@ -106,6 +112,13 @@ export interface LedgerUsage {
     completion_tokens: number | null;
     total_tokens: number | null;
     usd_cost: number | null;
+    /**
+     * P3-6: the model ROLE this call served. Optional because rows written before P3-6 have no
+     * such key — they fold to the `unattributed` bucket rather than being retro-guessed.
+     */
+    role?: string | null;
+    /** P3-6: prompt tokens served from OpenAI's prefix cache. A SUBSET of `prompt_tokens`. */
+    cached_tokens?: number | null;
   }> | null;
   call_count?: number | null;
   calls_usd_cost?: number | null;

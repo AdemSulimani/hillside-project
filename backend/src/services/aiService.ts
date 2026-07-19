@@ -1,6 +1,7 @@
 import { knobBool, knobNumber, knobString } from '../config/knobs';
 import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
+import { withModelRole } from './openaiCallTracker';
 import type { ProductImageRef } from './productImageRequestService';
 import {
   FACTS_USED_JSON_SCHEMA,
@@ -4768,18 +4769,26 @@ Using packaging-derived details (IMPORTANT — source precedence):
   const replyMaxTokens = useFactsContract ? FACTS_CONTRACT_MAX_TOKENS : 768;
   const effectiveReplyTemperature = useFactsContract ? 0 : replyTemperature;
   const effectiveReplySeed = useFactsContract ? AI_REPLY_SEED : null;
-  const completion = await openai.chat.completions.create({
-    model,
-    messages: messages as Parameters<typeof openai.chat.completions.create>[0]['messages'],
-    temperature: effectiveReplyTemperature,
-    max_tokens: replyMaxTokens,
-    ...(useFactsContract
-      ? {
-          seed: AI_REPLY_SEED,
-          response_format: { type: 'json_schema' as const, json_schema: FACTS_USED_JSON_SCHEMA },
-        }
-      : {}),
-  });
+  // P3-6: label the ONE customer-facing generation with its role. In the default config every
+  // chat-family role resolves to the same `gpt-4o`, so the requested model id cannot distinguish
+  // the reply from the ~20 classifier calls around it — and "what does the reply itself cost vs
+  // the fan-out" is the first question a tiering decision asks. A tenant's `custom_model_id` is
+  // likewise unmapped to any role, so without this label a fine-tuned tenant's reply would be
+  // unattributable. `withModelRole` is a no-op outside a tracking context.
+  const completion = await withModelRole(hasImages ? 'vision' : 'chat', () =>
+    openai.chat.completions.create({
+      model,
+      messages: messages as Parameters<typeof openai.chat.completions.create>[0]['messages'],
+      temperature: effectiveReplyTemperature,
+      max_tokens: replyMaxTokens,
+      ...(useFactsContract
+        ? {
+            seed: AI_REPLY_SEED,
+            response_format: { type: 'json_schema' as const, json_schema: FACTS_USED_JSON_SCHEMA },
+          }
+        : {}),
+    }),
+  );
 
   const finishReason = completion.choices[0]?.finish_reason ?? null;
 
@@ -4831,7 +4840,21 @@ Using packaging-derived details (IMPORTANT — source precedence):
     model: {
       requested: model,
       served: completion.model ?? null,
-      customModelUsed: Boolean(config.custom_model_id),
+      /**
+       * P3-6: reports whether the custom model was ACTUALLY USED, not whether one is configured.
+       *
+       * This read `Boolean(config.custom_model_id)`, which on an image turn said `true` while the
+       * VISION model was served — the M1 drop above means a tenant's fine-tune is configured and
+       * ignored on exactly those turns. That made the field a claim about config wearing the
+       * costume of a claim about behaviour, and it is the field cost attribution and the model-
+       * drift alert both key on: a per-conversation "two different models served" check would
+       * have read `customModelUsed: true` on both a text turn that used the fine-tune and an image
+       * turn that did not, and reported agreement where the whole point was to catch divergence.
+       *
+       * The ROUTING is untouched — M1 stays deliberate and stays pinned by
+       * `config/__tests__/models.test.ts`. Only the telemetry now tells the truth about it.
+       */
+      customModelUsed: !hasImages && Boolean(config.custom_model_id?.trim()),
       temperature: effectiveReplyTemperature,
       maxTokens: replyMaxTokens,
       seed: effectiveReplySeed, // P2-1 (RC-03): fixed seed sent when the facts_used contract is on.
@@ -4843,7 +4866,14 @@ Using packaging-derived details (IMPORTANT — source precedence):
       promptTokens: usage?.prompt_tokens ?? null,
       completionTokens: usage?.completion_tokens ?? null,
       totalTokens: usage?.total_tokens ?? null,
-      usdCost: computeCost(model, usage),
+      // P3-6: price the cached prefix. `prompt_tokens_details.cached_tokens` is a SUBSET of
+      // prompt_tokens, so `computeCost` re-prices rather than adding a term.
+      usdCost: computeCost(model, {
+        prompt_tokens: usage?.prompt_tokens ?? null,
+        completion_tokens: usage?.completion_tokens ?? null,
+        total_tokens: usage?.total_tokens ?? null,
+        cached_tokens: usage?.prompt_tokens_details?.cached_tokens ?? null,
+      }),
     },
     retrieval: retrievalSink.value ?? null,
   };
