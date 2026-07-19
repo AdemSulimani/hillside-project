@@ -11,6 +11,7 @@ import {
   fetchAdminCommissionableOrders,
   fetchAdminBusinessUseCases,
   fetchAdminBusinessUseCasePeriodStats,
+  fetchAdminBusinessCostStats,
   patchAdminOrderCommissionStatus,
   patchAdminUseCaseBillingStatus,
   postAdminVoidUseCase,
@@ -111,6 +112,14 @@ export default function AdminBusinessDetailPage() {
     queryKey: ['admin', 'business', tenantId, 'use-cases', useCasesPage],
     queryFn: () => fetchAdminBusinessUseCases(tenantId!, useCasesPage, USE_CASES_PAGE_SIZE),
     enabled: Boolean(tenantId),
+  });
+
+  // P3-6: per-tenant COGS for the same period the commissions tab uses, so cost and revenue are
+  // read against an identical window — the whole point being to compare them.
+  const costStatsQuery = useQuery({
+    queryKey: ['admin', 'business', tenantId, 'cost-stats', periodStart, periodEnd],
+    queryFn: () => fetchAdminBusinessCostStats(tenantId!, periodStart, periodEnd),
+    enabled: Boolean(tenantId) && periodValid,
   });
 
   const useCasesFeeLookupQuery = useQuery({
@@ -287,6 +296,7 @@ export default function AdminBusinessDetailPage() {
           <TabsList className="w-fit">
             <TabsTrigger value="ai">AI assistant</TabsTrigger>
             <TabsTrigger value="commissions">Commissions</TabsTrigger>
+            <TabsTrigger value="cost">Cost</TabsTrigger>
           </TabsList>
           <TabsContent value="ai" className="mt-4 space-y-6">
             <Card>
@@ -784,6 +794,187 @@ export default function AdminBusinessDetailPage() {
               ) : null}
             </section>
 
+          </TabsContent>
+
+          {/* ── P3-6: COGS — what serving this tenant's AI actually costs us ───────────── */}
+          <TabsContent value="cost" className="mt-4 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">AI cost of goods sold</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  OpenAI spend behind this business's AI replies, for the date range selected on the
+                  Commissions tab. Internal only — the business never sees these figures.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {!periodValid ? (
+                  <p className="text-sm text-muted-foreground">
+                    Select a valid date range on the Commissions tab.
+                  </p>
+                ) : costStatsQuery.isPending ? (
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {Array.from({ length: 4 }).map((_, i) => (
+                      <Skeleton key={i} className="h-20 w-full" />
+                    ))}
+                  </div>
+                ) : costStatsQuery.isError ? (
+                  <p className="text-sm text-destructive">Failed to load cost stats.</p>
+                ) : costStatsQuery.data && costStatsQuery.data.rows_in_window === 0 ? (
+                  /*
+                   * Never render €0.00 here. The decision ledger defaults to OFF, so an empty
+                   * window is overwhelmingly likely to mean "nothing was recorded" rather than
+                   * "nothing was spent" — and a confident zero on a cost panel is the kind of
+                   * wrong number someone makes a pricing decision on.
+                   */
+                  <div className="space-y-2 text-sm">
+                    <p className="font-medium">No ledger rows in this window.</p>
+                    <p className="text-muted-foreground">
+                      This is <span className="font-medium text-foreground">not</span> the same as
+                      zero spend. <code className="text-xs">AI_DECISION_LEDGER_ENABLED</code>{' '}
+                      defaults to false; it is{' '}
+                      {costStatsQuery.data.ledger_enabled_on_this_process ? 'on' : 'off'} on the API
+                      process serving this page. The ledger is written by the{' '}
+                      <span className="font-medium text-foreground">worker</span> processes, so
+                      check those too — and <code className="text-xs">config_fingerprints</code> if
+                      the fleet may have drifted.
+                    </p>
+                  </div>
+                ) : costStatsQuery.data ? (
+                  (() => {
+                    const c = costStatsQuery.data;
+                    const revenue =
+                      (statsQuery.data?.commission_unpaid ?? 0) +
+                      (statsQuery.data?.commission_billed ?? 0) +
+                      (statsQuery.data?.commission_paid ?? 0) +
+                      (useCaseStatsQuery.data?.use_case_fees_unbilled ?? 0) +
+                      (useCaseStatsQuery.data?.use_case_fees_billed ?? 0) +
+                      (useCaseStatsQuery.data?.use_case_fees_paid ?? 0);
+                    const stat = (label: string, value: string, hint?: string) => (
+                      <div key={label} className="rounded-lg border p-4">
+                        <p className="text-xs text-muted-foreground">{label}</p>
+                        <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
+                        {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
+                      </div>
+                    );
+                    const usd = (n: number | null) =>
+                      n === null ? '—' : `$${n.toFixed(n < 1 ? 4 : 2)}`;
+
+                    return (
+                      <>
+                        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                          {stat('Total COGS', usd(c.usd_cost), `${c.calls} OpenAI calls`)}
+                          {stat('Per reply', usd(c.usd_per_turn), `${c.turns} replies`)}
+                          {stat(
+                            'Per conversation',
+                            usd(c.usd_per_conversation),
+                            `${c.conversations} conversations`,
+                          )}
+                          {stat(
+                            'Calls per reply',
+                            c.turns > 0 ? (c.calls / c.turns).toFixed(1) : '—',
+                            'a spike here is a classifier loop',
+                          )}
+                        </div>
+
+                        <div className="grid gap-4 sm:grid-cols-3">
+                          {stat(
+                            'Billed revenue',
+                            formatCurrency(revenue),
+                            'commission + use-case fees (EUR)',
+                          )}
+                          {stat(
+                            'COGS / revenue',
+                            revenue > 0 ? `~${Math.round((c.usd_cost / revenue) * 100)}%` : '—',
+                            // Deliberately marked approximate: COGS is USD and revenue is EUR, so
+                            // this ratio is off by the prevailing rate (~8%). It is a health
+                            // indicator, not a figure to bill or price from.
+                            'approx — USD cost vs EUR revenue, unconverted',
+                          )}
+                          {stat(
+                            'Prompt cache hit',
+                            c.cached_prompt_ratio === null
+                              ? '—'
+                              : `${Math.round(c.cached_prompt_ratio * 100)}%`,
+                            'share of prompt tokens served from cache',
+                          )}
+                        </div>
+
+                        {c.unpriced_calls > 0 ? (
+                          /*
+                           * Surfaced, never swallowed: an unpriced call is COUNTED but costs 0, so
+                           * the total above is LOW. A cost figure drifting downward because OpenAI
+                           * shipped a model id we have no price for reads as an improvement.
+                           */
+                          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                            <span className="font-medium">
+                              {c.unpriced_calls} of {c.calls} calls had no price entry.
+                            </span>{' '}
+                            The total above understates real spend. Add the model to{' '}
+                            <code className="text-xs">OPENAI_MODEL_PRICES</code> or the built-in
+                            table in <code className="text-xs">modelPricing.ts</code>.
+                          </p>
+                        ) : null}
+
+                        <div className="grid gap-6 lg:grid-cols-2">
+                          {(
+                            [
+                              ['By role', c.by_role.map((r) => ({ key: r.role, ...r }))],
+                              ['By model', c.by_model.map((m) => ({ key: m.model, ...m }))],
+                            ] as const
+                          ).map(([title, rows]) => (
+                            <div key={title} className="space-y-2">
+                              <p className="text-sm font-medium">{title}</p>
+                              <div className="overflow-x-auto rounded-lg border">
+                                <table className="w-full text-sm">
+                                  <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
+                                    <tr>
+                                      <th className="p-2 font-medium">Name</th>
+                                      <th className="p-2 text-right font-medium">Calls</th>
+                                      <th className="p-2 text-right font-medium">Cost</th>
+                                      <th className="p-2 text-right font-medium">Share</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {rows.map((r) => (
+                                      <tr key={r.key} className="border-t">
+                                        <td className="p-2">
+                                          {r.key}
+                                          {r.key === 'unattributed' ? (
+                                            <span className="ml-2 text-xs text-muted-foreground">
+                                              role could not be determined
+                                            </span>
+                                          ) : null}
+                                        </td>
+                                        <td className="p-2 text-right tabular-nums">{r.calls}</td>
+                                        <td className="p-2 text-right tabular-nums">
+                                          {usd(r.usd_cost)}
+                                        </td>
+                                        <td className="p-2 text-right tabular-nums">
+                                          {Math.round(r.share * 100)}%
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <p className="text-xs text-muted-foreground">
+                          Source: {c.source}. Token totals — prompt{' '}
+                          {c.prompt_tokens.toLocaleString()} (of which{' '}
+                          {c.cached_tokens.toLocaleString()} cached), completion{' '}
+                          {c.completion_tokens.toLocaleString()}. Background-job spend (product
+                          imports, image fingerprinting) is recorded separately and is not included
+                          in this reply-path view.
+                        </p>
+                      </>
+                    );
+                  })()
+                ) : null}
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       ) : null}

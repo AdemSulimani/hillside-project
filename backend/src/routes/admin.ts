@@ -39,6 +39,7 @@ import * as adminAuthController from '../controllers/adminAuthController';
 import * as adminCommissionController from '../controllers/adminCommissionController';
 import * as adminAiController from '../controllers/adminAiController';
 import * as adminDeadLetterController from '../controllers/adminDeadLetterController';
+import * as adminCostController from '../controllers/adminCostController';
 
 const router = Router();
 
@@ -129,6 +130,17 @@ ownerRoutes.get(
   validateQuery(adminBusinessListQuerySchema),
   adminCommissionController.listBusinessUseCases,
 );
+
+// P3-6 (OBS-2/C-108): per-tenant COGS. Admin-only — the merchant Credits surface stays
+// revenue-only, because serving cost is Hillside's margin data on a commission product.
+// Reuses the existing period-query schema; no new validator needed.
+ownerRoutes.get(
+  '/businesses/:tenantId/cost-stats',
+  validateParams(adminTenantIdParamsSchema),
+  validateQuery(adminPeriodQueryRequiredSchema),
+  adminCostController.businessCostStats,
+);
+ownerRoutes.get('/dashboard/cost-summary', adminCostController.dashboardCostSummary);
 ownerRoutes.post(
   '/businesses/:tenantId/use-cases/stamp-fees',
   validateParams(adminTenantIdParamsSchema),

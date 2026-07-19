@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { findProductById } from '../db/models/product';
 import { generateEmbedding, buildProductText } from '../services/embeddingService';
 import { OPENAI_EMBEDDING_MODEL } from '../services/openaiClient';
+import { withJobCostTracking } from '../services/costRecorder';
 import { toSql } from 'pgvector';
 
 export interface GenerateProductEmbeddingJobData {
@@ -51,7 +52,11 @@ export async function processGenerateProductEmbedding(
   const inputHash = hashEmbeddingInput(text);
   const modelName = OPENAI_EMBEDDING_MODEL;
 
-  const vector = await generateEmbedding(text);
+  // P3-6: batch embedding is cheap per call but runs once per product per re-embed — at 5k
+  // products a full re-index is a single line item worth being able to see.
+  const vector = await withJobCostTracking({ tenantId, job: 'product.embedding' }, () =>
+    generateEmbedding(text),
+  );
 
   await pool.query(
     `UPDATE products

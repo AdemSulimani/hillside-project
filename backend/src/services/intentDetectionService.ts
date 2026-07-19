@@ -1,5 +1,6 @@
 import type { Message } from '../db/models/message';
 import { openai, OPENAI_INTENT_MODEL } from './openaiClient';
+import { withModelRole } from './openaiCallTracker';
 import { logSafeStructured } from '../utils/redact';
 import { logger } from '../utils/logger';
 import { buildJsonSchema, parseStructuredCompletion, z } from './structuredClassifier';
@@ -197,24 +198,28 @@ The is_ready_to_order field must only be true if intent_score is above 0.85 AND 
 
 Respond with a single JSON object only (no markdown), matching that shape exactly.`;
 
-  const completion = await openai.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: `Tenant context id: ${tenantId}\n\nTranscript:\n${transcript}`,
-      },
-    ],
-    // Deterministic: purchase-intent gates draft-order creation against a fixed score
-    // threshold, so any sampling randomness causes near-boundary messages to flip between
-    // "create order" and "skip" across runs/retries.
-    temperature: 0,
-    max_tokens: 512,
-    response_format: INTENT_STRUCTURED_CONTRACT
-      ? buildJsonSchema('purchase_intent', INTENT_RESULT_SCHEMA)
-      : ({ type: 'json_object' } as const),
-  });
+  // P3-6: `intent` sends the whole transcript, so it is one of the larger prompts in the turn and
+  // must be separable from the classifier fan-out in the COGS split.
+  const completion = await withModelRole('intent', () =>
+    openai.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: `Tenant context id: ${tenantId}\n\nTranscript:\n${transcript}`,
+        },
+      ],
+      // Deterministic: purchase-intent gates draft-order creation against a fixed score
+      // threshold, so any sampling randomness causes near-boundary messages to flip between
+      // "create order" and "skip" across runs/retries.
+      temperature: 0,
+      max_tokens: 512,
+      response_format: INTENT_STRUCTURED_CONTRACT
+        ? buildJsonSchema('purchase_intent', INTENT_RESULT_SCHEMA)
+        : ({ type: 'json_object' } as const),
+    }),
+  );
 
   const choice = completion.choices[0];
   const content = choice?.message?.content;

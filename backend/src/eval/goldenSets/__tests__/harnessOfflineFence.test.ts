@@ -49,6 +49,9 @@ const PAID_RUNNERS = [
   'quality/offlineScorer.ts',
   'quality/parityReport.ts',
   'runners/replayRepeat.ts',
+  // P3-6: the model-tier downgrade gate. Calls OpenAI twice per corpus case (baseline arm +
+  // candidate arm) and again per `--runs` for the determinism check, so it is squarely paid.
+  'runners/tierDowngrade.ts',
 ];
 
 /**

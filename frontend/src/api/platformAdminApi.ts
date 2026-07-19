@@ -216,6 +216,68 @@ export async function fetchAdminBusinessUseCasePeriodStats(
   return data.data!;
 }
 
+/**
+ * P3-6 — per-tenant COGS (cost of goods sold: the OpenAI spend behind a tenant's AI replies).
+ *
+ * ADMIN-ONLY. This is Hillside's own margin data on a commission product, so it is deliberately
+ * absent from the merchant-facing Credits page.
+ */
+export interface TenantCostStats {
+  turns: number;
+  conversations: number;
+  calls: number;
+  priced_calls: number;
+  /** calls - priced_calls. Non-zero means the total below UNDERSTATES real spend. */
+  unpriced_calls: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  completion_tokens: number;
+  usd_cost: number;
+  usd_per_turn: number | null;
+  usd_per_conversation: number | null;
+  cached_prompt_ratio: number | null;
+  by_role: Array<{ role: string; calls: number; usd_cost: number; share: number }>;
+  by_model: Array<{ model: string; calls: number; usd_cost: number; share: number }>;
+  /** Ledger rows in the window. 0 with the flag on simply means no AI traffic. */
+  rows_in_window: number;
+  turns_without_usage: number;
+  /** A HINT, not a fact — the ledger is written by workers, this endpoint is served by the API. */
+  ledger_enabled_on_this_process: boolean;
+  source: 'ledger' | 'rollup';
+}
+
+export async function fetchAdminBusinessCostStats(
+  tenantId: string,
+  periodStart: string,
+  periodEnd: string,
+) {
+  const { data } = await adminApi.get<ApiResponse<TenantCostStats>>(
+    `/admin/businesses/${tenantId}/cost-stats`,
+    { params: { period_start: periodStart, period_end: periodEnd } },
+  );
+  return data.data!;
+}
+
+export interface FleetCostSummary {
+  period: string;
+  total_usd_cost: number;
+  total_turns: number;
+  total_calls: number;
+  tenants: Array<{
+    tenant_id: string;
+    tenant_name: string | null;
+    usd_cost: number;
+    turns: number;
+    calls: number;
+  }>;
+  ledger_enabled_on_this_process: boolean;
+}
+
+export async function fetchAdminCostSummary() {
+  const { data } = await adminApi.get<ApiResponse<FleetCostSummary>>('/admin/dashboard/cost-summary');
+  return data.data!;
+}
+
 export async function patchAdminUseCaseBillingStatus(
   useCaseId: string,
   body: { billing_status: AdminUseCaseRow['billing_status'] },

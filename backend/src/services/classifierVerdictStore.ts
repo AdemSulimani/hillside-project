@@ -19,9 +19,16 @@
  * burst-merge) — the same keying discipline as `deriveReplyIdempotencyKey` (P1-1).
  */
 import { redisConnection } from '../jobs/redisConnection';
+import { knobBool } from '../config/knobs';
 
-export const CLASSIFIER_VERDICT_PERSISTENCE =
-  (process.env.CLASSIFIER_VERDICT_PERSISTENCE ?? 'false').trim().toLowerCase() === 'true';
+/**
+ * P3-6: routed through the knob manifest. It was a bare `process.env` read, which meant
+ * `config:check`, `.env.example` drift detection and the fleet config fingerprint were all blind
+ * to it — and this flag decides whether a detector's verdict is stable across a BullMQ retry, so
+ * two workers disagreeing about it is precisely the RC-08 outcome-flip the store exists to
+ * prevent. It is also a real cost lever: cached verdicts remove repeat classifier calls on retry.
+ */
+export const CLASSIFIER_VERDICT_PERSISTENCE = knobBool('CLASSIFIER_VERDICT_PERSISTENCE');
 
 /** TTL for a persisted verdict — 6h, well beyond any BullMQ retry/backoff horizon. */
 const VERDICT_TTL_SECONDS = 6 * 3600;

@@ -1,5 +1,6 @@
 import type OpenAI from 'openai';
 import { resolveModel } from '../config/models';
+import { withModelRole } from './openaiCallTracker';
 import type { ExtractedProductData } from './documents/AttachDocumentService';
 import { openai } from './openaiClient';
 import { parsePrice } from './documents/priceParsing';
@@ -53,21 +54,27 @@ export class AIProductProcessingService {
 
     const truncated = rawText.slice(0, 8000);
 
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: `Extract product data from the following text:\n\n${truncated}`,
-        },
-      ],
-      // Deterministic extraction so the same source document always yields the same
-      // structured product data (names, prices, attributes) instead of drifting per run.
-      temperature: 0,
-      max_tokens: 4096,
-      response_format: { type: 'json_object' },
-    });
+    // P3-6: an 8000-char extraction at 4096 max_tokens is the single largest call in the system,
+    // and `product_processing` resolves to OPENAI_CHAT_MODEL whenever that is set — so its id is
+    // indistinguishable from the reply's. The label is what keeps an import's cost from being
+    // silently folded into conversation COGS.
+    const response = await withModelRole('product_processing', () =>
+      this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: `Extract product data from the following text:\n\n${truncated}`,
+          },
+        ],
+        // Deterministic extraction so the same source document always yields the same
+        // structured product data (names, prices, attributes) instead of drifting per run.
+        temperature: 0,
+        max_tokens: 4096,
+        response_format: { type: 'json_object' },
+      }),
+    );
 
     const content = response.choices[0]?.message?.content;
     if (!content) return [];

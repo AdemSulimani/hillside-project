@@ -46,13 +46,17 @@ import { registerLocalWorker } from '../services/localWorkerRegistry';
 import { runLedgerRetentionSweep } from '../services/ledgerRetention';
 import { tick as runDeadLetterMetricsTick } from '../services/deadLetterMonitor';
 import { runPromptRegistryReconcile } from '../services/promptRegistryReconcile';
+import { runCostRollupSweep } from '../services/costRollup';
+import { runCostAnomalyScan } from '../services/costAnomalyMonitor';
 import {
   LEDGER_RETENTION_JOB,
   DLQ_METRICS_JOB,
   PROMPT_REGISTRY_JOB,
+  AI_COST_ROLLUP_JOB,
   initLedgerRetentionScheduler,
   initDeadLetterMetricsScheduler,
   initPromptRegistryScheduler,
+  initAiCostRollupScheduler,
   removeDeadLetterMetricsScheduler,
 } from './maintenanceSchedulers';
 
@@ -189,6 +193,14 @@ export const defaultWorker = new Worker<
       await runPromptRegistryReconcile();
       return;
     }
+    // P3-6: fold the ledger into ai_cost_daily, then scan the freshly-written rollup for cost
+    // anomalies. One job, in this order, deliberately — the alerter reads the numbers the sweep
+    // just wrote, so it sees a consistent snapshot instead of racing a concurrent rewrite.
+    if (job.name === AI_COST_ROLLUP_JOB) {
+      await runCostRollupSweep();
+      await runCostAnomalyScan();
+      return;
+    }
     if (job.name === 'embeddingReconcile') {
       await processReconcileProductEmbeddings();
       return;
@@ -310,6 +322,10 @@ void initLedgerRetentionScheduler().catch((err) => {
 
 void initPromptRegistryScheduler().catch((err) => {
   console.error('[jobs] Failed to register prompt registry scheduler', err);
+});
+
+void initAiCostRollupScheduler().catch((err) => {
+  console.error('[jobs] Failed to register AI cost rollup scheduler', err);
 });
 
 // The scheduler record lives in Redis, so turning the flag off must actively REMOVE it — otherwise

@@ -24,6 +24,7 @@ import { knobNumber } from '../config/knobs';
 export const LEDGER_RETENTION_JOB = 'ledgerRetentionSweep';
 export const DLQ_METRICS_JOB = 'deadLetterMetrics';
 export const PROMPT_REGISTRY_JOB = 'promptRegistryReconcile';
+export const AI_COST_ROLLUP_JOB = 'aiCostRollup';
 
 const DLQ_METRICS_INTERVAL_MS = (() => {
   const raw = process.env.DLQ_METRICS_INTERVAL_MS;
@@ -87,6 +88,33 @@ export async function initPromptRegistryScheduler(): Promise<void> {
     },
   );
   console.info('[jobs] Prompt registry reconcile scheduler registered', { everyMs });
+}
+
+/**
+ * P3-6: the COGS rollup + anomaly sweep.
+ *
+ * Registered unconditionally, following `initPromptRegistryScheduler` rather than the
+ * flag-gated DLQ one — a scheduler record lives in Redis, so registering it only while a flag is
+ * on leaves a stale record firing forever once the flag goes off, which is the exact problem
+ * `removeDeadLetterMetricsScheduler` exists to clean up. `runCostRollupSweep` returns immediately
+ * when `AI_COST_ROLLUP_ENABLED` is false, so an unconfigured fleet pays one no-op job per tick.
+ *
+ * Fleet-singleton like its siblings: this issues DELETE/INSERT against `ai_cost_daily`, and N
+ * replicas running N concurrent partition rewrites of the same tenant-day is a race, not a
+ * duplicate log line.
+ */
+export async function initAiCostRollupScheduler(): Promise<void> {
+  const everyMs = knobNumber('AI_COST_ROLLUP_INTERVAL_MS');
+  await defaultQueue.upsertJobScheduler(
+    AI_COST_ROLLUP_JOB,
+    { every: everyMs },
+    {
+      name: AI_COST_ROLLUP_JOB,
+      data: {} as Record<string, never>,
+      opts: { removeOnComplete: 10, removeOnFail: 50 },
+    },
+  );
+  console.info('[jobs] AI cost rollup scheduler registered', { everyMs });
 }
 
 /**
