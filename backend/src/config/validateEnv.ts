@@ -306,6 +306,15 @@ function logPosture(): void {
   // (The former PROMPT_SELF_HEAL_OFF_HOT_PATH-without-registry warning is gone: the reconcile
   // sweep's marker/force-sync steps now run for either flag, so the combination is safe.)
 
+  // P3-2: read-replica seam posture (infra URL, REDIS_URL-style — not a manifest knob).
+  console.info(
+    `[db] DATABASE_REPLICA_URL=${
+      process.env.DATABASE_REPLICA_URL?.trim()
+        ? 'set (statistics/dashboard/cost reads → replica pool)'
+        : 'unset (all reads on the primary)'
+    }`,
+  );
+
   // P2-6: provider-failure isolation. `OPENAI_TIMEOUT_MS` is PER ATTEMPT, so state the real
   // worst-case a reader would otherwise have to compute from two knobs.
   const degrade = flag('GRACEFUL_DEGRADE_MODE');

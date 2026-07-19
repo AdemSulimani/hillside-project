@@ -3,6 +3,7 @@ import { toSql } from 'pgvector';
 import { extractBaseName } from '../../services/productTitleNormalization';
 import { shouldEscalateEfSearch, clampEfSearch } from '../vectorSearchPolicy';
 import { iterativeScanSetting } from '../vectorCapability';
+import { quoteUuidLiteral, tenantHasPartialIndex } from '../vectorPartialIndexes';
 import { knobNumber } from '../../config/knobs';
 
 export interface Product {
@@ -770,11 +771,24 @@ export async function searchProductsBySimilarity(
   // products. Rows with a NULL model are treated as compatible (legacy rows embedded
   // before the model column existed share the current model/dimensions); they are healed
   // by the reconcile job over time.
+  // P3-2 (RC-04): when this tenant has its own partial HNSW index, its id goes into the SQL as a
+  // LITERAL — the planner can never prove a partial-index predicate against a bound `$1`, so
+  // without inlining every per-tenant index is dead weight. `tenantHasPartialIndex` fails open to
+  // `false` (flag off, non-UUID, lookup error) and `quoteUuidLiteral` re-validates the UUID shape,
+  // so the parameterized global-index path stays the default and the literal is injection-safe by
+  // construction.
+  const inlineTenant = await tenantHasPartialIndex(tenantId);
+  const params: unknown[] = [];
+  const bind = (v: unknown): string => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const tenantExpr = inlineTenant ? quoteUuidLiteral(tenantId) : bind(tenantId);
+  const embeddingExpr = bind(toSql(queryEmbedding));
+  const limitExpr = bind(limit);
   const modelGuard = expectedModel
-    ? 'AND (embedding_model IS NULL OR embedding_model = $4)'
+    ? `AND (embedding_model IS NULL OR embedding_model = ${bind(expectedModel)})`
     : '';
-  const params: unknown[] = [tenantId, toSql(queryEmbedding), limit];
-  if (expectedModel) params.push(expectedModel);
 
   // P3-2: null unless the operator enabled the flag AND the boot probe confirmed pgvector >= 0.8.
   // Resolved ONCE per call so both passes of a single search agree.
@@ -791,15 +805,15 @@ export async function searchProductsBySimilarity(
         await client.query(`SET LOCAL hnsw.iterative_scan = '${iterativeScan}'`);
       }
       const { rows } = await client.query<SimilarProduct>(
-        `SELECT *, 1 - (embedding <=> $2) AS similarity
+        `SELECT *, 1 - (embedding <=> ${embeddingExpr}) AS similarity
          FROM products
-         WHERE tenant_id = $1
+         WHERE tenant_id = ${tenantExpr}
            AND deleted_at IS NULL
            AND is_active = true
            AND embedding IS NOT NULL
            ${modelGuard}
-         ORDER BY embedding <=> $2
-         LIMIT $3`,
+         ORDER BY embedding <=> ${embeddingExpr}
+         LIMIT ${limitExpr}`,
         params,
       );
       await client.query('COMMIT');

@@ -19,6 +19,7 @@
     "eval:fluency": "tsx src/eval/ghegFluency/judge.ts",
     "eval:live-replay": "tsx src/eval/runners/replayRepeat.ts",
     "eval:tier": "tsx src/eval/runners/tierDowngrade.ts",
+    "loadtest:fairness": "tsx src/loadtest/fairnessHarness.ts",
     "repair-product-text": "tsx src/scripts/repairProductTextEncoding.ts",
     "redact-alert-details": "tsx src/scripts/redactAlertDetails.ts",
     "migrate": "tsx src/db/migrate.ts",

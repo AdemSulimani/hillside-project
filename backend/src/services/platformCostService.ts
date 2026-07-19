@@ -10,7 +10,8 @@
  * `->>` yields SQL NULL, and COALESCE falls through — the same order the pure function takes.
  * Summing the two columns would DOUBLE-COUNT the main generation, which appears in both.
  */
-import pool from '../db/pool';
+// P3-2: replica-tolerant analytics reads. With DATABASE_REPLICA_URL unset this IS db/pool.
+import pool from '../db/readPool';
 import { queryCostDaily } from '../db/models/aiCostDaily';
 import { summarizeCogs, type CogsSummary, type CostRollupRow } from './costAggregation';
 import { UNATTRIBUTED_ROLE } from './costAggregation';

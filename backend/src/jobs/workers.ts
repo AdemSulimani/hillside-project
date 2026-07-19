@@ -53,12 +53,15 @@ import {
   DLQ_METRICS_JOB,
   PROMPT_REGISTRY_JOB,
   AI_COST_ROLLUP_JOB,
+  VECTOR_PARTIAL_INDEX_JOB,
   initLedgerRetentionScheduler,
   initDeadLetterMetricsScheduler,
   initPromptRegistryScheduler,
   initAiCostRollupScheduler,
+  initVectorPartialIndexScheduler,
   removeDeadLetterMetricsScheduler,
 } from './maintenanceSchedulers';
+import { runVectorPartialIndexSweep } from '../db/vectorPartialIndexes';
 
 /** Shared BullMQ worker tuning to reduce idle / polling Redis traffic. */
 const redisOptimizedWorkerOptions: Pick<
@@ -201,6 +204,12 @@ export const defaultWorker = new Worker<
       await runCostAnomalyScan();
       return;
     }
+    // P3-2 (RC-04): reconcile per-tenant partial HNSW indexes. Fleet-singleton is mandatory here —
+    // two replicas racing CREATE INDEX CONCURRENTLY on the same name is a deadlock class.
+    if (job.name === VECTOR_PARTIAL_INDEX_JOB) {
+      await runVectorPartialIndexSweep();
+      return;
+    }
     if (job.name === 'embeddingReconcile') {
       await processReconcileProductEmbeddings();
       return;
@@ -326,6 +335,10 @@ void initPromptRegistryScheduler().catch((err) => {
 
 void initAiCostRollupScheduler().catch((err) => {
   console.error('[jobs] Failed to register AI cost rollup scheduler', err);
+});
+
+void initVectorPartialIndexScheduler().catch((err) => {
+  console.error('[jobs] Failed to register vector partial-index scheduler', err);
 });
 
 // The scheduler record lives in Redis, so turning the flag off must actively REMOVE it — otherwise

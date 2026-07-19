@@ -1,4 +1,5 @@
-import pool from '../db/pool';
+// P3-2: replica-tolerant analytics reads. With DATABASE_REPLICA_URL unset this IS db/pool.
+import pool from '../db/readPool';
 import { redisConnection } from '../jobs/queues';
 
 const STATS_CACHE_TTL_SECONDS = 300;

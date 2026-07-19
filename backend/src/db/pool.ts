@@ -14,9 +14,11 @@ function isDigitalOceanPostgres(host: string) {
  * `DATABASE_URL` from DigitalOcean includes `sslmode=require`. node-pg parses that as
  * verify-full and ignores our Pool `ssl` option enough that TLS still fails with
  * SELF_SIGNED_CERT_IN_CHAIN. Strip those params and set `ssl` on the Pool explicitly.
+ *
+ * Exported (P3-2 read replica) so `readPool.ts` applies the identical SSL handling to
+ * `DATABASE_REPLICA_URL` — a replica on the same provider has the same certificate story.
  */
-function buildPoolConfig(): PoolConfig {
-  const raw = process.env.DATABASE_URL;
+export function buildPoolConfigFor(raw: string | undefined): PoolConfig {
   if (!raw) return {};
 
   let u: URL;
@@ -67,7 +69,7 @@ const poolSettings = buildRolePoolSettings({ role: poolRoleFromProcessRole(resol
 const sessionOptions = buildSessionOptions(poolSettings);
 
 const pool = new Pool({
-  ...buildPoolConfig(),
+  ...buildPoolConfigFor(process.env.DATABASE_URL),
   max: poolSettings.max,
   idleTimeoutMillis: poolSettings.idleTimeoutMillis,
   connectionTimeoutMillis: poolSettings.connectionTimeoutMillis,

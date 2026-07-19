@@ -716,6 +716,43 @@ export const KNOBS: readonly KnobSpec[] = [
         'unless db/vectorCapability.ts probed support, since SETting an unknown hnsw.* GUC errors ' +
         'inside the similarity query\'s transaction and would take retrieval to zero.',
     }),
+  bool('VECTOR_TENANT_PARTIAL_INDEX', false,
+    'Maintain + use per-tenant partial HNSW indexes over products.embedding (P3-2/RC-04)',
+    {
+      binding: 'per-call',
+      rationale:
+        'The global HNSW index ranks ALL tenants\' vectors and post-filters by tenant, so a small ' +
+        'tenant\'s true matches can be crowded out of the ef_search candidate pool by big tenants. ' +
+        'Flag-on, a fleet-singleton sweep maintains a partial index per large tenant (CREATE INDEX ' +
+        'CONCURRENTLY — runtime DDL, deliberately not a migration: the set is data-dependent), and ' +
+        'the similarity query inlines the tenant UUID as a LITERAL for those tenants — a partial ' +
+        'index predicate can never match a $1 parameter at plan time, so without inlining every ' +
+        'per-tenant index is dead weight. The UUID is regex-validated before inlining; any doubt ' +
+        'falls back to the parameterized global-index path.',
+    }),
+  num('VECTOR_PARTIAL_INDEX_MIN_ROWS', 'int', 2000, { min: 100, max: 1_000_000 }, 'per-call',
+    'Embedded-row threshold above which a tenant earns its own partial HNSW index (P3-2)', {
+      rationale:
+        'Below this the global index + ef_search escalation serves recall fine and a dedicated ' +
+        'index is pure write amplification (every embedding upsert maintains one more HNSW graph). ' +
+        'Sized for the 5k-product tenant class; the 257-row dev tenant must NOT qualify. Indexes ' +
+        'are dropped only below HALF this threshold (hysteresis), so a tenant hovering at the ' +
+        'boundary does not churn CREATE/DROP INDEX CONCURRENTLY cycles.',
+    }),
+  num('VECTOR_PARTIAL_INDEX_MAX_TENANTS', 'int', 25, { min: 1, max: 500 }, 'per-call',
+    'Cap on concurrent per-tenant partial vector indexes, largest tenants first (P3-2)', {
+      rationale:
+        'Each partial index is maintained on every qualifying products write. The cap bounds the ' +
+        'fleet-wide write amplification; tenants beyond it stay on the global-index path, which ' +
+        'remains correct — just less candidate-pool-isolated.',
+    }),
+  num('VECTOR_PARTIAL_INDEX_INTERVAL_MS', 'int', 21_600_000, { min: 60_000, max: 86_400_000 }, 'frozen',
+    'Cadence of the per-tenant partial-index reconcile sweep (P3-2)', {
+      rationale:
+        'Catalog sizes move on human timescales (imports), so 6h bounds how long a newly-large ' +
+        'tenant waits for its index while keeping CONCURRENTLY builds — minutes of background I/O ' +
+        'each — rare. The sweep is a no-op when nothing crossed a threshold.',
+    }),
   bool('GRACEFUL_DEGRADE_MODE', false,
     'One safe floor when the provider fails mid-turn: holding reply + escalate (P2-6/RC-19)',
     {
