@@ -26,6 +26,7 @@ import {
   shouldDegradeTurn,
   turnProviderFailures,
 } from '../providerResilience';
+import { decideSensitiveDetectorFailureRoute } from '../sensitivePathFailClosed';
 
 type Outcome = { kind: 'sent'; text: string } | { kind: 'degraded' } | { kind: 'no_reply' };
 
@@ -152,23 +153,125 @@ describe('P2-6 degradation gate', () => {
     assert.equal(outcome.kind, 'degraded', 'the refund demand must never receive a sales reply');
   });
 
-  it('with P0-4 ON the sensitive path escalates first and the gate is never reached', async () => {
+  it('with P0-4 ON a NON-provider detector bug still escalates first (the gate is never reached)', async () => {
     const SENSITIVE_PATH_FAIL_CLOSED = true;
     const outcome = await runTurn({
       degradeEnabled: true,
       guards: async () => {
         try {
-          noteProviderFailure('chat', 'call_timeout');
-          throw new ProviderUnavailableError('call_timeout', 'chat');
+          // A detector code bug — NOT provider-caused (no ALS failure recorded, plain Error).
+          throw new Error('detector bug');
         } catch (err) {
-          if (SENSITIVE_PATH_FAIL_CLOSED) return null; // escalate + sentinel ⇒ umbrella returns
-          throw err;
+          const route = decideSensitiveDetectorFailureRoute({
+            failClosed: SENSITIVE_PATH_FAIL_CLOSED,
+            providerCaused: turnProviderFailures().length > 0 || err instanceof ProviderUnavailableError,
+            degradeModeOn: true,
+          });
+          assert.equal(route, 'escalate');
+          return null; // escalate + sentinel ⇒ umbrella returns
         }
       },
     });
     // Composes correctly: the two floors do not fight — whichever fires first wins, and both
     // outcomes are "a human sees this", never a sales reply.
     assert.equal(outcome.kind, 'no_reply');
+  });
+});
+
+/**
+ * F4 (dev validation Finding 4) — the detector catch, as a MIRROR of runSensitiveDetector's
+ * composition:
+ *
+ *     catch (err) {
+ *       const providerCaused = turnProviderFailures().length > 0
+ *         || err instanceof ProviderUnavailableError;
+ *       const route = decideSensitiveDetectorFailureRoute({ failClosed, providerCaused, degradeModeOn });
+ *       'rethrow' → throw err;  'degrade' → floor (no pause) + sentinel;  'escalate' → pause + sentinel
+ *     }
+ *
+ * The detectors run FIRST in the turn and call the provider, so a global outage always struck them
+ * before the pre-send gate could classify the turn — the fail-closed pause fanned out to every
+ * mid-turn conversation and the no-pause floor was unreachable in exactly the scenario it was
+ * built for. Provider-caused failures now take the floor; detector code bugs keep the pause.
+ */
+describe('F4: detector failures during an outage resolve to the floor', () => {
+  /** Mirrors the detector-catch routing over the same fixtures the gate tests use. */
+  async function detectorCatchRoute(opts: {
+    failClosed: boolean;
+    degradeModeOn: boolean;
+    fault: 'provider_via_als' | 'provider_via_class' | 'plain_bug';
+  }): Promise<'rethrow' | 'degrade' | 'escalate'> {
+    return runWithTurnResilience(0, async () => {
+      let thrown: unknown;
+      try {
+        if (opts.fault === 'provider_via_als') {
+          // A raw 5xx: the wrapper records the failure, then rethrows the ORIGINAL SDK error —
+          // instanceof alone cannot see it; the ALS store can.
+          noteProviderFailure('chat', 'provider_error');
+          throw new Error('503 upstream');
+        }
+        if (opts.fault === 'provider_via_class') {
+          throw new ProviderUnavailableError('breaker_open', 'chat');
+        }
+        throw new Error('TEST_FORCE_DETECTOR_ERROR: forced detector failure'); // plain bug shape
+      } catch (err) {
+        thrown = err;
+      }
+      const providerCaused =
+        turnProviderFailures().length > 0 || thrown instanceof ProviderUnavailableError;
+      return decideSensitiveDetectorFailureRoute({
+        failClosed: opts.failClosed,
+        providerCaused,
+        degradeModeOn: opts.degradeModeOn,
+      });
+    });
+  }
+
+  it('a raw 5xx (ALS-recorded, original error rethrown) routes to the floor — the Finding-4 scenario', async () => {
+    assert.equal(
+      await detectorCatchRoute({ failClosed: true, degradeModeOn: true, fault: 'provider_via_als' }),
+      'degrade',
+    );
+  });
+
+  it('a ProviderUnavailableError (breaker/starved/cap) routes to the floor even with an empty ALS store', async () => {
+    assert.equal(
+      await detectorCatchRoute({ failClosed: true, degradeModeOn: true, fault: 'provider_via_class' }),
+      'degrade',
+    );
+  });
+
+  it('a plain detector bug (incl. TEST_FORCE_DETECTOR_ERROR) keeps the fail-closed pause', async () => {
+    assert.equal(
+      await detectorCatchRoute({ failClosed: true, degradeModeOn: true, fault: 'plain_bug' }),
+      'escalate',
+    );
+  });
+
+  it('floor off preserves the U4-validated behavior byte-for-byte (provider fault still escalates)', async () => {
+    assert.equal(
+      await detectorCatchRoute({ failClosed: true, degradeModeOn: false, fault: 'provider_via_als' }),
+      'escalate',
+    );
+  });
+
+  it('fail-closed off is legacy: rethrow to the umbrella regardless of the floor', async () => {
+    assert.equal(
+      await detectorCatchRoute({ failClosed: false, degradeModeOn: true, fault: 'provider_via_als' }),
+      'rethrow',
+    );
+  });
+
+  it('the degrade route commits the floor effects: alert + holding, no pause, no human_replied', () => {
+    // Same effects mirror as the floor describe below — the detector route calls the SAME
+    // degradeToHoldingAndEscalate, so its committed shape is identical.
+    const effects = { paused: false, humanRepliedWritten: false, alerts: [] as string[], sent: [] as string[] };
+    effects.alerts.push('provider_unavailable');
+    effects.sent.push('holding:degraded');
+    assert.deepEqual(effects.alerts, ['provider_unavailable']);
+    assert.deepEqual(effects.sent, ['holding:degraded']);
+    assert.equal(effects.paused, false, 'the whole point of Finding 4: no pause fan-out');
+    assert.equal(effects.humanRepliedWritten, false);
   });
 });
 

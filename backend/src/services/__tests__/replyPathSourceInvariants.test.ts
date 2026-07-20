@@ -125,6 +125,82 @@ describe('P2-6 floor txn: alert only — no pause, no human_replied', () => {
   });
 });
 
+describe('F4: provider-caused sensitive-detector failures route to the no-pause floor', () => {
+  // Dev validation Finding 4: the detectors run first in the turn and call the provider, so a
+  // global outage always struck them before the pre-send degrade gate — the fail-closed pause
+  // fanned out to every mid-turn conversation. The detector catch now consults the pure route
+  // function; provider-caused failures take the floor (no pause), detector code bugs keep the
+  // pause. The mirror tests pin the routing table; this pins the production composition.
+  const anchor = 'decideSensitiveDetectorFailureRoute({';
+  const sites = indicesOf(processAIReplySource, anchor);
+
+  it('exactly one detector-catch route site exists (the guard is not vacuous)', () => {
+    assert.equal(sites.length, 1, `expected 1 route site, found ${sites.length}`);
+  });
+
+  it('the catch classifies provider cause via the ALS store AND the error class, and both terminal paths end in the sentinel', () => {
+    const window = processAIReplySource.slice(Math.max(0, sites[0] - 1200), sites[0] + 2600);
+    for (const required of [
+      'turnProviderFailures().length > 0',
+      'err instanceof ProviderUnavailableError',
+      'await degradeToHoldingAndEscalate()',
+      'escalateSensitivePathOnDetectorError()',
+      'SensitivePathEscalatedError',
+    ]) {
+      assert.ok(window.includes(required), `detector catch is missing: ${required}`);
+    }
+  });
+
+  it('the degrade route never pauses and never creates its own alert', () => {
+    const window = processAIReplySource.slice(sites[0], sites[0] + 2600);
+    assert.ok(
+      !window.includes('setConversationAiPaused('),
+      'the detector degrade route pauses — the Finding-4 fan-out is back',
+    );
+    assert.ok(
+      !window.includes("reason: 'provider_unavailable'"),
+      'the detector degrade route creates its own alert — the floor already commits it (double alert)',
+    );
+  });
+});
+
+describe('F3: the order_stage shadow verdict reaches the ledger as its own row', () => {
+  // Dev validation Finding 3: the turn's 'main' ledger row is serialized inside stageAndSend's
+  // onFlip; the order-detection tail runs AFTER that seal, so a recordDecision() push there is
+  // silently dropped and eval:shadow — the P2-2 cutover gate — reads zero observations forever.
+  // The fix writes the verdict as a second best-effort row. This pin holds the three load-bearing
+  // properties: a distinct slot (idempotency key is slot-keyed; 'main' collides silently), a
+  // nulled usage (buildLedgerRecord pulls the whole turn's tracked calls; P3-6 cost readers sum
+  // per-row, so inheriting it would double order-detection COGS), and no resurrected dead push.
+  const anchor = "ORDER_STAGE_MACHINE_MODE === 'shadow'";
+  const sites = indicesOf(processAIReplySource, anchor);
+
+  it('exactly one shadow-mode block exists (the guard is not vacuous)', () => {
+    assert.equal(sites.length, 1, `expected 1 shadow-mode site, found ${sites.length}`);
+  });
+
+  it('the shadow block writes its own best-effort row with a distinct slot and nulled usage', () => {
+    const window = processAIReplySource.slice(sites[0], sites[0] + 3200);
+    for (const required of [
+      'writeLedgerBestEffort',
+      "replySlot: 'shadow:order_stage'",
+      "decisionKind: 'order_shadow'",
+      'usage: null',
+    ]) {
+      assert.ok(window.includes(required), `order_stage shadow block is missing: ${required}`);
+    }
+  });
+
+  it('the dead recordDecision push does not come back', () => {
+    const window = processAIReplySource.slice(sites[0], sites[0] + 3200);
+    assert.ok(
+      !window.includes('recordDecision('),
+      'the order_stage shadow block pushes to decisionEvents — that array was already serialized ' +
+        'into the main row at the send flip; the event is dropped (Finding 3)',
+    );
+  });
+});
+
 describe('P2-5: the Gheg consent widening stays OUT of the legacy affirmation path', () => {
   // GHEG_ORDER_CONSENT_EXTRA_PATTERNS feed ONLY the FSM's stage-gated consent detector
   // (honored solely in awaiting_confirmation). The legacy looksLikeOrderAffirmation runs on

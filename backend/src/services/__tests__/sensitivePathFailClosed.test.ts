@@ -26,6 +26,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decideSensitivePathAction,
+  decideSensitiveDetectorFailureRoute,
   SensitivePathEscalatedError,
   type SensitivePathFailureKind,
 } from '../sensitivePathFailClosed';
@@ -95,6 +96,67 @@ describe('decideSensitivePathAction — full truth table', () => {
     // The H2 fix: post_send under fail-closed must STOP the job, not continue into
     // generateReply — a refund ack followed by a sales pitch is the exact RC-19 outcome.
     assert.notEqual(decideSensitivePathAction('post_send', true), 'continue');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decideSensitiveDetectorFailureRoute — F4: provider-caused failures take the
+// no-pause degrade floor; everything else keeps the P0-4 behavior byte-for-byte
+// ---------------------------------------------------------------------------
+
+describe('decideSensitiveDetectorFailureRoute — full truth table (8 rows)', () => {
+  const cases: Array<[boolean, boolean, boolean, 'escalate' | 'degrade' | 'rethrow']> = [
+    // [failClosed, providerCaused, degradeModeOn, expected]
+    [false, false, false, 'rethrow'],
+    [false, false, true, 'rethrow'],
+    [false, true, false, 'rethrow'],
+    [false, true, true, 'rethrow'], // flag off is legacy fail-open regardless of the floor
+    [true, false, false, 'escalate'],
+    [true, false, true, 'escalate'], // non-provider bug: conversation-specific, pause is right
+    [true, true, false, 'escalate'], // floor off: U4's exact validated behavior
+    [true, true, true, 'degrade'], // the Finding-4 scenario: outage + floor on → no pause
+  ];
+
+  for (const [failClosed, providerCaused, degradeModeOn, expected] of cases) {
+    it(`(failClosed=${failClosed}, providerCaused=${providerCaused}, degradeModeOn=${degradeModeOn}) → ${expected}`, () => {
+      assert.equal(
+        decideSensitiveDetectorFailureRoute({ failClosed, providerCaused, degradeModeOn }),
+        expected,
+      );
+    });
+  }
+
+  it('never degrades when the floor is off — the caps-without-floor RC-19 guard', () => {
+    for (const failClosed of [true, false]) {
+      for (const providerCaused of [true, false]) {
+        assert.notEqual(
+          decideSensitiveDetectorFailureRoute({ failClosed, providerCaused, degradeModeOn: false }),
+          'degrade',
+        );
+      }
+    }
+  });
+
+  it('never escalates (pauses) a provider-caused failure when the floor is on — the Finding-4 fan-out guard', () => {
+    assert.notEqual(
+      decideSensitiveDetectorFailureRoute({
+        failClosed: true,
+        providerCaused: true,
+        degradeModeOn: true,
+      }),
+      'escalate',
+    );
+  });
+
+  it('flag off is byte-for-byte legacy: always rethrow to the umbrella', () => {
+    for (const providerCaused of [true, false]) {
+      for (const degradeModeOn of [true, false]) {
+        assert.equal(
+          decideSensitiveDetectorFailureRoute({ failClosed: false, providerCaused, degradeModeOn }),
+          'rethrow',
+        );
+      }
+    }
   });
 });
 

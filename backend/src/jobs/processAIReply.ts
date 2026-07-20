@@ -177,6 +177,7 @@ import {
 } from '../services/productInformationGapHelpers';
 import {
   decideSensitivePathAction,
+  decideSensitiveDetectorFailureRoute,
   SensitivePathEscalatedError,
 } from '../services/sensitivePathFailClosed';
 import {
@@ -2490,8 +2491,50 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       }
       return await fn();
     } catch (err) {
-      if (decideSensitivePathAction('detector', SENSITIVE_PATH_FAIL_CLOSED) !== 'escalate') {
+      // P0-4 × P2-6 (dev validation Finding 4): a PROVIDER-caused detector failure routes to the
+      // no-pause degrade floor when the floor is on — the detectors run first in the turn, so a
+      // global outage always struck them before the pre-send degrade gate could classify the
+      // turn, and the fail-closed pause fanned out to every mid-turn conversation. The ALS check
+      // is required: a raw 5xx propagates as the original SDK error, so `instanceof` alone
+      // misses it (the wrapper records the failure BEFORE rethrowing). Deliberately NOT
+      // GenerationContractError — detectors cannot produce it (the outer catch's triple differs
+      // on purpose). A non-provider detector failure (a code bug — conversation-specific) keeps
+      // the fail-closed escalate+pause byte-for-byte, as does TEST_FORCE_DETECTOR_ERROR.
+      const providerCausedDetectorFailure =
+        turnProviderFailures().length > 0 || err instanceof ProviderUnavailableError;
+      const route = decideSensitiveDetectorFailureRoute({
+        failClosed: SENSITIVE_PATH_FAIL_CLOSED,
+        providerCaused: providerCausedDetectorFailure,
+        degradeModeOn: gracefulDegradeMode(),
+      });
+      if (route === 'rethrow') {
         throw err;
+      }
+      if (route === 'degrade') {
+        // No try/catch: a pre-send floor throw must propagate to the umbrella → BullMQ retry
+        // (same contract as the escalate path). The floor commits the retryable alert itself
+        // and is double-send-guarded; the sentinel is thrown only after it returns, so the
+        // umbrella stops the turn cleanly and the pre-send degrade gate is never reached.
+        await degradeToHoldingAndEscalate();
+        void writeLedgerBestEffort(
+          buildJobLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'holding:degraded',
+            decisionKind: 'escalation:provider_unavailable',
+            messageId: null,
+            decisionEvents,
+            guardVerdicts: {
+              providerBreaker: providerBreaker.snapshot(breakerMode()),
+              providerFailures: summarizeTurnFailures(turnProviderFailures()),
+              degraded: true,
+              degradedFrom: `sensitive_detector:${label}`,
+            },
+          }),
+        );
+        throw new SensitivePathEscalatedError();
       }
       await escalateSensitivePathOnDetectorError();
       throw new SensitivePathEscalatedError();
@@ -6130,13 +6173,35 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
             fsm: fsmShouldCreateOrder,
           });
         }
-        recordDecision({
-          classifier: 'order_stage',
-          raw_score: null,
-          threshold: null,
-          boost_applied: false,
-          passed: shadow.passed,
-          branch: shadow.branch,
+        // P2-2 (dev validation Finding 3): this verdict must reach the ledger as its OWN row.
+        // The turn's 'main' row was built and serialized inside stageAndSend's onFlip — the
+        // order-detection tail runs after that seal, so a push into decisionEvents here is
+        // provably dropped and eval:shadow (the cutover gate) reads zero observations forever.
+        // A distinct replySlot is mandatory (the idempotency key is slot-keyed, ON CONFLICT DO
+        // NOTHING — 'main' would collide silently), and `usage` MUST be nulled: buildLedgerRecord
+        // pulls the turn's entire tracked call list, and the P3-6 cost readers sum per-row with
+        // no slot filter, so inheriting it would double every order-detection turn's COGS. A
+        // crash-retry of the tail re-derives the same key, so the second insert is idempotent.
+        void writeLedgerBestEffort({
+          ...buildJobLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'shadow:order_stage',
+            decisionKind: 'order_shadow',
+            decisionEvents: [
+              {
+                classifier: 'order_stage',
+                raw_score: null,
+                threshold: null,
+                boost_applied: false,
+                passed: shadow.passed,
+                branch: shadow.branch,
+              },
+            ],
+          }),
+          usage: null,
         });
       }
     }

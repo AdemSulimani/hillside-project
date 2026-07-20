@@ -22,6 +22,7 @@
     "loadtest:fairness": "tsx src/loadtest/fairnessHarness.ts",
     "repair-product-text": "tsx src/scripts/repairProductTextEncoding.ts",
     "redact-alert-details": "tsx src/scripts/redactAlertDetails.ts",
+    "audit-paused-conversations": "tsx src/scripts/auditPausedConversations.ts",
     "migrate": "tsx src/db/migrate.ts",
     "migrate:verify": "tsx src/db/migrateVerify.ts",
     "migrate:down": "tsx src/db/migrateDown.ts",

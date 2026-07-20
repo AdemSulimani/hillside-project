@@ -130,6 +130,10 @@ const LANGUAGE_ALLOWLIST: readonly string[] = [
   'cmimi', 'cmimet', 'shijet', 'shija', 'produkte', 'produktet', 'produkti', 'stok', 'ne stok',
   'porosia', 'porosine', 'adresa', 'emri', 'telefoni', 'specialist', 'informacion',
   'disa', 'nese', 'kemi', 'keni', 'eshte', 'jane', 'zgjedhje', 'opsione', 'opsionet',
+  // Definite form of 'zgjedhje'. Surfaced by the 2026-07-20 P0-P3 dev validation live replay
+  // (Finding 2): every IN3 comparison reply opens a sentence with "Zgjedhja më e mirë varet…"
+  // and counted one false violation per run. Corpus case OK-08-comparison-connective.
+  'zgjedhja',
   // Sentence-opening verbs. Added ONLY after the position-initial exemption was tightened and the
   // negative corpus surfaced each one as a false positive — never speculatively (that is the rule
   // stated in the header, and it is what keeps the allowlist from growing until the gate is inert).

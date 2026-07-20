@@ -324,7 +324,7 @@ function logPosture(): void {
   const uncappedWorstCase = Number(eff('OPENAI_TIMEOUT_MS')) * (1 + Number(eff('OPENAI_MAX_RETRIES')));
   console.info(
     `[provider] GRACEFUL_DEGRADE_MODE=${
-      degrade ? 'on (provider failure ⇒ holding + provider_unavailable alert; no pause)' : 'off (reply sent even if its guards fail-opened)'
+      degrade ? 'on (provider failure ⇒ holding + provider_unavailable alert; no pause — incl. provider-caused sensitive-detector failures)' : 'off (reply sent even if its guards fail-opened; a provider-caused detector failure fail-closes into a sticky pause)'
     }; OPENAI_CALL_TIMEOUT_MS=${
       callCap > 0 ? `${callCap} (whole call, incl. retries)` : `0 = off (worst case ${uncappedWorstCase}ms/call)`
     }; OPENAI_TURN_DEADLINE_MS=${
