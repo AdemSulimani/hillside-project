@@ -219,6 +219,23 @@ export const GROUNDED_REPLIES: readonly GroundedCase[] = [
     customerText: 'do you have carbo one',
     source: 'English-arm control (grounded)',
   },
+  {
+    id: 'OK-08-comparison-connective',
+    // Verbatim from the 2026-07-20 dev-validation live replay (IN3 ×4 under the full grounding
+    // stack, probe-u10b run 1). The sentence-initial "Zgjedhja" (definite form) flagged one false
+    // violation per run — the allowlist carried only the indefinite 'zgjedhje'. This case is the
+    // negative-corpus justification for the 'zgjedhja' allowlist entry. "Creatine Monohydrate" and
+    // "BSN Creatine" are covered by the customer-echo exemption, exactly as in the live turn.
+    reply:
+      'Të dyja produktet, Creatine Monohydrate dhe BSN Creatine, janë të njohura për përmirësimin ' +
+      'e performancës gjatë stërvitjes. Zgjedhja më e mirë varet nga preferencat tuaja personale ' +
+      'dhe nevojat specifike. Nëse keni nevojë për më shumë detaje mbi secilin produkt, mund tju ' +
+      'ndihmoj me informacione shtesë.',
+    injectedCatalog: IN3_INJECTED_CATALOG,
+    catalogNames: IN3_CATALOG_NAMES,
+    customerText: IN3_CUSTOMER_TEXT,
+    source: 'P0-P3 dev validation 2026-07-20, Finding 2 (live replay IN3 — the Zgjedhja FP)',
+  },
 ];
 
 /**
