@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Skeleton } from '@/components/ui/skeleton';
 import { formatFlagReason } from '@/lib/aiAlertLabels';
+import { alertSeverity } from '@/lib/alertPausePolicy';
 import { formatRelativeShort } from '@/lib/formatRelativeTime';
 import { useAuthStore } from '@/store/authStore';
 import type { AIAlertRow, AIAlertStatus } from '@/types/aiAlert';
@@ -293,6 +294,11 @@ export default function AIAlertsPage() {
                     <CardContent className="space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant="outline">{formatFlagReason(alert.reason)}</Badge>
+                        {alertSeverity(alert.reason) === 'escalation' ? (
+                          <Badge variant="destructive">AI paused — needs human</Badge>
+                        ) : alertSeverity(alert.reason) === 'notification' ? (
+                          <Badge variant="secondary">Info — AI still replying</Badge>
+                        ) : null}
                         {alert.quality_score != null ? (
                           <span className="text-xs text-muted-foreground tabular-nums">
                             Cilësia: {alert.quality_score.toFixed(2)}

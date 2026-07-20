@@ -239,6 +239,64 @@ describe('shouldEscalateUncertainAnswer', () => {
       true,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // False-denial backstop (live bug conv ee183c2e, 2026-07-20): a denial of a
+  // product that VERIFIABLY EXISTS must escalate even when the context carried
+  // alternatives — the alternatives carve-out shipped exactly that false denial.
+  // -------------------------------------------------------------------------
+
+  it('ESCALATES a denial of a product that verifiably exists, despite context alternatives (the live bug)', () => {
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        ...base,
+        replyText:
+          'Më vjen keq, por nuk e kemi në dispozicion produktin Nitro Tech Ripped. Nëse dëshironi, mund tju sugjeroj disa alternativa.',
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: true,
+        deniedProductExistsInCatalog: true,
+      }),
+      true,
+    );
+  });
+
+  it('deniedProductExistsInCatalog=false/omitted leaves every existing decision unchanged', () => {
+    const compliant = {
+      ...base,
+      replyText: "We don't carry that exact product, but here are similar options: Product A.",
+      negativeAvailabilityDetected: true,
+      hasMatchingProductsInContext: true,
+    };
+    assert.equal(shouldEscalateUncertainAnswer(compliant), false);
+    assert.equal(
+      shouldEscalateUncertainAnswer({ ...compliant, deniedProductExistsInCatalog: false }),
+      false,
+    );
+  });
+
+  it('out-of-stock wording keeps precedence over the false-denial rule (OOS is real info)', () => {
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        ...base,
+        replyText: 'Ky produkt nuk është në stok për momentin.',
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: true,
+        deniedProductExistsInCatalog: true,
+      }),
+      false,
+    );
+  });
+
+  it('disabled / already-escalated exclusions still win over the false-denial rule', () => {
+    const denial = {
+      ...base,
+      replyText: 'We do not carry Nitro Tech Ripped.',
+      negativeAvailabilityDetected: true,
+      deniedProductExistsInCatalog: true,
+    };
+    assert.equal(shouldEscalateUncertainAnswer({ ...denial, enabled: false }), false);
+    assert.equal(shouldEscalateUncertainAnswer({ ...denial, alreadyEscalated: true }), false);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -203,6 +203,16 @@ export interface UncertainAnswerDecisionInput {
    * — not deflecting — and should not be escalated.
    */
   hasMatchingProductsInContext: boolean;
+  /**
+   * True when the reply denies availability of a product that VERIFIABLY EXISTS in the
+   * active catalog — resolved deterministically from the customer's own message (inbound
+   * name pinning) and matched back against the reply text. Overrides the alternatives
+   * carve-out below: denying a real product is never guideline-compliant, whatever else
+   * the context contained (live bug 2026-07-20: a retrieval miss produced "we don't have
+   * Nitro Tech Ripped" with 10 unrelated products in context, and the carve-out shipped
+   * it). Optional so existing callers/tests are unaffected.
+   */
+  deniedProductExistsInCatalog?: boolean;
 }
 
 /**
@@ -232,7 +242,15 @@ export function shouldEscalateUncertainAnswer(input: UncertainAnswerDecisionInpu
   if (input.isOosCannedReply) return false;
   if (input.isOrderFlowReply) return false;
   // Out-of-stock is legitimate info → deliver as-is, never escalate.
+  // (Deliberately ahead of the false-denial rule: "X is out of stock" about a real
+  // product is reliable information, not a denial that X exists.)
   if (isOutOfStockReply(input.replyText)) return false;
+  // FALSE DENIAL: the reply says a product is unavailable, but that product verifiably
+  // exists in the active catalog (resolved from the customer's own words). A retrieval
+  // miss must never ship as a confident "we don't carry it" — escalate to a human.
+  if (input.negativeAvailabilityDetected && input.deniedProductExistsInCatalog === true) {
+    return true;
+  }
   // When alternatives were available in the catalog context, a negative-availability
   // reply is the AI correctly following guidelines.catalog_integrity — not a
   // bare deflection that should be handed off to a human.

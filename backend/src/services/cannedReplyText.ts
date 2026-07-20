@@ -95,6 +95,43 @@ const LEGACY_USAGE_ESCALATION_VARIANTS: readonly string[] = [
   'pershendetje, se shpejti do tju kontaktoje nje specialist lidhur me kete ceshtje.',
 ];
 
+/**
+ * Photo-request reply copy. The canned override in processAIReply replaces the model's text with
+ * these when a customer asks for a product photo, so they are exactly the delivered-but-not-
+ * authoritative class this registry relabels. Templates live HERE (not inline in processAIReply)
+ * so the classifier patterns below are derived from the same source and can never drift.
+ */
+export const IMAGE_REPLY_TEMPLATES: Record<
+  ReplyLocale,
+  {
+    /** Lead-in when exactly one photo is attached. */
+    singlePhotoIntro: (name: string) => string;
+    /** Lead-in when several photos are attached. */
+    multiPhotoIntro: string;
+    /** Honest notice for requested products with no stored photo (≤ cap names). */
+    missingPhotosNamed: (names: string) => string;
+    /** Same notice when too many products lack photos — no name enumeration. */
+    missingPhotosGeneric: string;
+    /** Holding line when no requested product resolved or none has a photo. */
+    unresolvedHolding: string;
+  }
+> = {
+  sq: {
+    singlePhotoIntro: (name) => `Ja foto e ${name}:`,
+    multiPhotoIntro: 'Ja fotot e produkteve të kërkuara:',
+    missingPhotosNamed: (names) => `Foto e ${names} do të ju dërgohet së shpejti.`,
+    missingPhotosGeneric: 'Fotot e produkteve të tjera do të ju dërgohen së shpejti.',
+    unresolvedHolding: 'Foto e produktit do të ju dërgohet së shpejti.',
+  },
+  en: {
+    singlePhotoIntro: (name) => `Here is a photo of ${name}:`,
+    multiPhotoIntro: 'Here are the photos of the products you asked about:',
+    missingPhotosNamed: (names) => `We'll send you the photo of ${names} shortly.`,
+    missingPhotosGeneric: "We'll send you the photos of the other products shortly.",
+    unresolvedHolding: "We'll send you the product photo shortly.",
+  },
+};
+
 /** Diacritic-folding, whitespace-collapsing normalizer (mirrors processAIReply's normalizeEscalationMessage). */
 export function normalizeCannedText(value: string): string {
   return value
@@ -129,14 +166,45 @@ const CANNED_SYSTEM_COPY_NORMALIZED: ReadonlySet<string> = (() => {
 })();
 
 /**
+ * Image-reply copy interpolates product names, so exact-set matching cannot recognise it. These
+ * anchored patterns are DERIVED from IMAGE_REPLY_TEMPLATES via a sentinel substitution (render the
+ * template with a NUL sentinel, normalize, escape, swap the sentinel for a wildcard), so template edits are
+ * picked up automatically. A delivered photo reply is one intro, one tail, or "intro\ntail"
+ * (newlines collapse to a space under normalization).
+ */
+const IMAGE_REPLY_PATTERN: RegExp = (() => {
+  const SENTINEL = '\u0000';
+  const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const toSource = (rendered: string): string =>
+    escapeRe(normalizeCannedText(rendered)).split(SENTINEL).join('.+');
+
+  const intros: string[] = [];
+  const tails: string[] = [];
+  for (const locale of Object.keys(IMAGE_REPLY_TEMPLATES) as ReplyLocale[]) {
+    const t = IMAGE_REPLY_TEMPLATES[locale];
+    intros.push(toSource(t.singlePhotoIntro(SENTINEL)), toSource(t.multiPhotoIntro));
+    tails.push(
+      toSource(t.missingPhotosNamed(SENTINEL)),
+      toSource(t.missingPhotosGeneric),
+      toSource(t.unresolvedHolding),
+    );
+  }
+  const intro = `(?:${intros.join('|')})`;
+  const tail = `(?:${tails.join('|')})`;
+  return new RegExp(`^(?:${intro}(?: ${tail})?|${tail})$`);
+})();
+
+/**
  * True when `content` is one of the canned holding / escalation / data-confirmation / missing-name
  * messages the platform sends (exact match after diacritic-folding normalization — these are always
  * emitted verbatim from the constants above, so an exact normalized match is precise and avoids
- * false-positives on genuine sales replies). Used by the delivery-filtered transcript to relabel
- * such a delivered message to the `system` role.
+ * false-positives on genuine sales replies), or a canned photo-request reply (anchored template
+ * match, since those interpolate product names). Used by the delivery-filtered transcript to
+ * relabel such a delivered message to the `system` role.
  */
 export function isCannedHoldingCopy(content: string): boolean {
   const raw = (content ?? '').trim();
   if (!raw) return false;
-  return CANNED_SYSTEM_COPY_NORMALIZED.has(normalizeCannedText(raw));
+  const normalized = normalizeCannedText(raw);
+  return CANNED_SYSTEM_COPY_NORMALIZED.has(normalized) || IMAGE_REPLY_PATTERN.test(normalized);
 }

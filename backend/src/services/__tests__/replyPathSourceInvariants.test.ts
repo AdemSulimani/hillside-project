@@ -222,3 +222,76 @@ describe('P2-5: the Gheg consent widening stays OUT of the legacy affirmation pa
     }
   });
 });
+
+describe('confidence_band_abstain alerts are binding-constraint-gated (alert-noise fix)', () => {
+  // The [CONFIDENCE_GATE] log line is unconditional P1-3 observability; the operator ALERT
+  // additionally requires the callers `alertEligible` assertion that the in-band score was the
+  // BINDING constraint (order slots complete / positive intent verdict). These pins keep a new
+  // call site from silently reverting to alert-on-every-in-band-score.
+  const defIdx = processAIReplySource.indexOf('function logConfidenceGateBoundary(');
+  const callSites = indicesOf(processAIReplySource, 'logConfidenceGateBoundary(').filter(
+    (i) => i !== processAIReplySource.indexOf('function logConfidenceGateBoundary(') + 'function '.length,
+  );
+
+  it('the definition exists and takes the alertEligible parameter', () => {
+    assert.ok(defIdx !== -1, 'logConfidenceGateBoundary definition missing');
+    const header = processAIReplySource.slice(defIdx, defIdx + 400);
+    assert.ok(header.includes('alertEligible: boolean'), 'alertEligible parameter missing');
+  });
+
+  it('exactly 6 call sites exist (count guard)', () => {
+    const calls = callSites.filter((i) => !processAIReplySource.slice(i - 9, i).includes('function'));
+    assert.equal(calls.length, 6, `expected 6 call sites, found ${calls.length}`);
+  });
+
+  it('the log line is emitted BEFORE the alertEligible early return', () => {
+    const body = processAIReplySource.slice(defIdx, defIdx + 2600);
+    const logIdx = body.indexOf('[CONFIDENCE_GATE]');
+    const gateIdx = body.indexOf('if (!alertEligible) return;');
+    const alertIdx = body.indexOf('confidence_band_abstain');
+    assert.ok(logIdx !== -1 && gateIdx !== -1 && alertIdx !== -1, 'expected anchors missing');
+    assert.ok(logIdx < gateIdx, 'log line must stay unconditional (before the eligibility gate)');
+    assert.ok(gateIdx < alertIdx, 'the alert must sit behind the eligibility gate');
+  });
+
+  it('each call site passes its expected binding-constraint expression', () => {
+    const expected: Record<string, string> = {
+      "'cancellation_refund'": 'hasCancelOrRefundIntent',
+      "'wrong_product'": 'wrongProductIntent.is_wrong_product === true',
+      "'post_purchase'": 'hasPostPurchaseSupportIntent',
+      "'order_info_update'": 'orderInfoUpdateIntent.is_order_info_update === true',
+      "'order_affirmation'": 'orderAffirmationIntent.is_order_affirmation === true',
+      "'order_intent_score'": 'orderSlotsBindOnScore',
+    };
+    for (const [gate, eligibility] of Object.entries(expected)) {
+      const call = callSites
+        .map((i) => processAIReplySource.slice(i, i + 400))
+        .find((w) => w.slice(0, 80).includes(`${gate},`));
+      assert.ok(call, `call site for gate ${gate} not found`);
+      assert.ok(
+        call.includes(eligibility),
+        `gate ${gate} does not pass its binding-constraint expression ${eligibility}`,
+      );
+    }
+  });
+
+  it('the legacy draft-order gate is the same conjunct set, factored (behavior pin)', () => {
+    const idx = processAIReplySource.indexOf('const orderSlotsBindOnScore =');
+    assert.ok(idx !== -1, 'orderSlotsBindOnScore missing');
+    const block = processAIReplySource.slice(idx, idx + 1400);
+    for (const conjunct of [
+      'intent.is_ready_to_order === true',
+      'intent.product_name != null',
+      'hasDeliveryAddress',
+      'hasCustomerPhone',
+      'hasCustomerName',
+      'shouldAffirmOrder',
+    ]) {
+      assert.ok(block.includes(conjunct), `orderSlotsBindOnScore lost conjunct ${conjunct}`);
+    }
+    assert.ok(
+      /legacyPassesDraftOrderValidation =\s*orderSlotsBindOnScore &&/.test(block),
+      'legacyPassesDraftOrderValidation must be orderSlotsBindOnScore && the score gate',
+    );
+  });
+});

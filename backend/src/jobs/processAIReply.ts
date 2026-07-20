@@ -117,7 +117,11 @@ import {
 import {
   resolveProductsForImageRequest,
   augmentImageTargetsFromCatalog,
+  decideImageRequestOutcome,
+  buildImageReplyText,
 } from '../services/productImageRequestService';
+import { productsDeniedInReply } from '../services/inboundNamePinning';
+import type { ProductImageRef } from '../services/productImageRequestService';
 import { markSelfSentMessageEcho } from '../services/outboundEchoRegistry';
 import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
 import {
@@ -905,14 +909,17 @@ const NAME_GUARD_LLM_CATALOG_CAP = (() => {
  * P1-3 (RC-08) boundary observability: when CONFIDENCE_CONTRACT_SYMMETRY is ON, emit a
  * structured marker whenever a confidence/score falls inside the abstain band around a hard
  * gate — the boundary phrasing that used to flip outcome-class run-to-run. Grep
- * `[CONFIDENCE_GATE]` to measure how often decisions land in the band. Behaviour-neutral
- * (log-only) and inert when the flag is OFF.
+ * `[CONFIDENCE_GATE]` to measure how often decisions land in the band. Inert when the flag is
+ * OFF. The log line is unconditional; the operator alert additionally requires `alertEligible`
+ * — the caller's assertion that the in-band score was the binding constraint on the gated
+ * action (all other preconditions held), so only genuine boundary ambiguities reach a human.
  */
 function logConfidenceGateBoundary(
   gate: string,
   confidence: number,
   threshold: number,
   ctx: { tenantId: string; conversationId: string; inboundExternalId?: string },
+  alertEligible: boolean,
 ): void {
   if (!CONFIDENCE_CONTRACT_SYMMETRY) return;
   const verdict = classifyConfidenceGate({
@@ -925,6 +932,14 @@ function logConfidenceGateBoundary(
   console.info(
     `[CONFIDENCE_GATE] gate: ${gate} verdict: abstain confidence: ${confidence} threshold: ${threshold} band: ${CONFIDENCE_HYSTERESIS_BAND} tenantId: ${ctx.tenantId} conversationId: ${ctx.conversationId}`,
   );
+  // The operator ALERT below fires only when `alertEligible` — when the in-band score was the
+  // BINDING constraint on the gated action. The log line above stays unconditional (P1-3
+  // observability). An in-band score on a gate whose other preconditions already fail is not an
+  // ambiguity a human can act on: an order-intent score of 0.80 while name/phone/address are
+  // still missing means no order was possible at ANY score and the AI is mid-collection — an
+  // alert there is noise on every healthy order flow. Likewise a boolean-intent gate whose
+  // verdict was negative (is_refund=false at 0.82) is not a near-missed refund.
+  if (!alertEligible) return;
   // P1-3 (RC-08): an in-band score is a genuine ambiguity — the gated action does not fire,
   // but a human should see it (a refund demand at 0.82 must not vanish into a normal sales
   // reply with only a log line, and an in-band order-intent score is a warm lead worth a
@@ -2558,11 +2573,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       );
       const hasCancelOrRefundIntent =
         cancellationRefundIntent.is_cancellation || cancellationRefundIntent.is_refund;
-      logConfidenceGateBoundary('cancellation_refund', cancellationRefundIntent.confidence, 0.8, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'cancellation_refund',
+        cancellationRefundIntent.confidence,
+        0.8,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        hasCancelOrRefundIntent,
+      );
       const confidentCancelOrRefund = passesConfidenceGate(
         cancellationRefundIntent.confidence,
         0.8,
@@ -2729,11 +2746,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       console.info(
         `[WRONG_PRODUCT] tenantId: ${tenantId} conversationId: ${conversationId} is_wrong_product: ${wrongProductIntent.is_wrong_product} confidence: ${wrongProductIntent.confidence} reasoning: ${logJsonStringOrNull(wrongProductIntent.reason)}`,
       );
-      logConfidenceGateBoundary('wrong_product', wrongProductIntent.confidence, 0.8, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'wrong_product',
+        wrongProductIntent.confidence,
+        0.8,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        wrongProductIntent.is_wrong_product === true,
+      );
       const wrongProductEscalate =
         wrongProductIntent.is_wrong_product &&
         passesConfidenceGate(wrongProductIntent.confidence, 0.8, CONFIDENCE_CONTRACT_SYMMETRY);
@@ -2926,11 +2945,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         postPurchaseSupportIntent.is_not_delivered_complaint ||
         postPurchaseSupportIntent.is_wrong_product_issue ||
         postPurchaseSupportIntent.is_product_problem_issue;
-      logConfidenceGateBoundary('post_purchase', postPurchaseSupportIntent.confidence, 0.8, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'post_purchase',
+        postPurchaseSupportIntent.confidence,
+        0.8,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        hasPostPurchaseSupportIntent,
+      );
       const confidentPostPurchaseSupportIntent = passesConfidenceGate(
         postPurchaseSupportIntent.confidence,
         0.8,
@@ -3205,11 +3226,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       console.info(
         `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
       );
-      logConfidenceGateBoundary('order_info_update', orderInfoUpdateIntent.confidence, 0.82, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'order_info_update',
+        orderInfoUpdateIntent.confidence,
+        0.82,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        orderInfoUpdateIntent.is_order_info_update === true,
+      );
       const orderInfoUpdateEscalate =
         orderInfoUpdateIntent.is_order_info_update &&
         passesConfidenceGate(orderInfoUpdateIntent.confidence, 0.82, CONFIDENCE_CONTRACT_SYMMETRY);
@@ -3437,6 +3460,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     attributeIntent,
     hadImages,
     productNotInCatalog: visionProductNotInCatalog,
+    inboundNamedProducts = [],
     telemetry: replyTelemetry,
     factsUsed,
   } = await generateReply(
@@ -3457,6 +3481,15 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   // they stay in scope for the image-send step and the alert-creation step.
   let productsToSendImages: Product[] = [];
   let productsWithMissingImages: Product[] = [];
+  // Set when a detected photo request resolved to ZERO products (classifier hit but no
+  // target matched) — the turn ships a holding line instead of the raw model reply, and
+  // this drives the product_image_unavailable alert's `unresolved_reference` details.
+  let imageRequestUnresolvedDetails: {
+    refs: ProductImageRef[];
+    matched_count: number;
+    recent_count: number;
+    discussed_count: number;
+  } | null = null;
 
   if (replyText.trim() === '[NO_REPLY]') {
     // P1-5: a [NO_REPLY] still made a decision — record it so billing-class divergence (a turn the
@@ -4830,6 +4863,27 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     }
   }
 
+  // False-denial signal: the reply denies availability, and a product the customer
+  // EXPLICITLY NAMED in their message (deterministically resolved against the full
+  // catalog by inbound-name pinning) is mentioned INSIDE the denial clause itself.
+  // Clause-scoped (productsDeniedInReply) so an R13 reply that denies X but OFFERS a
+  // pinned product as an alternative can never trip it. Unlike the replyNamedRealProduct
+  // rescue above, this deliberately has NO matchedProducts-empty precondition — the live
+  // bug shipped its false denial with 10 unrelated products in context. Pure and
+  // in-memory; a truly-not-carried product can never set it because pinning finds no
+  // catalog row for it.
+  let deniedProductsInCatalog: Product[] = [];
+  if (
+    containsNegativeAvailabilityPhrase &&
+    !uncertainGuardAlreadyEscalated &&
+    !isOosCannedReply &&
+    !isOrderConfirmationReply &&
+    inboundNamedProducts.length > 0
+  ) {
+    deniedProductsInCatalog = productsDeniedInReply(inboundNamedProducts, finalReplyText);
+  }
+  const deniedProductExistsInCatalog = deniedProductsInCatalog.length > 0;
+
   if (
     shouldEscalateUncertainAnswer({
       replyText: finalReplyText,
@@ -4839,19 +4893,25 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       isOrderFlowReply: isOrderConfirmationReply,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
       hasMatchingProductsInContext: matchedProducts.length > 0 || replyNamedRealProduct,
+      deniedProductExistsInCatalog,
     })
   ) {
     logger.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {
       tenantId,
       conversationId,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
+      deniedProductExistsInCatalog,
+      deniedProductNames: deniedProductsInCatalog.map((p) => p.name),
       replyPreview: logSafeStructured(finalReplyText),
     });
     uncertainAnswerDetails = {
-      kind: 'uncertain_answer_fallback',
+      kind: deniedProductExistsInCatalog ? 'false_availability_denial' : 'uncertain_answer_fallback',
       negative_availability_detected: containsNegativeAvailabilityPhrase,
       customer_question: inboundText || null,
       originalReplyPreview: finalReplyText.slice(0, 200),
+      ...(deniedProductExistsInCatalog
+        ? { denied_product_names: deniedProductsInCatalog.map((p) => p.name) }
+        : {}),
     };
     uncertainAnswerEscalated = true;
     finalReplyText = GET_BACK_TO_YOU_MESSAGES[replyLocale === 'sq' ? 'sq' : 'en'];
@@ -4898,6 +4958,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     uncertainAnswerEscalated;
 
   if (imageClassification?.is_image_request && !anyEscalationFired) {
+    const imgLocale = replyLocale === 'sq' ? 'sq' : 'en';
     try {
       // Load products discussed in recent AI messages so positional references
       // like "the second one" resolve against the full set the customer has seen.
@@ -4906,10 +4967,18 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         recentMessages,
         10,
       );
-      const contextTargets = resolveProductsForImageRequest(
+      // The texts of recent AI replies are the scope guard for broad references: the
+      // persisted product_ids are the whole retrieval pool, but the customer has only
+      // SEEN the products the AI actually wrote out in these messages.
+      const recentAiTexts = recentMessages
+        .filter((m) => m.sent_by === 'ai' && typeof m.content === 'string' && m.content.trim())
+        .slice(-4)
+        .map((m) => m.content as string);
+      const resolution = resolveProductsForImageRequest(
         imageClassification.product_refs,
         matchedProducts,
         recentHistoryProducts,
+        recentAiTexts,
       );
 
       // Recover named products whose image lives on a catalog row that wasn't in this
@@ -4919,56 +4988,68 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       const targetProducts = await augmentImageTargetsFromCatalog(
         tenantId,
         imageClassification.product_refs,
-        contextTargets,
+        resolution.targets,
       );
 
-      if (targetProducts.length > 0) {
-        productsToSendImages = targetProducts.filter((p) => p.image_urls.length > 0);
-        productsWithMissingImages = targetProducts.filter((p) => p.image_urls.length === 0);
+      const decision = decideImageRequestOutcome(targetProducts);
+      productsToSendImages = decision.withImages;
+      productsWithMissingImages = decision.missingImages;
 
-        const imgLocale = replyLocale;
+      // A detected photo request NEVER ships the raw model reply: the model has no
+      // photo-sending knowledge, so its text on these turns is at best redundant and at
+      // worst an improvised "I can't send photos" apology (the original Bug #2). Every
+      // outcome — images, missing images, or nothing resolved — gets canned copy.
+      finalReplyText = buildImageReplyText(imgLocale, decision.withImages, decision.missingImages);
 
-        if (productsToSendImages.length > 0) {
-          // Replace AI-generated text with a clean confirmation that pairs naturally
-          // with the image message(s) that follow immediately after.
-          if (productsToSendImages.length === 1) {
-            finalReplyText =
-              imgLocale === 'sq'
-                ? `Ja foto e ${productsToSendImages[0].name}:`
-                : `Here is a photo of ${productsToSendImages[0].name}:`;
-          } else {
-            finalReplyText =
-              imgLocale === 'sq'
-                ? 'Ja fotot e produkteve të kërkuara:'
-                : 'Here are the photos of the products you asked about:';
-          }
-          // Append a per-product notice for any products that had no image stored.
-          if (productsWithMissingImages.length > 0) {
-            const missingNames = productsWithMissingImages.map((p) => p.name).join(', ');
-            finalReplyText +=
-              imgLocale === 'sq'
-                ? `\nFoto e ${missingNames} do të ju dërgohet së shpejti.`
-                : `\nWe'll send you the photo of ${missingNames} shortly.`;
-          }
-        } else {
-          // No images at all — send the holding message so the customer knows
-          // a human will follow up with the photo.
-          finalReplyText =
-            imgLocale === 'sq'
-              ? 'Foto e produktit do të ju dërgohet së shpejti.'
-              : "We'll send you the product photo shortly.";
-        }
-
-        console.info('[ai.reply] Product image request handled', {
+      if (decision.outcome === 'holding_unresolved') {
+        imageRequestUnresolvedDetails = {
+          refs: imageClassification.product_refs ?? [],
+          matched_count: matchedProducts.length,
+          recent_count: recentHistoryProducts.length,
+          discussed_count: resolution.trace.discussedCount,
+        };
+        console.warn('[image_request] unresolved — holding text sent', {
           conversationId,
           tenantId,
-          productsWithImages: productsToSendImages.map((p) => p.id),
-          productsWithoutImages: productsWithMissingImages.map((p) => p.id),
+          ...imageRequestUnresolvedDetails,
         });
       }
+
+      recordDecision({
+        classifier: 'product_image_request',
+        raw_score: targetProducts.length,
+        threshold: null,
+        boost_applied: false,
+        passed: decision.outcome === 'send_images',
+        branch: decision.outcome,
+      });
+
+      console.info('[image_request] resolution', {
+        conversationId,
+        tenantId,
+        refs: imageClassification.product_refs,
+        contextPoolSize: resolution.trace.contextPoolSize,
+        discussedCount: resolution.trace.discussedCount,
+        matches: resolution.trace.matches,
+        capped: resolution.trace.capped,
+        augmentedIds: targetProducts
+          .filter((p) => !resolution.targets.some((t) => t.id === p.id))
+          .map((p) => p.id),
+        outcome: decision.outcome,
+        productsWithImages: decision.withImages.map((p) => p.id),
+        productsWithoutImages: decision.missingImages.map((p) => p.id),
+      });
     } catch (imageResolutionErr) {
+      // Same invariant under failure: holding copy, never the raw model reply.
+      finalReplyText = buildImageReplyText(imgLocale, [], []);
+      imageRequestUnresolvedDetails = {
+        refs: imageClassification.product_refs ?? [],
+        matched_count: matchedProducts.length,
+        recent_count: 0,
+        discussed_count: 0,
+      };
       console.warn(
-        '[ai.reply] Product image request resolution failed — sending original AI reply',
+        '[ai.reply] Product image request resolution failed — holding reply sent',
         {
           conversationId,
           tenantId,
@@ -4981,6 +5062,34 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     }
   }
   // ---- End product image request handling --------------------------------
+
+  // Alert details shared by the staged (outbox) and legacy alert sites below: a photo
+  // request that left some products photo-less, or one that resolved to nothing at all.
+  const imageAlertDetails:
+    | {
+        kind: 'missing_image' | 'unresolved_reference';
+        product_ids: string[];
+        product_names: string[];
+        refs?: ProductImageRef[];
+        matched_count?: number;
+        recent_count?: number;
+        discussed_count?: number;
+      }
+    | null =
+    productsWithMissingImages.length > 0
+      ? {
+          kind: 'missing_image',
+          product_ids: productsWithMissingImages.map((p) => p.id),
+          product_names: productsWithMissingImages.map((p) => p.name),
+        }
+      : imageRequestUnresolvedDetails
+        ? {
+            kind: 'unresolved_reference',
+            product_ids: [],
+            product_names: [],
+            ...imageRequestUnresolvedDetails,
+          }
+        : null;
 
   const contact = await findContactById(conversation.contact_id);
 
@@ -5336,7 +5445,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
               payload: { conversation_id: conversationId, message_id: message.id },
             });
           }
-          if (productsWithMissingImages.length > 0) {
+          if (imageAlertDetails) {
             await insertOutboxTx(client, {
               tenant_id: tenantId,
               conversation_id: conversationId,
@@ -5345,10 +5454,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
               payload: {
                 conversation_id: conversationId,
                 message_id: message.id,
-                details: {
-                  product_ids: productsWithMissingImages.map((p) => p.id),
-                  product_names: productsWithMissingImages.map((p) => p.name),
-                },
+                details: imageAlertDetails,
               },
             });
           }
@@ -5574,21 +5680,20 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   }
 
   // Product image unavailable alert: fires when the customer explicitly asked for a
-  // product photo but the catalog entry has no image_urls. Does NOT pause the AI —
+  // product photo but the catalog entry has no image_urls (`kind: 'missing_image'`) OR the
+  // request resolved to no product at all (`kind: 'unresolved_reference'` — the customer got
+  // a holding line and someone must follow up with the right photo). Does NOT pause the AI —
   // the business should manually send the photo while the conversation continues.
   // One alert per turn covers all missing-image products in a single notification.
   // P1-1: outbox-owned (or committed with the first attempt) when staged — inline skipped.
-  if (productsWithMissingImages.length > 0 && !outboxOwnedEffects && !isRetryOfDeliveredReply) {
+  if (imageAlertDetails && !outboxOwnedEffects && !isRetryOfDeliveredReply) {
     try {
       const missingImageAlert = await createAIAlert({
         tenant_id: tenantId,
         conversation_id: conversationId,
         message_id: outboundMessage.id,
         reason: 'product_image_unavailable',
-        details: {
-          product_ids: productsWithMissingImages.map((p) => p.id),
-          product_names: productsWithMissingImages.map((p) => p.name),
-        },
+        details: imageAlertDetails,
       });
       const contactForMissingAlert = await findContactById(conversation.contact_id);
       socketService.emitAIAlert(tenantId, {
@@ -5987,11 +6092,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           compute: () => detectOrderAffirmationIntent(inboundText, messagesForIntent),
         });
     if (!orderStageOn) {
-      logConfidenceGateBoundary('order_affirmation', orderAffirmationIntent.confidence, 0.7, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'order_affirmation',
+        orderAffirmationIntent.confidence,
+        0.7,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        orderAffirmationIntent.is_order_affirmation === true,
+      );
     }
     const latestMessageAffirmsOrder = orderStageOn
       ? orderAffirmationIntent.is_order_affirmation === true
@@ -6096,19 +6203,26 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       ` intentFirstName: ${logJsonStringOrNull(intent.customer_first_name)}`,
     );
 
-    logConfidenceGateBoundary('order_intent_score', intent.intent_score, intentOrderMinScore, {
-      tenantId,
-      conversationId,
-      inboundExternalId: data.messageExternalId,
-    });
-    const legacyPassesDraftOrderValidation =
+    // The non-score draft-order conjuncts. When any of these is false the intent score is not
+    // the binding constraint — no order was possible at any score — so an in-band score is the
+    // normal mid-collection state, not an ambiguity worth an operator alert.
+    const orderSlotsBindOnScore =
       intent.is_ready_to_order === true &&
-      passesConfidenceGate(intent.intent_score, intentOrderMinScore, CONFIDENCE_CONTRACT_SYMMETRY) &&
       intent.product_name != null &&
       hasDeliveryAddress &&
       hasCustomerPhone &&
       hasCustomerName &&
       shouldAffirmOrder;
+    logConfidenceGateBoundary(
+      'order_intent_score',
+      intent.intent_score,
+      intentOrderMinScore,
+      { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+      orderSlotsBindOnScore,
+    );
+    const legacyPassesDraftOrderValidation =
+      orderSlotsBindOnScore &&
+      passesConfidenceGate(intent.intent_score, intentOrderMinScore, CONFIDENCE_CONTRACT_SYMMETRY);
 
     // P2-2 (RC-07/08/22): the deterministic order_stage FSM. In `shadow` it is computed and any
     // divergence from the legacy gate is logged + recorded in the P1-5 ledger (legacy still

@@ -42,6 +42,21 @@ export interface PromptAssemblyIssue {
 }
 
 /**
+ * Dedup identity for an issue's detail. For every kind except `over_budget` the detail IS the
+ * identity (a block key, a section name, a token — stable while the condition persists). But
+ * `over_budget`'s detail is `"N > M"` where N is the assembled prompt's length, which varies on
+ * every reply — keying on it mints a fresh dedupe key per turn and quietly reduces the whole
+ * design back to one alert per reply. The stable identity of an over-budget condition is the
+ * budget cap M: key on that, keep the precise `"N > M"` in the alert row's details. A no-match
+ * detail degrades to a constant — the safe direction (fewer alerts, never one per reply).
+ */
+export function dedupeDetailFor(issue: PromptAssemblyIssue): string {
+  if (issue.kind !== 'over_budget') return issue.detail;
+  const capMatch = issue.detail.match(/>\s*(\d+)\s*$/);
+  return capMatch ? `cap:${capMatch[1]}` : 'cap:unknown';
+}
+
+/**
  * Pure — the whole point of factoring it out. `marker` is the locked-catalog fingerprint, or
  * `'nomarker'` when the registry has not published one yet (Redis cold, or the flag is off): a
  * missing marker must degrade to "dedupe within a constant epoch", never to "no dedupe at all",
@@ -52,7 +67,7 @@ export function assemblyAlertDedupeKey(
   issue: PromptAssemblyIssue,
   marker: string | null,
 ): string {
-  return `prompt_assembly_alert:${tenantId}:${issue.kind}:${issue.detail}:${marker ?? 'nomarker'}`;
+  return `prompt_assembly_alert:${tenantId}:${issue.kind}:${dedupeDetailFor(issue)}:${marker ?? 'nomarker'}`;
 }
 
 /**

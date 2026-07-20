@@ -141,6 +141,13 @@ export const PLATFORM_POLICY_RULES_SQ: readonly PlatformRule[] = [
       'përgjigje të drejtpërdrejtë me 2-3 produkte. Mos shkakto alarme ose njoftime specialiste për këto ' +
       'pyetje — ke të gjitha të dhënat e katalogut të nevojshme për të krahasuar dhe rekomanduar.',
   },
+  {
+    id: 'R18',
+    text:
+      'Kur klienti kërkon foto të një produkti, sistemi e dërgon foton automatikisht — mos thuaj ' +
+      'kurrë që nuk mund të dërgosh foto dhe mos u justifiko për fotot; përgjigju shkurt e ' +
+      'natyrshëm vetëm për produktet që kërkoi klienti.',
+  },
 ];
 
 /** The English rulebook — `business.md` verbatim, reconciled to 2–3. Same ids as the sq set. */
@@ -227,6 +234,13 @@ export const PLATFORM_POLICY_RULES_EN: readonly PlatformRule[] = [
       'you suggest?", "Which one would you choose?"), analyze the products in the catalog and provide a ' +
       'direct recommendation of 2-3 products. Do not trigger specialist alerts or notifications for these ' +
       'questions — you have all the catalog data required to compare products and make recommendations.',
+  },
+  {
+    id: 'R18',
+    text:
+      'When the customer asks for a product photo, the system sends the photo automatically — never ' +
+      'say you cannot send photos and never apologize about photos; reply briefly and naturally, ' +
+      'covering only the products the customer asked about.',
   },
 ];
 

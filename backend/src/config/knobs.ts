@@ -323,6 +323,43 @@ export const KNOBS: readonly KnobSpec[] = [
         'every sibling similarity knob; 0 degenerates to rescue-everything, which is the ' +
         'fail-OPEN direction and therefore the safe one for a guard.',
     }),
+  num('IMAGE_REQUEST_MAX_TARGETS', 'int', 3, { min: 1, max: 10 }, 'frozen',
+    'Max products one customer photo request may resolve to (images sent + missing-photo notices)', {
+      rationale:
+        'A bare "foto produktet" once resolved to the entire 10-row retrieval-fusion pool ' +
+        '(conversation 9e84a4ee, 2026-07-20): one image sent plus 9 unrequested product names ' +
+        'enumerated. Customers ask for photos of what is being discussed — the platform recommends ' +
+        'at most 2-3 products per turn — so 3 covers every legitimate request with one spare while ' +
+        'making the pool-blast shape impossible.',
+    }),
+  num('IMAGE_REQUEST_MAX_MISSING_NAMES', 'int', 2, { min: 0, max: 10 }, 'frozen',
+    'Max product names the "we will send the photo shortly" notice may enumerate', {
+      rationale:
+        'Above this many missing-image products the notice drops names entirely and sends one ' +
+        'generic line — ≥3 missing names on a single photo request is retrieval noise, not ' +
+        'customer intent, and enumerating them reads as introducing products the customer never ' +
+        'asked about.',
+    }),
+  num('IMAGE_REQUEST_NAME_SIMILARITY_THRESHOLD', 'float', 0.48, { min: 0, max: 1 }, 'frozen',
+    'Min pg_trgm word_similarity for catalog recovery of a named photo request', {
+      rationale:
+        'Reuses the NAME_GUARD_SIMILARITY_THRESHOLD calibration (2026-07-12, 257-row dev catalog: ' +
+        'typos 0.500-0.870, fabrications 0.143-0.467; 0.48 sits in the gap) but is declared ' +
+        'separately because the tuning direction differs: loosening name-guard rescue widens a ' +
+        'GUARD, loosening this widens which catalog row a photo request may FETCH — an operator ' +
+        'must be able to tune one without silently moving the other.',
+    }),
+  num('INBOUND_PIN_SIMILARITY_THRESHOLD', 'float', 0.48, { min: 0, max: 1 }, 'frozen',
+    'Min pg_trgm word_similarity for the inbound-name pinning trigram rung (typo recovery)', {
+      rationale:
+        'Same 2026-07-12 calibration as NAME_GUARD_SIMILARITY_THRESHOLD (typos 0.500-0.870, ' +
+        'fabrications 0.143-0.467) but declared separately per house convention: loosening ' +
+        'name-guard rescue widens a GUARD, loosening this widens which catalog rows a customer ' +
+        'message can PIN into the retrieval pool. Note the trigram rung covers real typos only — ' +
+        'Albanianized orthography (kreatinen↔Creatine scores ~0.36, inside the fabrication band) ' +
+        'is handled by the deterministic dialect-variant rung, so do NOT lower this floor to ' +
+        'chase those.',
+    }),
   num('GUARD_CATALOG_CACHE_TTL_SECONDS', 'int', 120, { min: 1, max: 86_400 }, 'frozen',
     'TTL for the per-tenant guard reference sets (price set, name index, attribute index)', {
       rationale:

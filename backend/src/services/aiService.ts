@@ -3,6 +3,12 @@ import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { withModelRole } from './openaiCallTracker';
 import type { ProductImageRef } from './productImageRequestService';
+import { productNameTokenMatch } from './productImageRequestService';
+import {
+  resolveInboundNamedProducts,
+  resolveGramsToProducts,
+  extractCandidateNameGrams,
+} from './inboundNamePinning';
 import {
   FACTS_USED_JSON_SCHEMA,
   parseFactsUsedCompletion,
@@ -1174,15 +1180,28 @@ export async function resolveProductsFromPersistedContext(
  *
  * The deterministic persisted path is attempted first so a follow-up about previously
  * identified products is answered from those exact products whenever they were recorded.
+ *
+ * `pinned` (inbound-name pinning, inboundNamePinning.ts) is PREPENDED to every result:
+ * a product the customer explicitly named in THIS message must be in the pool even when
+ * the follow-up classifier routed the turn to stale persisted context — otherwise the
+ * model, seeing only the prior turn's products, follows R6 and falsely denies a product
+ * that exists (live bug: "Sa kushton nitro tech ripped?" after a Beast pre-workout turn).
  */
 async function resolveContextualProductSet(
   tenantId: string,
   searchText: string,
   conversationHistory: Message[],
   limit: number,
+  pinned: Product[] = [],
 ): Promise<Product[]> {
+  const merge = (base: Product[]): Product[] => {
+    if (pinned.length === 0) return base;
+    const pinnedIds = new Set(pinned.map((p) => p.id));
+    return [...pinned, ...base.filter((p) => !pinnedIds.has(p.id))].slice(0, limit);
+  };
+
   const persisted = await resolveProductsFromPersistedContext(tenantId, conversationHistory, limit);
-  if (persisted.length > 0) return persisted;
+  if (persisted.length > 0) return merge(persisted);
 
   const fromContext = await resolveProductsForContextualQuery(
     tenantId,
@@ -1192,9 +1211,9 @@ async function resolveContextualProductSet(
     limit,
     true,
   );
-  if (fromContext.length > 0) return fromContext;
+  if (fromContext.length > 0) return merge(fromContext);
 
-  return resolveProductsFromConversationHistory(tenantId, conversationHistory, limit);
+  return merge(await resolveProductsFromConversationHistory(tenantId, conversationHistory, limit));
 }
 
 /**
@@ -3591,6 +3610,26 @@ Final-closing behavior:
 `.trim(),
 };
 
+/**
+ * Photo-capability contract, appended to every retail system prompt. The deterministic photo
+ * flow (image classifier + canned override in processAIReply) owns actual dispatch; this only
+ * stops the model from DENYING the capability on turns where that flow does not fire.
+ */
+const PHOTO_CAPABILITY_APPEND_BY_LOCALE: Record<ReplyLocale, string> = {
+  sq: `
+Fotot e produkteve:
+- Kur klienti kërkon foto të një produkti, sistemi e dërgon foton automatikisht bashkë me përgjigjen tënde.
+- MOS thuaj kurrë që nuk mund të dërgosh foto dhe mos u justifiko për fotot.
+- Mos e përshkruaj foton dhe mos premto vetë dërgimin e saj — përgjigju shkurt e natyrshëm vetëm për produktet që kërkoi klienti.
+`.trim(),
+  en: `
+Product photos:
+- When the customer asks for a product photo, the system sends the photo automatically along with your reply.
+- NEVER say you cannot send photos, and never apologize about photos.
+- Do not describe the photo or promise to send it yourself — reply briefly and naturally, covering only the products the customer asked about.
+`.trim(),
+};
+
 /** Closing-reply sentences (per locale + per flavor) used when the customer is wrapping up. */
 export const CLOSING_REPLY_SENTENCES: Record<ReplyLocale, { no_thanks: string; greeting: string }> = {
   sq: {
@@ -3859,6 +3898,13 @@ export async function generateReply(
   productNotInCatalog: boolean;
   /** True when the customer's message was classified as asking about price or cost. */
   customerAskedPrice: boolean;
+  /**
+   * Products the customer explicitly named in this message, resolved deterministically
+   * from the full catalog (inbound-name pinning). Used by the false-denial backstop:
+   * a reply that denies availability of one of these must never ship. Undefined on the
+   * canned early-return paths.
+   */
+  inboundNamedProducts?: Product[];
   /** P1-5: per-reply decision-ledger telemetry. Present on the main LLM path; undefined on the
    * canned early-return paths (discount-finalized / OOS / repeat-closing — no model call). */
   telemetry?: ReplyTelemetry;
@@ -3961,6 +4007,10 @@ export async function generateReply(
 
   let products: Product[] = [];
   let usedFullCatalogFallback = false;
+  // Products the customer explicitly named in THIS message, resolved deterministically
+  // from the full catalog (inboundNamePinning). Pinned into the contextual pool and
+  // returned so the false-denial guard can verify any availability denial against them.
+  let inboundNamedProducts: Product[] = [];
 
   const searchText = inboundMessage.trim();
   const attributeIntentHint: AttributeQueryIntentHint = attributeIntent;
@@ -4075,11 +4125,18 @@ export async function generateReply(
       }
     }
   } else if (needsContextualResolver) {
+    // Inbound-name pinning: the follow-up classifier can route a message that EXPLICITLY
+    // names a product ("Sa kushton nitro tech ripped?") into stale persisted context and
+    // skip fresh retrieval entirely. Resolve any named products deterministically from the
+    // full catalog and force-include them in the pool — never throws, [] when the message
+    // names nothing.
+    inboundNamedProducts = await resolveInboundNamedProducts(tenantId, searchText);
     products = await resolveContextualProductSet(
       tenantId,
       searchText,
       conversationHistoryWindow,
       contextualMatchLimit,
+      inboundNamedProducts,
     );
   }
 
@@ -4094,6 +4151,37 @@ export async function generateReply(
       );
     } catch (err) {
       console.warn('[aiService] Product matching failed', err);
+    }
+  }
+
+  // Fresh-path inbound-name gap detector. Fusion can miss a product the customer
+  // EXPLICITLY NAMED — live probe "A e keni kreatinen?" ended with an EMPTY pool and a
+  // blind "Po.": ILIKE cannot bridge the Albanianized k↔c spelling, the variants map
+  // covers lemmas only, and embedding similarity fell short. Extract the message's name
+  // grams (pure, [] for ordinary chat turns) and, only for grams NO fused row matches,
+  // run the deterministic pinning ladder and prepend the hits. Gated off the contextual
+  // branch (it already ran the SAME ladder at its pinning step — a gram that failed there
+  // fails identically here) and off other-options turns (anchor-derived pools).
+  if (!isOtherOptionsRequest && !needsContextualResolver && searchText) {
+    try {
+      const grams = extractCandidateNameGrams(searchText);
+      const unmatchedGrams = grams.filter(
+        (g) => !products.some((p) => productNameTokenMatch(g, p.name)),
+      );
+      if (unmatchedGrams.length > 0) {
+        const pinned = await resolveGramsToProducts(tenantId, unmatchedGrams);
+        if (pinned.length > 0) {
+          // [] on this path by construction (only the contextual branch assigns earlier).
+          inboundNamedProducts = pinned;
+          const pinnedIds = new Set(pinned.map((p) => p.id));
+          products = [
+            ...pinned,
+            ...products.filter((p) => !pinnedIds.has(p.id)),
+          ].slice(0, contextualMatchLimit);
+        }
+      }
+    } catch (err) {
+      console.warn('[aiService] Inbound-name gap detection failed', err);
     }
   }
 
@@ -4595,6 +4683,16 @@ Using packaging-derived details (IMPORTANT — source precedence):
     section('closing_reply', `\n\n${closingAppend}`, 'normal');
   }
 
+  // Photo-capability contract. The customer-facing photo flow is deterministic (the image
+  // classifier + canned override in processAIReply own detection, dispatch, and the reply
+  // text), but the model must still never CLAIM it cannot send photos: on turns where the
+  // classifier misses (keyword-dodging phrasings), the raw model reply is what ships, and
+  // without this instruction the model improvises "nuk mund të dërgojmë foto" apologies
+  // (live Bug #2, conversation 21288070, 2026-07-20). Always on — this is capability truth,
+  // not tenant policy. Per-product image availability is deliberately NOT in the catalog
+  // context: the deterministic path is the authority on what actually gets sent.
+  section('photo_capability', `\n\n${PHOTO_CAPABILITY_APPEND_BY_LOCALE[language]}`, 'normal');
+
   // Operator restrictions and platform policy are appended after all product, guideline and
   // runtime appends that could otherwise dilute them. P2-5: the locale is threaded through so
   // the platform rulebook renders in the customer's language rather than always in Albanian
@@ -4907,6 +5005,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
     hadImages: hasImages,
     productNotInCatalog,
     customerAskedPrice,
+    inboundNamedProducts,
     telemetry,
     // P2-1 (RC-03): the reply's declared facts (present only when the facts_used contract is on).
     // Fed to the consolidated grounding gate and persisted in the decision ledger.
@@ -4944,15 +5043,22 @@ function mightBeImageRequest(message: string): boolean {
 
   if (!t || t.length < 4) return false;
 
-  // English and Albanian image / send keywords.
+  // English and Albanian image / send keywords. The Albanian nouns accept inflection
+  // suffixes ("foton", "foto", "fotot", "fotove", "imazhin", "pamjen"…) — live miss
+  // 2026-07-20: "a muni me ma dergu foton e nitro techit" dodged the bare \bfoto\b
+  // boundary and the whole deterministic photo flow silently never ran.
   return (
-    /\b(photo|foto|image|picture|pic|imazh|fotografi|pamje)\b/.test(t) ||
+    /\b(photo|image|picture|pic)s?\b/.test(t) ||
+    /\bfoto\w*\b/.test(t) ||
+    /\bimazh\w*\b/.test(t) ||
+    /\bfotografi\w*\b/.test(t) ||
+    /\bpamje\w*\b/.test(t) ||
     // Albanian: "dërgomë/dërgoji/dërgoni foto" — "send me the photo"
     /\bdergom[eë]?\b/.test(t) ||
     /\bdergoj[ei]?\b/.test(t) ||
     /\bdergon[i]?\b/.test(t) ||
     // Albanian: "shfaq" (show), "shiko" (look/view) combined with a known photo word
-    (/\b(shfaq|shiko)\b/.test(t) && /\b(foto|imazh|pamje)\b/.test(t))
+    (/\b(shfaq|shiko)\b/.test(t) && /\b(foto\w*|imazh\w*|pamje\w*)\b/.test(t))
   );
 }
 
