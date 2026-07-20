@@ -3,6 +3,7 @@ import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { withModelRole } from './openaiCallTracker';
 import type { ProductImageRef } from './productImageRequestService';
+import { resolveInboundNamedProducts } from './inboundNamePinning';
 import {
   FACTS_USED_JSON_SCHEMA,
   parseFactsUsedCompletion,
@@ -1174,15 +1175,28 @@ export async function resolveProductsFromPersistedContext(
  *
  * The deterministic persisted path is attempted first so a follow-up about previously
  * identified products is answered from those exact products whenever they were recorded.
+ *
+ * `pinned` (inbound-name pinning, inboundNamePinning.ts) is PREPENDED to every result:
+ * a product the customer explicitly named in THIS message must be in the pool even when
+ * the follow-up classifier routed the turn to stale persisted context — otherwise the
+ * model, seeing only the prior turn's products, follows R6 and falsely denies a product
+ * that exists (live bug: "Sa kushton nitro tech ripped?" after a Beast pre-workout turn).
  */
 async function resolveContextualProductSet(
   tenantId: string,
   searchText: string,
   conversationHistory: Message[],
   limit: number,
+  pinned: Product[] = [],
 ): Promise<Product[]> {
+  const merge = (base: Product[]): Product[] => {
+    if (pinned.length === 0) return base;
+    const pinnedIds = new Set(pinned.map((p) => p.id));
+    return [...pinned, ...base.filter((p) => !pinnedIds.has(p.id))].slice(0, limit);
+  };
+
   const persisted = await resolveProductsFromPersistedContext(tenantId, conversationHistory, limit);
-  if (persisted.length > 0) return persisted;
+  if (persisted.length > 0) return merge(persisted);
 
   const fromContext = await resolveProductsForContextualQuery(
     tenantId,
@@ -1192,9 +1206,9 @@ async function resolveContextualProductSet(
     limit,
     true,
   );
-  if (fromContext.length > 0) return fromContext;
+  if (fromContext.length > 0) return merge(fromContext);
 
-  return resolveProductsFromConversationHistory(tenantId, conversationHistory, limit);
+  return merge(await resolveProductsFromConversationHistory(tenantId, conversationHistory, limit));
 }
 
 /**
@@ -3879,6 +3893,13 @@ export async function generateReply(
   productNotInCatalog: boolean;
   /** True when the customer's message was classified as asking about price or cost. */
   customerAskedPrice: boolean;
+  /**
+   * Products the customer explicitly named in this message, resolved deterministically
+   * from the full catalog (inbound-name pinning). Used by the false-denial backstop:
+   * a reply that denies availability of one of these must never ship. Undefined on the
+   * canned early-return paths.
+   */
+  inboundNamedProducts?: Product[];
   /** P1-5: per-reply decision-ledger telemetry. Present on the main LLM path; undefined on the
    * canned early-return paths (discount-finalized / OOS / repeat-closing — no model call). */
   telemetry?: ReplyTelemetry;
@@ -3981,6 +4002,10 @@ export async function generateReply(
 
   let products: Product[] = [];
   let usedFullCatalogFallback = false;
+  // Products the customer explicitly named in THIS message, resolved deterministically
+  // from the full catalog (inboundNamePinning). Pinned into the contextual pool and
+  // returned so the false-denial guard can verify any availability denial against them.
+  let inboundNamedProducts: Product[] = [];
 
   const searchText = inboundMessage.trim();
   const attributeIntentHint: AttributeQueryIntentHint = attributeIntent;
@@ -4095,11 +4120,18 @@ export async function generateReply(
       }
     }
   } else if (needsContextualResolver) {
+    // Inbound-name pinning: the follow-up classifier can route a message that EXPLICITLY
+    // names a product ("Sa kushton nitro tech ripped?") into stale persisted context and
+    // skip fresh retrieval entirely. Resolve any named products deterministically from the
+    // full catalog and force-include them in the pool — never throws, [] when the message
+    // names nothing.
+    inboundNamedProducts = await resolveInboundNamedProducts(tenantId, searchText);
     products = await resolveContextualProductSet(
       tenantId,
       searchText,
       conversationHistoryWindow,
       contextualMatchLimit,
+      inboundNamedProducts,
     );
   }
 
@@ -4937,6 +4969,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
     hadImages: hasImages,
     productNotInCatalog,
     customerAskedPrice,
+    inboundNamedProducts,
     telemetry,
     // P2-1 (RC-03): the reply's declared facts (present only when the facts_used contract is on).
     // Fed to the consolidated grounding gate and persisted in the decision ledger.

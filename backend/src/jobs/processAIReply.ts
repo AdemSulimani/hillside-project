@@ -120,6 +120,7 @@ import {
   decideImageRequestOutcome,
   buildImageReplyText,
 } from '../services/productImageRequestService';
+import { productsDeniedInReply } from '../services/inboundNamePinning';
 import type { ProductImageRef } from '../services/productImageRequestService';
 import { markSelfSentMessageEcho } from '../services/outboundEchoRegistry';
 import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
@@ -3459,6 +3460,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     attributeIntent,
     hadImages,
     productNotInCatalog: visionProductNotInCatalog,
+    inboundNamedProducts = [],
     telemetry: replyTelemetry,
     factsUsed,
   } = await generateReply(
@@ -4861,6 +4863,27 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     }
   }
 
+  // False-denial signal: the reply denies availability, and a product the customer
+  // EXPLICITLY NAMED in their message (deterministically resolved against the full
+  // catalog by inbound-name pinning) is mentioned INSIDE the denial clause itself.
+  // Clause-scoped (productsDeniedInReply) so an R13 reply that denies X but OFFERS a
+  // pinned product as an alternative can never trip it. Unlike the replyNamedRealProduct
+  // rescue above, this deliberately has NO matchedProducts-empty precondition — the live
+  // bug shipped its false denial with 10 unrelated products in context. Pure and
+  // in-memory; a truly-not-carried product can never set it because pinning finds no
+  // catalog row for it.
+  let deniedProductsInCatalog: Product[] = [];
+  if (
+    containsNegativeAvailabilityPhrase &&
+    !uncertainGuardAlreadyEscalated &&
+    !isOosCannedReply &&
+    !isOrderConfirmationReply &&
+    inboundNamedProducts.length > 0
+  ) {
+    deniedProductsInCatalog = productsDeniedInReply(inboundNamedProducts, finalReplyText);
+  }
+  const deniedProductExistsInCatalog = deniedProductsInCatalog.length > 0;
+
   if (
     shouldEscalateUncertainAnswer({
       replyText: finalReplyText,
@@ -4870,19 +4893,25 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       isOrderFlowReply: isOrderConfirmationReply,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
       hasMatchingProductsInContext: matchedProducts.length > 0 || replyNamedRealProduct,
+      deniedProductExistsInCatalog,
     })
   ) {
     logger.warn('[UNCERTAIN ANSWER GUARD] Reply is a generic deflection — escalating to holding message', {
       tenantId,
       conversationId,
       negativeAvailabilityDetected: containsNegativeAvailabilityPhrase,
+      deniedProductExistsInCatalog,
+      deniedProductNames: deniedProductsInCatalog.map((p) => p.name),
       replyPreview: logSafeStructured(finalReplyText),
     });
     uncertainAnswerDetails = {
-      kind: 'uncertain_answer_fallback',
+      kind: deniedProductExistsInCatalog ? 'false_availability_denial' : 'uncertain_answer_fallback',
       negative_availability_detected: containsNegativeAvailabilityPhrase,
       customer_question: inboundText || null,
       originalReplyPreview: finalReplyText.slice(0, 200),
+      ...(deniedProductExistsInCatalog
+        ? { denied_product_names: deniedProductsInCatalog.map((p) => p.name) }
+        : {}),
     };
     uncertainAnswerEscalated = true;
     finalReplyText = GET_BACK_TO_YOU_MESSAGES[replyLocale === 'sq' ? 'sq' : 'en'];

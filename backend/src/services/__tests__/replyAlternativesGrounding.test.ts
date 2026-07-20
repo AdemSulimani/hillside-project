@@ -101,6 +101,46 @@ describe('R6/R13 — the retrieval-window defect', () => {
       true,
     );
   });
+
+  it('FALSE DENIAL: even the R13-compliant shape escalates when the denied product verifiably exists', () => {
+    // Live bug (conv ee183c2e): "nuk e kemi Nitro Tech Ripped" + alternatives shipped because
+    // the carve-out saw a populated context. When inbound-name pinning proves the denied
+    // product IS in the catalog, the denial is false and must reach a human instead.
+    const falseDenial =
+      'Na vjen keq, nuk e kemi Nitro Tech Ripped. Mund t’ju ofrojmë Mega Mass 3kg Vanilje.';
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        replyText: falseDenial,
+        enabled: true,
+        alreadyEscalated: false,
+        isOosCannedReply: false,
+        isOrderFlowReply: false,
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: true,
+        deniedProductExistsInCatalog: true,
+      }),
+      true,
+    );
+  });
+
+  it('GENUINE DENIAL: the R13 reply still ships when the denied product is not in the catalog', () => {
+    // Pinning finds no catalog row for a truly-not-carried product, so the signal is absent
+    // and behavior is byte-identical to before the backstop existed.
+    assert.equal(decide({ hasMatchingProductsInContext: true }), false);
+    assert.equal(
+      shouldEscalateUncertainAnswer({
+        replyText: R13_COMPLIANT_REPLY,
+        enabled: true,
+        alreadyEscalated: false,
+        isOosCannedReply: false,
+        isOrderFlowReply: false,
+        negativeAvailabilityDetected: true,
+        hasMatchingProductsInContext: true,
+        deniedProductExistsInCatalog: false,
+      }),
+      false,
+    );
+  });
 });
 
 describe('replyNamesActiveCatalogProduct — over-match guards', () => {
