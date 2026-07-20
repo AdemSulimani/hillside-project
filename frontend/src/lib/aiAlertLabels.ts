@@ -29,6 +29,9 @@ const LABELS: Record<string, string> = {
   provider_unavailable: 'AI temporarily unavailable — needs manual reply',
   confidence_band_abstain: 'Borderline AI decision — worth a look',
   multiple_channels_matched: 'Channel connected to more than one business',
+  order_info_updated: 'Order details updated by customer',
+  product_image_unavailable: 'Product photos missing from catalog',
+  prompt_assembly_violation: 'AI configuration issue — check prompt setup',
 };
 
 export function formatFlagReason(reason: string): string {
