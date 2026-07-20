@@ -3591,6 +3591,26 @@ Final-closing behavior:
 `.trim(),
 };
 
+/**
+ * Photo-capability contract, appended to every retail system prompt. The deterministic photo
+ * flow (image classifier + canned override in processAIReply) owns actual dispatch; this only
+ * stops the model from DENYING the capability on turns where that flow does not fire.
+ */
+const PHOTO_CAPABILITY_APPEND_BY_LOCALE: Record<ReplyLocale, string> = {
+  sq: `
+Fotot e produkteve:
+- Kur klienti kërkon foto të një produkti, sistemi e dërgon foton automatikisht bashkë me përgjigjen tënde.
+- MOS thuaj kurrë që nuk mund të dërgosh foto dhe mos u justifiko për fotot.
+- Mos e përshkruaj foton dhe mos premto vetë dërgimin e saj — përgjigju shkurt e natyrshëm vetëm për produktet që kërkoi klienti.
+`.trim(),
+  en: `
+Product photos:
+- When the customer asks for a product photo, the system sends the photo automatically along with your reply.
+- NEVER say you cannot send photos, and never apologize about photos.
+- Do not describe the photo or promise to send it yourself — reply briefly and naturally, covering only the products the customer asked about.
+`.trim(),
+};
+
 /** Closing-reply sentences (per locale + per flavor) used when the customer is wrapping up. */
 export const CLOSING_REPLY_SENTENCES: Record<ReplyLocale, { no_thanks: string; greeting: string }> = {
   sq: {
@@ -4595,6 +4615,16 @@ Using packaging-derived details (IMPORTANT — source precedence):
     section('closing_reply', `\n\n${closingAppend}`, 'normal');
   }
 
+  // Photo-capability contract. The customer-facing photo flow is deterministic (the image
+  // classifier + canned override in processAIReply own detection, dispatch, and the reply
+  // text), but the model must still never CLAIM it cannot send photos: on turns where the
+  // classifier misses (keyword-dodging phrasings), the raw model reply is what ships, and
+  // without this instruction the model improvises "nuk mund të dërgojmë foto" apologies
+  // (live Bug #2, conversation 21288070, 2026-07-20). Always on — this is capability truth,
+  // not tenant policy. Per-product image availability is deliberately NOT in the catalog
+  // context: the deterministic path is the authority on what actually gets sent.
+  section('photo_capability', `\n\n${PHOTO_CAPABILITY_APPEND_BY_LOCALE[language]}`, 'normal');
+
   // Operator restrictions and platform policy are appended after all product, guideline and
   // runtime appends that could otherwise dilute them. P2-5: the locale is threaded through so
   // the platform rulebook renders in the customer's language rather than always in Albanian
@@ -4944,15 +4974,22 @@ function mightBeImageRequest(message: string): boolean {
 
   if (!t || t.length < 4) return false;
 
-  // English and Albanian image / send keywords.
+  // English and Albanian image / send keywords. The Albanian nouns accept inflection
+  // suffixes ("foton", "foto", "fotot", "fotove", "imazhin", "pamjen"…) — live miss
+  // 2026-07-20: "a muni me ma dergu foton e nitro techit" dodged the bare \bfoto\b
+  // boundary and the whole deterministic photo flow silently never ran.
   return (
-    /\b(photo|foto|image|picture|pic|imazh|fotografi|pamje)\b/.test(t) ||
+    /\b(photo|image|picture|pic)s?\b/.test(t) ||
+    /\bfoto\w*\b/.test(t) ||
+    /\bimazh\w*\b/.test(t) ||
+    /\bfotografi\w*\b/.test(t) ||
+    /\bpamje\w*\b/.test(t) ||
     // Albanian: "dërgomë/dërgoji/dërgoni foto" — "send me the photo"
     /\bdergom[eë]?\b/.test(t) ||
     /\bdergoj[ei]?\b/.test(t) ||
     /\bdergon[i]?\b/.test(t) ||
     // Albanian: "shfaq" (show), "shiko" (look/view) combined with a known photo word
-    (/\b(shfaq|shiko)\b/.test(t) && /\b(foto|imazh|pamje)\b/.test(t))
+    (/\b(shfaq|shiko)\b/.test(t) && /\b(foto\w*|imazh\w*|pamje\w*)\b/.test(t))
   );
 }
 

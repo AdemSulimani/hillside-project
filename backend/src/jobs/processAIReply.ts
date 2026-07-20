@@ -117,7 +117,10 @@ import {
 import {
   resolveProductsForImageRequest,
   augmentImageTargetsFromCatalog,
+  decideImageRequestOutcome,
+  buildImageReplyText,
 } from '../services/productImageRequestService';
+import type { ProductImageRef } from '../services/productImageRequestService';
 import { markSelfSentMessageEcho } from '../services/outboundEchoRegistry';
 import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
 import {
@@ -3476,6 +3479,15 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   // they stay in scope for the image-send step and the alert-creation step.
   let productsToSendImages: Product[] = [];
   let productsWithMissingImages: Product[] = [];
+  // Set when a detected photo request resolved to ZERO products (classifier hit but no
+  // target matched) — the turn ships a holding line instead of the raw model reply, and
+  // this drives the product_image_unavailable alert's `unresolved_reference` details.
+  let imageRequestUnresolvedDetails: {
+    refs: ProductImageRef[];
+    matched_count: number;
+    recent_count: number;
+    discussed_count: number;
+  } | null = null;
 
   if (replyText.trim() === '[NO_REPLY]') {
     // P1-5: a [NO_REPLY] still made a decision — record it so billing-class divergence (a turn the
@@ -4917,6 +4929,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     uncertainAnswerEscalated;
 
   if (imageClassification?.is_image_request && !anyEscalationFired) {
+    const imgLocale = replyLocale === 'sq' ? 'sq' : 'en';
     try {
       // Load products discussed in recent AI messages so positional references
       // like "the second one" resolve against the full set the customer has seen.
@@ -4925,10 +4938,18 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         recentMessages,
         10,
       );
-      const contextTargets = resolveProductsForImageRequest(
+      // The texts of recent AI replies are the scope guard for broad references: the
+      // persisted product_ids are the whole retrieval pool, but the customer has only
+      // SEEN the products the AI actually wrote out in these messages.
+      const recentAiTexts = recentMessages
+        .filter((m) => m.sent_by === 'ai' && typeof m.content === 'string' && m.content.trim())
+        .slice(-4)
+        .map((m) => m.content as string);
+      const resolution = resolveProductsForImageRequest(
         imageClassification.product_refs,
         matchedProducts,
         recentHistoryProducts,
+        recentAiTexts,
       );
 
       // Recover named products whose image lives on a catalog row that wasn't in this
@@ -4938,56 +4959,68 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       const targetProducts = await augmentImageTargetsFromCatalog(
         tenantId,
         imageClassification.product_refs,
-        contextTargets,
+        resolution.targets,
       );
 
-      if (targetProducts.length > 0) {
-        productsToSendImages = targetProducts.filter((p) => p.image_urls.length > 0);
-        productsWithMissingImages = targetProducts.filter((p) => p.image_urls.length === 0);
+      const decision = decideImageRequestOutcome(targetProducts);
+      productsToSendImages = decision.withImages;
+      productsWithMissingImages = decision.missingImages;
 
-        const imgLocale = replyLocale;
+      // A detected photo request NEVER ships the raw model reply: the model has no
+      // photo-sending knowledge, so its text on these turns is at best redundant and at
+      // worst an improvised "I can't send photos" apology (the original Bug #2). Every
+      // outcome — images, missing images, or nothing resolved — gets canned copy.
+      finalReplyText = buildImageReplyText(imgLocale, decision.withImages, decision.missingImages);
 
-        if (productsToSendImages.length > 0) {
-          // Replace AI-generated text with a clean confirmation that pairs naturally
-          // with the image message(s) that follow immediately after.
-          if (productsToSendImages.length === 1) {
-            finalReplyText =
-              imgLocale === 'sq'
-                ? `Ja foto e ${productsToSendImages[0].name}:`
-                : `Here is a photo of ${productsToSendImages[0].name}:`;
-          } else {
-            finalReplyText =
-              imgLocale === 'sq'
-                ? 'Ja fotot e produkteve të kërkuara:'
-                : 'Here are the photos of the products you asked about:';
-          }
-          // Append a per-product notice for any products that had no image stored.
-          if (productsWithMissingImages.length > 0) {
-            const missingNames = productsWithMissingImages.map((p) => p.name).join(', ');
-            finalReplyText +=
-              imgLocale === 'sq'
-                ? `\nFoto e ${missingNames} do të ju dërgohet së shpejti.`
-                : `\nWe'll send you the photo of ${missingNames} shortly.`;
-          }
-        } else {
-          // No images at all — send the holding message so the customer knows
-          // a human will follow up with the photo.
-          finalReplyText =
-            imgLocale === 'sq'
-              ? 'Foto e produktit do të ju dërgohet së shpejti.'
-              : "We'll send you the product photo shortly.";
-        }
-
-        console.info('[ai.reply] Product image request handled', {
+      if (decision.outcome === 'holding_unresolved') {
+        imageRequestUnresolvedDetails = {
+          refs: imageClassification.product_refs ?? [],
+          matched_count: matchedProducts.length,
+          recent_count: recentHistoryProducts.length,
+          discussed_count: resolution.trace.discussedCount,
+        };
+        console.warn('[image_request] unresolved — holding text sent', {
           conversationId,
           tenantId,
-          productsWithImages: productsToSendImages.map((p) => p.id),
-          productsWithoutImages: productsWithMissingImages.map((p) => p.id),
+          ...imageRequestUnresolvedDetails,
         });
       }
+
+      recordDecision({
+        classifier: 'product_image_request',
+        raw_score: targetProducts.length,
+        threshold: null,
+        boost_applied: false,
+        passed: decision.outcome === 'send_images',
+        branch: decision.outcome,
+      });
+
+      console.info('[image_request] resolution', {
+        conversationId,
+        tenantId,
+        refs: imageClassification.product_refs,
+        contextPoolSize: resolution.trace.contextPoolSize,
+        discussedCount: resolution.trace.discussedCount,
+        matches: resolution.trace.matches,
+        capped: resolution.trace.capped,
+        augmentedIds: targetProducts
+          .filter((p) => !resolution.targets.some((t) => t.id === p.id))
+          .map((p) => p.id),
+        outcome: decision.outcome,
+        productsWithImages: decision.withImages.map((p) => p.id),
+        productsWithoutImages: decision.missingImages.map((p) => p.id),
+      });
     } catch (imageResolutionErr) {
+      // Same invariant under failure: holding copy, never the raw model reply.
+      finalReplyText = buildImageReplyText(imgLocale, [], []);
+      imageRequestUnresolvedDetails = {
+        refs: imageClassification.product_refs ?? [],
+        matched_count: matchedProducts.length,
+        recent_count: 0,
+        discussed_count: 0,
+      };
       console.warn(
-        '[ai.reply] Product image request resolution failed — sending original AI reply',
+        '[ai.reply] Product image request resolution failed — holding reply sent',
         {
           conversationId,
           tenantId,
@@ -5000,6 +5033,34 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     }
   }
   // ---- End product image request handling --------------------------------
+
+  // Alert details shared by the staged (outbox) and legacy alert sites below: a photo
+  // request that left some products photo-less, or one that resolved to nothing at all.
+  const imageAlertDetails:
+    | {
+        kind: 'missing_image' | 'unresolved_reference';
+        product_ids: string[];
+        product_names: string[];
+        refs?: ProductImageRef[];
+        matched_count?: number;
+        recent_count?: number;
+        discussed_count?: number;
+      }
+    | null =
+    productsWithMissingImages.length > 0
+      ? {
+          kind: 'missing_image',
+          product_ids: productsWithMissingImages.map((p) => p.id),
+          product_names: productsWithMissingImages.map((p) => p.name),
+        }
+      : imageRequestUnresolvedDetails
+        ? {
+            kind: 'unresolved_reference',
+            product_ids: [],
+            product_names: [],
+            ...imageRequestUnresolvedDetails,
+          }
+        : null;
 
   const contact = await findContactById(conversation.contact_id);
 
@@ -5355,7 +5416,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
               payload: { conversation_id: conversationId, message_id: message.id },
             });
           }
-          if (productsWithMissingImages.length > 0) {
+          if (imageAlertDetails) {
             await insertOutboxTx(client, {
               tenant_id: tenantId,
               conversation_id: conversationId,
@@ -5364,10 +5425,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
               payload: {
                 conversation_id: conversationId,
                 message_id: message.id,
-                details: {
-                  product_ids: productsWithMissingImages.map((p) => p.id),
-                  product_names: productsWithMissingImages.map((p) => p.name),
-                },
+                details: imageAlertDetails,
               },
             });
           }
@@ -5593,21 +5651,20 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   }
 
   // Product image unavailable alert: fires when the customer explicitly asked for a
-  // product photo but the catalog entry has no image_urls. Does NOT pause the AI —
+  // product photo but the catalog entry has no image_urls (`kind: 'missing_image'`) OR the
+  // request resolved to no product at all (`kind: 'unresolved_reference'` — the customer got
+  // a holding line and someone must follow up with the right photo). Does NOT pause the AI —
   // the business should manually send the photo while the conversation continues.
   // One alert per turn covers all missing-image products in a single notification.
   // P1-1: outbox-owned (or committed with the first attempt) when staged — inline skipped.
-  if (productsWithMissingImages.length > 0 && !outboxOwnedEffects && !isRetryOfDeliveredReply) {
+  if (imageAlertDetails && !outboxOwnedEffects && !isRetryOfDeliveredReply) {
     try {
       const missingImageAlert = await createAIAlert({
         tenant_id: tenantId,
         conversation_id: conversationId,
         message_id: outboundMessage.id,
         reason: 'product_image_unavailable',
-        details: {
-          product_ids: productsWithMissingImages.map((p) => p.id),
-          product_names: productsWithMissingImages.map((p) => p.name),
-        },
+        details: imageAlertDetails,
       });
       const contactForMissingAlert = await findContactById(conversation.contact_id);
       socketService.emitAIAlert(tenantId, {

@@ -62,10 +62,10 @@ describe('footer coverage across the 6 live tenants (EV-029)', () => {
     }
   });
 
-  it('flag-on: every one of the 6 tenants receives all 17 platform rules', () => {
+  it('flag-on: every one of the 6 tenants receives all 18 platform rules', () => {
     for (const shape of TENANT_SHAPES) {
       const platform = resolvePlatformRestrictions(shape, 'sq', true);
-      assert.equal(platform.length, 17, shape.name);
+      assert.equal(platform.length, 18, shape.name);
     }
   });
 });
@@ -95,7 +95,7 @@ describe('resolvePlatformRestrictions', () => {
   it('tolerates null/undefined/non-array columns', () => {
     for (const value of [null, undefined, 'nonsense' as never, 42 as never]) {
       const out = resolvePlatformRestrictions({ platform_restrictions: value as never }, 'sq', true);
-      assert.equal(out.length, 17);
+      assert.equal(out.length, 18);
     }
   });
 
@@ -146,15 +146,24 @@ describe('buildRestrictionsFooter — structure and precedence', () => {
 });
 
 describe('the rulebook itself', () => {
-  it('has 17 rules in both locales — rule-for-rule business.md', () => {
-    assert.equal(PLATFORM_POLICY_RULES_SQ.length, 17);
-    assert.equal(PLATFORM_POLICY_RULES_EN.length, 17);
+  it('has 18 rules in both locales — rule-for-rule business.md + the R18 photo-capability rule', () => {
+    assert.equal(PLATFORM_POLICY_RULES_SQ.length, 18);
+    assert.equal(PLATFORM_POLICY_RULES_EN.length, 18);
   });
 
-  it('shares ids R1..R17 across locales, in order', () => {
-    const expected = Array.from({ length: 17 }, (_, i) => `R${i + 1}`);
+  it('shares ids R1..R18 across locales, in order', () => {
+    const expected = Array.from({ length: 18 }, (_, i) => `R${i + 1}`);
     assert.deepEqual(PLATFORM_POLICY_RULES_SQ.map((r) => r.id), expected);
     assert.deepEqual(PLATFORM_POLICY_RULES_EN.map((r) => r.id), expected);
+  });
+
+  it('R18 forbids denying the photo capability in BOTH locales', () => {
+    const sq18 = PLATFORM_POLICY_RULES_SQ.find((r) => r.id === 'R18')!;
+    const en18 = PLATFORM_POLICY_RULES_EN.find((r) => r.id === 'R18')!;
+    assert.ok(sq18.text.includes('mos thuaj') || sq18.text.includes('Mos thuaj'), sq18.text);
+    assert.ok(sq18.text.toLowerCase().includes('automatikisht'), sq18.text);
+    assert.ok(en18.text.toLowerCase().includes('never say you cannot send photos'), en18.text);
+    assert.ok(en18.text.toLowerCase().includes('automatically'), en18.text);
   });
 
   it('has no empty rule text', () => {

@@ -957,6 +957,32 @@ export async function findMostSimilarActiveProductName(
   return rows[0] ?? null;
 }
 
+/**
+ * pg_trgm rows-returning sibling of findMostSimilarActiveProductName. Used as the last
+ * recovery rung for NAMED photo requests: exact/substring/token matching can miss on
+ * dialect inflections ("nitro techin" → "Nitro Tech Ripped"), while word_similarity
+ * bridges them. Ordered most-similar first, then shortest name (the most specific base
+ * product rather than a longer niche variant).
+ */
+export async function findActiveProductsByNameSimilarity(
+  tenantId: string,
+  candidate: string,
+  minSimilarity: number,
+  limit = 10,
+): Promise<Product[]> {
+  const trimmed = candidate.trim();
+  if (!trimmed) return [];
+  const { rows } = await pool.query<Product>(
+    `SELECT * FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+       AND word_similarity($2, name) >= $3
+     ORDER BY word_similarity($2, name) DESC, LENGTH(name) ASC, name ASC
+     LIMIT $4`,
+    [tenantId, trimmed, minSimilarity, limit],
+  );
+  return rows;
+}
+
 /** Returns the number of active, non-deleted products for a tenant. */
 export async function countActiveProducts(tenantId: string): Promise<number> {
   const { rows } = await pool.query<{ count: string }>(
