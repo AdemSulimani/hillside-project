@@ -6130,13 +6130,35 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
             fsm: fsmShouldCreateOrder,
           });
         }
-        recordDecision({
-          classifier: 'order_stage',
-          raw_score: null,
-          threshold: null,
-          boost_applied: false,
-          passed: shadow.passed,
-          branch: shadow.branch,
+        // P2-2 (dev validation Finding 3): this verdict must reach the ledger as its OWN row.
+        // The turn's 'main' row was built and serialized inside stageAndSend's onFlip — the
+        // order-detection tail runs after that seal, so a push into decisionEvents here is
+        // provably dropped and eval:shadow (the cutover gate) reads zero observations forever.
+        // A distinct replySlot is mandatory (the idempotency key is slot-keyed, ON CONFLICT DO
+        // NOTHING — 'main' would collide silently), and `usage` MUST be nulled: buildLedgerRecord
+        // pulls the turn's entire tracked call list, and the P3-6 cost readers sum per-row with
+        // no slot filter, so inheriting it would double every order-detection turn's COGS. A
+        // crash-retry of the tail re-derives the same key, so the second insert is idempotent.
+        void writeLedgerBestEffort({
+          ...buildJobLedgerRecord({
+            tenantId,
+            conversationId,
+            correlationId: ledgerCorrelationId,
+            traceId,
+            replySlot: 'shadow:order_stage',
+            decisionKind: 'order_shadow',
+            decisionEvents: [
+              {
+                classifier: 'order_stage',
+                raw_score: null,
+                threshold: null,
+                boost_applied: false,
+                passed: shadow.passed,
+                branch: shadow.branch,
+              },
+            ],
+          }),
+          usage: null,
         });
       }
     }

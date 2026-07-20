@@ -125,6 +125,43 @@ describe('P2-6 floor txn: alert only — no pause, no human_replied', () => {
   });
 });
 
+describe('F3: the order_stage shadow verdict reaches the ledger as its own row', () => {
+  // Dev validation Finding 3: the turn's 'main' ledger row is serialized inside stageAndSend's
+  // onFlip; the order-detection tail runs AFTER that seal, so a recordDecision() push there is
+  // silently dropped and eval:shadow — the P2-2 cutover gate — reads zero observations forever.
+  // The fix writes the verdict as a second best-effort row. This pin holds the three load-bearing
+  // properties: a distinct slot (idempotency key is slot-keyed; 'main' collides silently), a
+  // nulled usage (buildLedgerRecord pulls the whole turn's tracked calls; P3-6 cost readers sum
+  // per-row, so inheriting it would double order-detection COGS), and no resurrected dead push.
+  const anchor = "ORDER_STAGE_MACHINE_MODE === 'shadow'";
+  const sites = indicesOf(processAIReplySource, anchor);
+
+  it('exactly one shadow-mode block exists (the guard is not vacuous)', () => {
+    assert.equal(sites.length, 1, `expected 1 shadow-mode site, found ${sites.length}`);
+  });
+
+  it('the shadow block writes its own best-effort row with a distinct slot and nulled usage', () => {
+    const window = processAIReplySource.slice(sites[0], sites[0] + 3200);
+    for (const required of [
+      'writeLedgerBestEffort',
+      "replySlot: 'shadow:order_stage'",
+      "decisionKind: 'order_shadow'",
+      'usage: null',
+    ]) {
+      assert.ok(window.includes(required), `order_stage shadow block is missing: ${required}`);
+    }
+  });
+
+  it('the dead recordDecision push does not come back', () => {
+    const window = processAIReplySource.slice(sites[0], sites[0] + 3200);
+    assert.ok(
+      !window.includes('recordDecision('),
+      'the order_stage shadow block pushes to decisionEvents — that array was already serialized ' +
+        'into the main row at the send flip; the event is dropped (Finding 3)',
+    );
+  });
+});
+
 describe('P2-5: the Gheg consent widening stays OUT of the legacy affirmation path', () => {
   // GHEG_ORDER_CONSENT_EXTRA_PATTERNS feed ONLY the FSM's stage-gated consent detector
   // (honored solely in awaiting_confirmation). The legacy looksLikeOrderAffirmation runs on
