@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import {
   assemblyAlertDedupeKey,
   collectPromptAssemblyIssues,
+  dedupeDetailFor,
   PROMPT_ASSEMBLY_ALERT_REASON,
 } from '../promptAssemblyAlerts';
 
@@ -131,6 +132,41 @@ describe('assemblyAlertDedupeKey', () => {
       assemblyAlertDedupeKey('t', issue, 'marker-a'),
       assemblyAlertDedupeKey('t', issue, 'marker-b'),
     );
+  });
+
+  it('over_budget keys are identical across varying prompt lengths against the same cap', () => {
+    // The production bug this pins: N is the assembled prompt's length and changes on every
+    // reply, so keying on the raw "N > M" detail minted a fresh key per turn — one tenant-level
+    // alert per AI reply, exactly the per-reply spam this module exists to prevent.
+    assert.equal(
+      assemblyAlertDedupeKey('t', { kind: 'over_budget', detail: '39458 > 34000' }, 'm'),
+      assemblyAlertDedupeKey('t', { kind: 'over_budget', detail: '35001 > 34000' }, 'm'),
+    );
+  });
+
+  it('over_budget keys differ across budget caps', () => {
+    // A cap change is a config move — re-checking whether the condition survived it is correct.
+    assert.notEqual(
+      assemblyAlertDedupeKey('t', { kind: 'over_budget', detail: '40000 > 34000' }, 'm'),
+      assemblyAlertDedupeKey('t', { kind: 'over_budget', detail: '40000 > 30000' }, 'm'),
+    );
+  });
+
+  it('a malformed over_budget detail degrades to a constant key, never to no dedup', () => {
+    const a = dedupeDetailFor({ kind: 'over_budget', detail: 'not a size pair' });
+    const b = dedupeDetailFor({ kind: 'over_budget', detail: 'another odd shape' });
+    assert.equal(a, b);
+  });
+
+  it('non-over_budget kinds still key on the full detail', () => {
+    for (const kind of [
+      'orphan_block_key',
+      'missing_required_section',
+      'forbidden_section_reference',
+      'unknown_placeholder_token',
+    ] as const) {
+      assert.equal(dedupeDetailFor({ kind, detail: 'some-detail' }), 'some-detail');
+    }
   });
 
   it('degrades a missing marker to a CONSTANT epoch, never to no dedup', () => {
