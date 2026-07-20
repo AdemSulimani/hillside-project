@@ -905,14 +905,17 @@ const NAME_GUARD_LLM_CATALOG_CAP = (() => {
  * P1-3 (RC-08) boundary observability: when CONFIDENCE_CONTRACT_SYMMETRY is ON, emit a
  * structured marker whenever a confidence/score falls inside the abstain band around a hard
  * gate — the boundary phrasing that used to flip outcome-class run-to-run. Grep
- * `[CONFIDENCE_GATE]` to measure how often decisions land in the band. Behaviour-neutral
- * (log-only) and inert when the flag is OFF.
+ * `[CONFIDENCE_GATE]` to measure how often decisions land in the band. Inert when the flag is
+ * OFF. The log line is unconditional; the operator alert additionally requires `alertEligible`
+ * — the caller's assertion that the in-band score was the binding constraint on the gated
+ * action (all other preconditions held), so only genuine boundary ambiguities reach a human.
  */
 function logConfidenceGateBoundary(
   gate: string,
   confidence: number,
   threshold: number,
   ctx: { tenantId: string; conversationId: string; inboundExternalId?: string },
+  alertEligible: boolean,
 ): void {
   if (!CONFIDENCE_CONTRACT_SYMMETRY) return;
   const verdict = classifyConfidenceGate({
@@ -925,6 +928,14 @@ function logConfidenceGateBoundary(
   console.info(
     `[CONFIDENCE_GATE] gate: ${gate} verdict: abstain confidence: ${confidence} threshold: ${threshold} band: ${CONFIDENCE_HYSTERESIS_BAND} tenantId: ${ctx.tenantId} conversationId: ${ctx.conversationId}`,
   );
+  // The operator ALERT below fires only when `alertEligible` — when the in-band score was the
+  // BINDING constraint on the gated action. The log line above stays unconditional (P1-3
+  // observability). An in-band score on a gate whose other preconditions already fail is not an
+  // ambiguity a human can act on: an order-intent score of 0.80 while name/phone/address are
+  // still missing means no order was possible at ANY score and the AI is mid-collection — an
+  // alert there is noise on every healthy order flow. Likewise a boolean-intent gate whose
+  // verdict was negative (is_refund=false at 0.82) is not a near-missed refund.
+  if (!alertEligible) return;
   // P1-3 (RC-08): an in-band score is a genuine ambiguity — the gated action does not fire,
   // but a human should see it (a refund demand at 0.82 must not vanish into a normal sales
   // reply with only a log line, and an in-band order-intent score is a warm lead worth a
@@ -2558,11 +2569,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       );
       const hasCancelOrRefundIntent =
         cancellationRefundIntent.is_cancellation || cancellationRefundIntent.is_refund;
-      logConfidenceGateBoundary('cancellation_refund', cancellationRefundIntent.confidence, 0.8, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'cancellation_refund',
+        cancellationRefundIntent.confidence,
+        0.8,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        hasCancelOrRefundIntent,
+      );
       const confidentCancelOrRefund = passesConfidenceGate(
         cancellationRefundIntent.confidence,
         0.8,
@@ -2729,11 +2742,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       console.info(
         `[WRONG_PRODUCT] tenantId: ${tenantId} conversationId: ${conversationId} is_wrong_product: ${wrongProductIntent.is_wrong_product} confidence: ${wrongProductIntent.confidence} reasoning: ${logJsonStringOrNull(wrongProductIntent.reason)}`,
       );
-      logConfidenceGateBoundary('wrong_product', wrongProductIntent.confidence, 0.8, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'wrong_product',
+        wrongProductIntent.confidence,
+        0.8,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        wrongProductIntent.is_wrong_product === true,
+      );
       const wrongProductEscalate =
         wrongProductIntent.is_wrong_product &&
         passesConfidenceGate(wrongProductIntent.confidence, 0.8, CONFIDENCE_CONTRACT_SYMMETRY);
@@ -2926,11 +2941,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         postPurchaseSupportIntent.is_not_delivered_complaint ||
         postPurchaseSupportIntent.is_wrong_product_issue ||
         postPurchaseSupportIntent.is_product_problem_issue;
-      logConfidenceGateBoundary('post_purchase', postPurchaseSupportIntent.confidence, 0.8, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'post_purchase',
+        postPurchaseSupportIntent.confidence,
+        0.8,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        hasPostPurchaseSupportIntent,
+      );
       const confidentPostPurchaseSupportIntent = passesConfidenceGate(
         postPurchaseSupportIntent.confidence,
         0.8,
@@ -3205,11 +3222,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       console.info(
         `[ORDER_INFO_UPDATE] tenantId: ${tenantId} conversationId: ${conversationId} is_update: ${orderInfoUpdateIntent.is_order_info_update} confidence: ${orderInfoUpdateIntent.confidence} reason: ${logJsonStringOrNull(orderInfoUpdateIntent.reason)}`,
       );
-      logConfidenceGateBoundary('order_info_update', orderInfoUpdateIntent.confidence, 0.82, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'order_info_update',
+        orderInfoUpdateIntent.confidence,
+        0.82,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        orderInfoUpdateIntent.is_order_info_update === true,
+      );
       const orderInfoUpdateEscalate =
         orderInfoUpdateIntent.is_order_info_update &&
         passesConfidenceGate(orderInfoUpdateIntent.confidence, 0.82, CONFIDENCE_CONTRACT_SYMMETRY);
@@ -5987,11 +6006,13 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           compute: () => detectOrderAffirmationIntent(inboundText, messagesForIntent),
         });
     if (!orderStageOn) {
-      logConfidenceGateBoundary('order_affirmation', orderAffirmationIntent.confidence, 0.7, {
-        tenantId,
-        conversationId,
-        inboundExternalId: data.messageExternalId,
-      });
+      logConfidenceGateBoundary(
+        'order_affirmation',
+        orderAffirmationIntent.confidence,
+        0.7,
+        { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+        orderAffirmationIntent.is_order_affirmation === true,
+      );
     }
     const latestMessageAffirmsOrder = orderStageOn
       ? orderAffirmationIntent.is_order_affirmation === true
@@ -6096,19 +6117,26 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       ` intentFirstName: ${logJsonStringOrNull(intent.customer_first_name)}`,
     );
 
-    logConfidenceGateBoundary('order_intent_score', intent.intent_score, intentOrderMinScore, {
-      tenantId,
-      conversationId,
-      inboundExternalId: data.messageExternalId,
-    });
-    const legacyPassesDraftOrderValidation =
+    // The non-score draft-order conjuncts. When any of these is false the intent score is not
+    // the binding constraint — no order was possible at any score — so an in-band score is the
+    // normal mid-collection state, not an ambiguity worth an operator alert.
+    const orderSlotsBindOnScore =
       intent.is_ready_to_order === true &&
-      passesConfidenceGate(intent.intent_score, intentOrderMinScore, CONFIDENCE_CONTRACT_SYMMETRY) &&
       intent.product_name != null &&
       hasDeliveryAddress &&
       hasCustomerPhone &&
       hasCustomerName &&
       shouldAffirmOrder;
+    logConfidenceGateBoundary(
+      'order_intent_score',
+      intent.intent_score,
+      intentOrderMinScore,
+      { tenantId, conversationId, inboundExternalId: data.messageExternalId },
+      orderSlotsBindOnScore,
+    );
+    const legacyPassesDraftOrderValidation =
+      orderSlotsBindOnScore &&
+      passesConfidenceGate(intent.intent_score, intentOrderMinScore, CONFIDENCE_CONTRACT_SYMMETRY);
 
     // P2-2 (RC-07/08/22): the deterministic order_stage FSM. In `shadow` it is computed and any
     // divergence from the legacy gate is logged + recorded in the P1-5 ledger (legacy still
