@@ -3,7 +3,12 @@ import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { withModelRole } from './openaiCallTracker';
 import type { ProductImageRef } from './productImageRequestService';
-import { resolveInboundNamedProducts } from './inboundNamePinning';
+import { productNameTokenMatch } from './productImageRequestService';
+import {
+  resolveInboundNamedProducts,
+  resolveGramsToProducts,
+  extractCandidateNameGrams,
+} from './inboundNamePinning';
 import {
   FACTS_USED_JSON_SCHEMA,
   parseFactsUsedCompletion,
@@ -4146,6 +4151,37 @@ export async function generateReply(
       );
     } catch (err) {
       console.warn('[aiService] Product matching failed', err);
+    }
+  }
+
+  // Fresh-path inbound-name gap detector. Fusion can miss a product the customer
+  // EXPLICITLY NAMED — live probe "A e keni kreatinen?" ended with an EMPTY pool and a
+  // blind "Po.": ILIKE cannot bridge the Albanianized k↔c spelling, the variants map
+  // covers lemmas only, and embedding similarity fell short. Extract the message's name
+  // grams (pure, [] for ordinary chat turns) and, only for grams NO fused row matches,
+  // run the deterministic pinning ladder and prepend the hits. Gated off the contextual
+  // branch (it already ran the SAME ladder at its pinning step — a gram that failed there
+  // fails identically here) and off other-options turns (anchor-derived pools).
+  if (!isOtherOptionsRequest && !needsContextualResolver && searchText) {
+    try {
+      const grams = extractCandidateNameGrams(searchText);
+      const unmatchedGrams = grams.filter(
+        (g) => !products.some((p) => productNameTokenMatch(g, p.name)),
+      );
+      if (unmatchedGrams.length > 0) {
+        const pinned = await resolveGramsToProducts(tenantId, unmatchedGrams);
+        if (pinned.length > 0) {
+          // [] on this path by construction (only the contextual branch assigns earlier).
+          inboundNamedProducts = pinned;
+          const pinnedIds = new Set(pinned.map((p) => p.id));
+          products = [
+            ...pinned,
+            ...products.filter((p) => !pinnedIds.has(p.id)),
+          ].slice(0, contextualMatchLimit);
+        }
+      }
+    } catch (err) {
+      console.warn('[aiService] Inbound-name gap detection failed', err);
     }
   }
 
