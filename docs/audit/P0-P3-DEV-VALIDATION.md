@@ -383,7 +383,7 @@ Final `.env`: every GO flag on; `ORDER_STAGE_MACHINE=shadow` (Finding 3); `GROUN
 3. Grounding stack: FACTS_USED_CONTRACT → GROUNDING_GATE_CONSOLIDATED (goldens + EV corpus green; live divergence collapse measured).
 4. P2-2 companions: COMMISSION_STORED_TIMESTAMP, STICKY_LOCALE_SLOT, INTENT_STRUCTURED_CONTRACT.
 5. P2-3 trio (HISTORY_DELIVERY_FILTERED, SUMMARY_SLOT_BACKED, AI_CONFIG_VERSIONED_CACHE) and P2-5 quartet (DIALECT_NORMALIZATION, GHEG_LEXICONS, RESTRICTIONS_FOOTER_ALL_TENANTS, PROMPT_ALLOWLIST_BUDGET).
-6. P2-6 trio in mandated order: GRACEFUL_DEGRADE_MODE → OPENAI_CALL_TIMEOUT_MS/OPENAI_TURN_DEADLINE_MS → OPENAI_CIRCUIT_BREAKER=**monitor** (**never `on` until a monitor baseline on prod traffic; do not rely on outage-no-pause until Finding 4 is fixed**).
+6. P2-6 trio in mandated order: GRACEFUL_DEGRADE_MODE → OPENAI_CALL_TIMEOUT_MS/OPENAI_TURN_DEADLINE_MS → OPENAI_CIRCUIT_BREAKER=**monitor** (**never `on` until a monitor baseline on prod traffic**). _Finding-4 caveat resolved (`a93a8bc`, retested F4a/F4b 2026-07-20): outage-no-pause now holds with SENSITIVE_PATH_FAIL_CLOSED on._
 7. PROMPT_SELF_HEAL_OFF_HOT_PATH + PROMPT_SECTION_BUDGET=**shadow**.
 
 **GO in shadow only (the canaries to watch):** ORDER_STAGE_MACHINE=`shadow` (safe, behavior-neutral) and GROUNDING_GATE_ATTRIBUTE_FACTS=`shadow`.
@@ -413,7 +413,7 @@ Two-part acceptance, both met:
 
 | Channel | Result |
 |---|---|
-| order_stage (P2-2) | **BLOCKED by Finding 3** — the shadow verdict never reaches the ledger, so `eval:shadow` reads 0 observations regardless of traffic. Console evidence only: 1 real divergence (legacy creates order / FSM holds) in 3 turns. The prod cutover bar (≥99 % over ≥500 rows) is unreachable until Finding 3 is fixed. |
+| order_stage (P2-2) | ~~BLOCKED by Finding 3~~ **UNBLOCKED** (`d125e99`, retested 2026-07-20): shadow verdicts now land as `shadow:order_stage` best-effort rows and `eval:shadow` reports observations with per-stage breakdown ("100% agreement over 2 observations" in the retest window). The prod cutover bar (≥99 % over ≥500 rows) is now *reachable* — it still has to actually run, and the U11 divergence class (legacy creates / FSM holds at `awaiting_confirmation`) still needs quantifying before `on`. |
 | attribute lane (P3-1) | shadow mode live; `facts_used` populated per turn; contradiction-only lane correctly idle on truthful replies; zero enforce activity. FP-rate window = prod/staging work as designed. |
 | QUALITY_EVAL_MODE | ran in `shadow` for the campaign (scores recorded — 0.920, 0.9 observed — no pauses); **live parity run over 14 ledger turns**: mean |inline−offline| 0.1779, max 0.82 (> ε 0.1), **flag disagreements 0**. Offline relocation (`off`) NOT achievable yet (unrecoverable catalog block caveat); inline eval stays. |
 | Circuit breaker `monitor` | statechart unit-pinned; no would-open in live fault runs (turns end at 1–2 failures, below threshold 5) — bake-in window continues in prod `monitor`. |
@@ -422,6 +422,17 @@ Two-part acceptance, both met:
 ## 8. Diagnosed failures
 
 Findings 1–4 (full diagnoses inline in §4): **F1** P0-5 legacy NULL-reason pauses need operator review at prod enablement; **F2** `zgjedhja` missing from the token-membership allowlist (+1/run FP noise); **F3** order_stage shadow events sealed out of the ledger — P2-2 cutover gate blind ([processAIReply.ts:6133](../../backend/src/jobs/processAIReply.ts#L6133), fix: pre-send verdict or best-effort second row); **F4** fail-closed sensitive path preempts the P2-6 no-pause floor in global outages ([processAIReply.ts:6473](../../backend/src/jobs/processAIReply.ts#L6473), fix: provider-caused detector failures route to the floor).
+
+### Fix status (2026-07-20, branch `fix/P0-P3-findings`)
+
+| Finding | Fixed in | Retest evidence (same live instrument that exposed it) |
+|---|---|---|
+| **F1** | `bc50e6c` — `npm run audit-paused-conversations` operator CLI (read-only, exit 0, `--tenant-id`/`--json`, two labeled buckets) | Dev run reports exactly the 8 known legacy rows in bucket (a) (pre-069, `ai_paused_at IS NULL`), bucket (b) empty, row counts unchanged after. The operator review itself remains a P0-5 prod-enablement step — reasons are unrecoverable, the CLI feeds the review. |
+| **F2** | `9eff6c4` — `'zgjedhja'` allowlisted via the negative-corpus process (verbatim campaign reply as `OK-08-comparison-connective`, reusing the IN3 catalog/customerText exports) | Live IN3 ×3 probe: **`fabricationViolations: 0`** (was +1/run in every campaign run). Golden digest `ac176742…` unchanged. |
+| **F3** | `d125e99` — the shadow verdict written as its own best-effort row (`reply_slot='shadow:order_stage'`, `decision_kind='order_shadow'`, `usage: null` — the cost-double-count trap; dead push deleted; source invariants pin all three) | 3-turn order flow: 2 rows with the exact designed shape; **`eval:shadow --classifier=order_stage` reports "100% agreement over 2 observations" with per-stage breakdown** (read "0 observations" forever before). Turn 3 wrote no row because turn 2's reply was deflection-escalated and the pause gate correctly dropped turn 3 — pipeline behavior, not an F3 defect. **`ORDER_STAGE_MACHINE=on` remains NO-GO**: the fix connects evidence *collection*; the ≥99 %/≥500-row prod shadow window still has to run, and the U11 divergence class still needs quantifying. |
+| **F4** | `a93a8bc` — `decideSensitiveDetectorFailureRoute` (pure, 8-row truth table) routes provider-caused detector failures (ALS store ∨ `ProviderUnavailableError`) to the existing no-pause floor; non-provider bugs keep the pause; flag-off keeps legacy rethrow | **F4a (the failed U14c instrument): PASS** — provider fault + innocuous question ⇒ `ai_paused: false`, `provider_unavailable` alert, providerUnavailable holding copy, `human_replied` false, ledger row `holding:degraded` with `degradedFrom: sensitive_detector:cancellation_refund`. **F4b (the U4 instrument): PASS** — detector fault without provider fault ⇒ paused + `uncertain_answer_escalated` + postPurchaseSupport copy, byte-for-byte the validated U4 behavior. |
+
+Observation recorded during the F3 retest (pre-existing, not introduced by the fixes): a 3-turn conversation with failed sends accumulated a 47,403-char assembled prompt, tripping the `PROMPT_ASSEMBLY_MAX_CHARS` (34,000) *reporting* threshold — P3-5's `PROMPT_SECTION_BUDGET=enforce` is the eventual answer; noted for the prod P3-5 rollout.
 
 ## 9. Spend log (final)
 
@@ -435,6 +446,8 @@ Findings 1–4 (full diagnoses inline in §4): **F1** P0-5 legacy NULL-reason pa
 | Quality parity live (14 turns re-scored) | — | 14 | ~$0.05 est |
 | Step-4 replay (5 cases ×20, full flags) | 100 | 621 (measured) | ~$4.00 est |
 | **Total** | ~147 turns | ~840+ calls | **≈ $6 — within the approved $10–15 budget** |
+
+Fix-branch retests (2026-07-20, `fix/P0-P3-findings`): F3 order flow 3 turns + F4a/F4b fault turns (~$0.2), F2 IN3 ×3 probe (19 calls), acceptance mini replay 24 turns (154 calls), final E2E turn — **≈ $1.6 additional**, within the approved ~$2 retest budget.
 
 ## 10. Cleanup inventory _(campaign-written dev data)_
 
