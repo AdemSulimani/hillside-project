@@ -125,6 +125,45 @@ describe('P2-6 floor txn: alert only — no pause, no human_replied', () => {
   });
 });
 
+describe('F4: provider-caused sensitive-detector failures route to the no-pause floor', () => {
+  // Dev validation Finding 4: the detectors run first in the turn and call the provider, so a
+  // global outage always struck them before the pre-send degrade gate — the fail-closed pause
+  // fanned out to every mid-turn conversation. The detector catch now consults the pure route
+  // function; provider-caused failures take the floor (no pause), detector code bugs keep the
+  // pause. The mirror tests pin the routing table; this pins the production composition.
+  const anchor = 'decideSensitiveDetectorFailureRoute({';
+  const sites = indicesOf(processAIReplySource, anchor);
+
+  it('exactly one detector-catch route site exists (the guard is not vacuous)', () => {
+    assert.equal(sites.length, 1, `expected 1 route site, found ${sites.length}`);
+  });
+
+  it('the catch classifies provider cause via the ALS store AND the error class, and both terminal paths end in the sentinel', () => {
+    const window = processAIReplySource.slice(Math.max(0, sites[0] - 1200), sites[0] + 2600);
+    for (const required of [
+      'turnProviderFailures().length > 0',
+      'err instanceof ProviderUnavailableError',
+      'await degradeToHoldingAndEscalate()',
+      'escalateSensitivePathOnDetectorError()',
+      'SensitivePathEscalatedError',
+    ]) {
+      assert.ok(window.includes(required), `detector catch is missing: ${required}`);
+    }
+  });
+
+  it('the degrade route never pauses and never creates its own alert', () => {
+    const window = processAIReplySource.slice(sites[0], sites[0] + 2600);
+    assert.ok(
+      !window.includes('setConversationAiPaused('),
+      'the detector degrade route pauses — the Finding-4 fan-out is back',
+    );
+    assert.ok(
+      !window.includes("reason: 'provider_unavailable'"),
+      'the detector degrade route creates its own alert — the floor already commits it (double alert)',
+    );
+  });
+});
+
 describe('F3: the order_stage shadow verdict reaches the ledger as its own row', () => {
   // Dev validation Finding 3: the turn's 'main' ledger row is serialized inside stageAndSend's
   // onFlip; the order-detection tail runs AFTER that seal, so a recordDecision() push there is

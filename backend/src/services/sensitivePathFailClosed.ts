@@ -84,11 +84,50 @@ export function decideSensitivePathAction(
 }
 
 /**
+ * P0-4 × P2-6 (dev validation Finding 4): which SAFE terminal path a failed sensitive
+ * detector takes.
+ *
+ * The sensitive detectors run first in the turn and call the provider, so a GLOBAL
+ * provider outage always strikes them before anything else. Routing every detector
+ * failure to the fail-closed escalation (pause + uncertain_answer_escalated) made the
+ * P2-6 no-pause floor unreachable in exactly the outage scenario it was built for: one
+ * 5-minute blip paused every mid-turn conversation, each needing operator resolution
+ * (`uncertain_answer_escalated` is not in the auto-resume set).
+ *
+ * A provider-caused detector failure carries no evidence the CONVERSATION is sensitive —
+ * our dependency blipped. So with the degrade floor available it takes the floor
+ * (holding + retryable `provider_unavailable` alert, NO pause) instead. A NON-provider
+ * detector failure (a code bug — conversation-specific) keeps the fail-closed pause,
+ * byte-for-byte. Flag OFF keeps the legacy rethrow-to-umbrella, byte-for-byte.
+ *
+ * Known tradeoff (accepted): `providerCaused` may read true off an EARLIER classifier's
+ * recorded failure in the same turn, masking a coincident detector bug as provider-caused
+ * for that turn. That turn was already destined for the floor — the pre-send degrade gate
+ * floors any turn with a recorded provider failure — so this widens nothing; the next
+ * turn without a provider failure escalates properly.
+ */
+export function decideSensitiveDetectorFailureRoute(input: {
+  failClosed: boolean;
+  providerCaused: boolean;
+  degradeModeOn: boolean;
+}): 'escalate' | 'degrade' | 'rethrow' {
+  if (!input.failClosed) {
+    return 'rethrow';
+  }
+  if (input.providerCaused && input.degradeModeOn) {
+    return 'degrade';
+  }
+  return 'escalate';
+}
+
+/**
  * Sentinel thrown after a sensitive detector error has ALREADY been handled by the safe
- * escalation path (holding message + alert + pause). The umbrella catch recognises it
- * and returns cleanly — i.e. it stops the special-path block WITHOUT falling through to
+ * escalation path (holding message + alert + pause) — or, since Finding 4, by the P2-6
+ * degrade floor (holding + retryable provider_unavailable alert, no pause). The contract
+ * is "a safe terminal outcome was committed": the umbrella catch recognises it and
+ * returns cleanly — i.e. it stops the special-path block WITHOUT falling through to
  * `generateReply` (the exact fail-open this fixes) and WITHOUT re-throwing for a retry
- * (the escalation already happened; a retry would double-send the holding message).
+ * (the terminal outcome already happened; a retry would double-send the holding message).
  */
 export class SensitivePathEscalatedError extends Error {
   constructor() {
