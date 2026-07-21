@@ -4,6 +4,7 @@ import type { Product } from '../../db/models/product';
 import { extractProductFamilyBaseName } from '../../db/models/product';
 import type { Message } from '../../db/models/message';
 import {
+  ALL_STRUCTURED_ATTRIBUTE_KEYS,
   buildProductAttributeAggregation,
   detectRequestedAttributes,
   detectProductQueryScope,
@@ -58,6 +59,59 @@ describe('productRetrievalService', () => {
   it('detectRequestedAttributes merges intent attributes from classifier', () => {
     const attrs = detectRequestedAttributes('tell me more', ['flavor']);
     assert.deepEqual(attrs, ['flavor']);
+  });
+
+  // Recall: Albanian definite/plural/case inflections and English plurals must be detected
+  // deterministically, so a genuinely-requested attribute never has to rely on the
+  // stochastic LLM label. `\bshije\b` previously missed "shijen"/"shijes"/"shijet".
+  it('detectRequestedAttributes detects Albanian inflected + English plural attribute words', () => {
+    assert.deepEqual(detectRequestedAttributes('cfare shije ka'), ['flavor']);
+    assert.deepEqual(detectRequestedAttributes('me trego shijen'), ['flavor']);
+    assert.deepEqual(detectRequestedAttributes('cilat jane shijet'), ['flavor']);
+    assert.deepEqual(detectRequestedAttributes('what flavors do you carry'), ['flavor']);
+    assert.deepEqual(detectRequestedAttributes('cila eshte marka'), ['brand']);
+    assert.deepEqual(detectRequestedAttributes('cilat jane markat'), ['brand']);
+    assert.deepEqual(detectRequestedAttributes('me trego markën'), ['brand']);
+    // Bare indefinite ablative — the standard "what brand?" phrasing. Missed by the first
+    // inflection pass (`mark(?:a…|en|es)` had no bare `marke`), which silently under-reported a
+    // genuinely-requested brand: the deterministic net emitted nothing and the sanitizer
+    // (correctly) stripped the LLM's structured label, so no notice named brand at all.
+    assert.deepEqual(detectRequestedAttributes('cfare marke eshte'), ['brand']);
+    assert.deepEqual(detectRequestedAttributes('çfarë marke është ky produkt'), ['brand']);
+    assert.deepEqual(detectRequestedAttributes('what colours are available'), ['color']);
+    assert.deepEqual(detectRequestedAttributes('cfare ngjyrash ka'), ['color']);
+    assert.deepEqual(detectRequestedAttributes('sa eshte pesha'), ['weight']);
+    assert.deepEqual(detectRequestedAttributes('me trego peshën'), ['weight']);
+    assert.deepEqual(detectRequestedAttributes('sa eshte madhesia'), ['size']);
+  });
+
+  // False-positive guardrails: the inflection suffixes must not swallow unrelated words —
+  // "shijshëm" (tasty) is not a flavor request, and "market"/"marketing" is not a brand
+  // request.
+  it('detectRequestedAttributes does not false-match tasty/market lookalikes', () => {
+    assert.deepEqual(detectRequestedAttributes('a eshte i shijshem'), []);
+    assert.deepEqual(detectRequestedAttributes('do you sell it on the market'), []);
+    assert.deepEqual(detectRequestedAttributes('what is your marketing about'), []);
+  });
+
+  // The category-follow-up all-keys expansion is correct for aggregation but must be
+  // opt-OUTable so the missing-attribute gate never flags every NULL column on a bare
+  // browse question.
+  it('detectRequestedAttributes expands a bare category follow-up to all keys by default, but not when opted out', () => {
+    const expanded = detectRequestedAttributes('what options do you have?');
+    assert.deepEqual([...expanded].sort(), [...ALL_STRUCTURED_ATTRIBUTE_KEYS].sort());
+    const scoped = detectRequestedAttributes('what options do you have?', undefined, {
+      expandCategoryFollowUp: false,
+    });
+    assert.deepEqual(scoped, []);
+    // A follow-up that DOES name a specific attribute still returns just that attribute
+    // (unaffected by the opt-out, since the expansion only fires when nothing matched).
+    assert.deepEqual(
+      detectRequestedAttributes('what flavors do you have?', undefined, {
+        expandCategoryFollowUp: false,
+      }),
+      ['flavor'],
+    );
   });
 
   // Layer 1 (root cause for the "we'll notify you about the flavor" contradiction):
