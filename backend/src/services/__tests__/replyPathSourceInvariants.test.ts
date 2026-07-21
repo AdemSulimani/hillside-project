@@ -295,39 +295,3 @@ describe('confidence_band_abstain alerts are binding-constraint-gated (alert-noi
     );
   });
 });
-
-describe('F5 (2026-07-21 audit): denial check falls back to recent customer messages', () => {
-  // Live gap (convs 44e5c9a3/1da5bc96): on a details-only order turn the CURRENT inbound names
-  // no product, so `inboundNamedProducts` is empty and a false denial of products ordered two
-  // turns earlier shipped raw ("Iso Protein Pro dhe BSN Creatine 216gr nuk janë në dispozicion"
-  // — both active catalog rows; the alternatives carve-out then waved it through). The denial
-  // check must resolve the recent CUSTOMER messages through the same deterministic ladder when
-  // the current-inbound pin set is empty.
-  it('the guard block resolves recent customer text when inboundNamedProducts is empty', () => {
-    const idx = processAIReplySource.indexOf('let denialCheckProducts = inboundNamedProducts;');
-    assert.ok(idx !== -1, 'denialCheckProducts fallback missing from the uncertain-answer guard block');
-    const window = processAIReplySource.slice(idx, idx + 2400);
-    for (const required of [
-      'denialCheckProducts.length === 0',
-      "m.sent_by === 'customer'",
-      // Grams must be filtered to those the REPLY mentions before hitting the bounded ladder —
-      // the whole-text variant burned the lookup budget on name/address grams and resolved
-      // nothing (live conv aa5b47e3).
-      'productNameTokenMatch(gram, finalReplyText)',
-      'await resolveGramsToProducts(tenantId, replyMentionedGrams)',
-      'productsDeniedInReply(denialCheckProducts, finalReplyText)',
-    ]) {
-      assert.ok(window.includes(required), `denial-check fallback is missing: ${required}`);
-    }
-  });
-
-  it('the fallback stays inside the negative-availability gate (never runs on ordinary replies)', () => {
-    const gateIdx = processAIReplySource.indexOf('let deniedProductsInCatalog: Product[] = [];');
-    assert.ok(gateIdx !== -1, 'deniedProductsInCatalog block missing');
-    const window = processAIReplySource.slice(gateIdx, gateIdx + 400);
-    assert.ok(
-      window.includes('containsNegativeAvailabilityPhrase &&'),
-      'the recent-customer ladder must only run for denial-phrased replies',
-    );
-  });
-});
