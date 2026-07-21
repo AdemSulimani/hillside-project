@@ -520,6 +520,7 @@ function attributeLabel(key: StructuredAttributeKey): string {
 export function detectRequestedAttributes(
   message: string,
   intentAttributes?: StructuredAttributeKey[],
+  options?: { expandCategoryFollowUp?: boolean },
 ): StructuredAttributeKey[] {
   const t = normalizeMessageText(message);
   const requested = new Set<StructuredAttributeKey>();
@@ -530,15 +531,31 @@ export function detectRequestedAttributes(
     }
   }
 
-  if (/\b(flavou?r|taste|shije)\b/.test(t)) requested.add('flavor');
-  if (/\b(size|madh[eë]si)\b/.test(t)) requested.add('size');
-  if (/\b(color|colour|ngjyr)\b/.test(t)) requested.add('color');
-  if (/\b(variant)\b/.test(t)) requested.add('variant');
-  if (/\b(weight|pesha)\b/.test(t)) requested.add('weight');
-  if (/\b(brand|marka)\b/.test(t)) requested.add('brand');
-  if (/\b(type|lloj|product type|categor)\b/.test(t)) requested.add('category');
+  // NOTE: `t` is already lowercased AND diacritic-stripped by normalizeMessageText, so the
+  // ascii forms below also cover their diacritic spellings ("madhësi" → "madhesi"). Each
+  // pattern allows bounded Albanian inflection suffixes (definite/plural/case endings) so a
+  // requested attribute is reliably detected — e.g. `\bshije\b` alone missed "shijen"/
+  // "shijes", pushing the naming decision onto the stochastic LLM label. Suffixes are kept
+  // narrow to avoid false positives ("shijshëm" = tasty is excluded because it never begins
+  // "shije…"; the brand pattern excludes "market"/"marketing" — the \b after "marke" rejects
+  // both, while the bare indefinite "çfarë marke?" form still matches).
+  if (/\b(flavou?rs?|tastes?|shije(?:t|n|sh|s|ve)?|aroma)\b/.test(t)) requested.add('flavor');
+  if (/\b(sizes?|madh[eë]si(?:a|t|ve|ne|sh)?|permasa(?:t|ve)?)\b/.test(t)) requested.add('size');
+  if (/\b(colou?rs?|ngjyr[aeë]?(?:t|n|sh|s|ve|ne)?)\b/.test(t)) requested.add('color');
+  if (/\b(variant(?:i|e|et|eve|s)?)\b/.test(t)) requested.add('variant');
+  if (/\b(weights?|pesh[aeë](?:t|n|s|ve|ne)?|gramazh(?:i|it)?|gramatur[ae]?)\b/.test(t)) requested.add('weight');
+  if (/\b(brands?|mark(?:a(?:t|ve)?|e(?:n|s)?)|prodhues(?:i|it)?)\b/.test(t)) requested.add('brand');
+  if (/\b(types?|lloj(?:i|e|et|eve|it)?|product types?|categor(?:y|ies|i|ite)?|kategori(?:a|t|ve)?)\b/.test(t)) requested.add('category');
 
-  if (requested.size === 0 && isCategoryAttributeFollowUp(message)) {
+  // Category/attribute follow-ups with no specific attribute word ("what options do you
+  // have?") legitimately expand to EVERY attribute for aggregation, but callers computing
+  // the MISSING-attribute set must opt OUT (expandCategoryFollowUp:false) — otherwise the
+  // gap gate would flag every NULL column as unavailable on a mere browse question.
+  if (
+    options?.expandCategoryFollowUp !== false &&
+    requested.size === 0 &&
+    isCategoryAttributeFollowUp(message)
+  ) {
     return ALL_STRUCTURED_ATTRIBUTE_KEYS;
   }
 
