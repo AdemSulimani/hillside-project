@@ -20,25 +20,6 @@ export type ResolutionStatus = 'pending' | 'approved' | 'rejected' | 'store_cred
 
 export type CommissionStatus = 'unpaid' | 'billed' | 'paid';
 
-/**
- * A single product line on an order (migration 088). An order can carry N of these. The `orders`
- * header row mirrors the "primary line" (highest line total) plus the summed quantity/total, so
- * every legacy single-product reader keeps working; the full basket lives here.
- */
-export interface OrderItem {
-  id: string;
-  order_id: string;
-  tenant_id: string;
-  product_id: string | null;
-  product_name: string;
-  quantity: number;
-  unit_price: number;
-  total_price: number;
-  item_index: number;
-  created_at: Date;
-  updated_at: Date;
-}
-
 export interface Order {
   id: string;
   tenant_id: string;
@@ -66,17 +47,6 @@ export interface Order {
   resolution_notes: string | null;
   created_at: Date;
   updated_at: Date;
-  /** The order's product lines, ordered by item_index. Empty when a reader did not load them. */
-  items: OrderItem[];
-}
-
-/** A product line to insert on a new order. */
-export interface CreateOrderItemInput {
-  product_id?: string | null;
-  product_name: string;
-  quantity?: number;
-  unit_price: number;
-  total_price: number;
 }
 
 export interface CreateOrderInput {
@@ -97,13 +67,6 @@ export interface CreateOrderInput {
   is_commissionable?: boolean;
   commission_amount?: number | null;
   commission_status?: CommissionStatus;
-  /**
-   * The product lines for this order. When omitted/empty, a single line is synthesized from the
-   * scalar product fields above (product_id/product_name/quantity/unit_price/total_price) — so
-   * legacy single-product callers keep working unchanged. When present, the header's product
-   * mirror and summed quantity/total are derived from these lines inside {@link createOrder}.
-   */
-  items?: CreateOrderItemInput[];
 }
 
 export type OrderListSortColumn =
@@ -191,13 +154,13 @@ export interface UpdateOrderCustomerInfoInput {
   notes?: string | null;
 }
 
-type OrderRow = Omit<Order, 'unit_price' | 'total_price' | 'commission_amount' | 'items'> & {
+type OrderRow = Omit<Order, 'unit_price' | 'total_price' | 'commission_amount'> & {
   unit_price: string | number;
   total_price: string | number;
   commission_amount: string | number | null;
 };
 
-function rowToOrder(row: OrderRow, items: OrderItem[] = []): Order {
+function rowToOrder(row: OrderRow): Order {
   return {
     ...row,
     unit_price: Number(row.unit_price),
@@ -208,197 +171,42 @@ function rowToOrder(row: OrderRow, items: OrderItem[] = []): Order {
         : null,
     is_commissionable: row.is_commissionable ?? false,
     commission_status: (row.commission_status as CommissionStatus) ?? 'unpaid',
-    items,
   };
-}
-
-type OrderItemRow = Omit<OrderItem, 'unit_price' | 'total_price'> & {
-  unit_price: string | number;
-  total_price: string | number;
-};
-
-function rowToOrderItem(row: OrderItemRow): OrderItem {
-  return {
-    ...row,
-    unit_price: Number(row.unit_price),
-    total_price: Number(row.total_price),
-  };
-}
-
-/** Normalize + index the caller's lines, synthesizing a single line from the scalar fields when none given. */
-function buildOrderLines(input: CreateOrderInput): Array<Required<Omit<CreateOrderItemInput, 'quantity'>> & { quantity: number; item_index: number }> {
-  const raw: CreateOrderItemInput[] =
-    input.items && input.items.length > 0
-      ? input.items
-      : [
-          {
-            product_id: input.product_id ?? null,
-            product_name: input.product_name,
-            quantity: input.quantity ?? 1,
-            unit_price: input.unit_price,
-            total_price: input.total_price,
-          },
-        ];
-  return raw.map((it, idx) => ({
-    product_id: it.product_id ?? null,
-    product_name: it.product_name,
-    quantity: Math.max(1, Math.floor(it.quantity ?? 1)),
-    unit_price: it.unit_price,
-    total_price: it.total_price,
-    item_index: idx,
-  }));
-}
-
-/** Round to 2dp the way NUMERIC(12,2) stores, so the in-memory header matches what the DB persists. */
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
 }
 
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
-  const lines = buildOrderLines(input);
-  // Header mirror is derived from the lines so the caller can never desync it from the basket:
-  //   primary line = highest line total (tie-break: lowest item_index / insertion order)
-  //   header quantity = SUM of line quantities; header total = SUM of line totals.
-  const primary = lines.reduce((best, cur) => (cur.total_price > best.total_price ? cur : best), lines[0]);
-  const headerQuantity = lines.reduce((s, l) => s + l.quantity, 0);
-  const headerTotal = round2(lines.reduce((s, l) => s + l.total_price, 0));
-
+  const qty = input.quantity ?? 1;
   const isCommissionable = input.is_commissionable ?? false;
   const commissionAmount = input.commission_amount ?? null;
   const commissionStatus = input.commission_status ?? 'unpaid';
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const { rows } = await client.query<OrderRow>(
-      `INSERT INTO orders (
-        tenant_id, conversation_id, contact_id, product_id, product_name, quantity,
-        unit_price, total_price, status, customer_name, customer_phone, delivery_address, notes, detected_by,
-        is_commissionable, commission_amount, commission_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-      RETURNING *`,
-      [
-        input.tenant_id,
-        input.conversation_id,
-        input.contact_id,
-        primary.product_id,
-        primary.product_name,
-        headerQuantity,
-        primary.unit_price,
-        headerTotal,
-        input.status ?? 'draft',
-        input.customer_name,
-        input.customer_phone ?? null,
-        input.delivery_address ?? null,
-        input.notes ?? null,
-        input.detected_by ?? 'ai',
-        isCommissionable,
-        commissionAmount,
-        commissionStatus,
-      ],
-    );
-    const orderRow = rows[0];
-
-    const itemRows: OrderItemRow[] = [];
-    for (const l of lines) {
-      const { rows: ir } = await client.query<OrderItemRow>(
-        `INSERT INTO order_items (
-           order_id, tenant_id, product_id, product_name, quantity, unit_price, total_price, item_index
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *`,
-        [
-          orderRow.id,
-          input.tenant_id,
-          l.product_id,
-          l.product_name,
-          l.quantity,
-          l.unit_price,
-          l.total_price,
-          l.item_index,
-        ],
-      );
-      itemRows.push(ir[0]);
-    }
-
-    await client.query('COMMIT');
-    return rowToOrder(orderRow, itemRows.map(rowToOrderItem));
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-/** All product lines for one order, ordered by item_index. Tenant-scoped. */
-export async function listOrderItemsForOrder(tenantId: string, orderId: string): Promise<OrderItem[]> {
-  const { rows } = await pool.query<OrderItemRow>(
-    `SELECT * FROM order_items WHERE order_id = $2 AND tenant_id = $1 ORDER BY item_index ASC`,
-    [tenantId, orderId],
+  const { rows } = await pool.query<OrderRow>(
+    `INSERT INTO orders (
+      tenant_id, conversation_id, contact_id, product_id, product_name, quantity,
+      unit_price, total_price, status, customer_name, customer_phone, delivery_address, notes, detected_by,
+      is_commissionable, commission_amount, commission_status
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    RETURNING *`,
+    [
+      input.tenant_id,
+      input.conversation_id,
+      input.contact_id,
+      input.product_id ?? null,
+      input.product_name,
+      qty,
+      input.unit_price,
+      input.total_price,
+      input.status ?? 'draft',
+      input.customer_name,
+      input.customer_phone ?? null,
+      input.delivery_address ?? null,
+      input.notes ?? null,
+      input.detected_by ?? 'ai',
+      isCommissionable,
+      commissionAmount,
+      commissionStatus,
+    ],
   );
-  return rows.map(rowToOrderItem);
-}
-
-/** Batched line load for a page of orders (avoids N+1). Returns a map of order_id → its lines. */
-export async function listOrderItemsForOrders(
-  tenantId: string,
-  orderIds: string[],
-): Promise<Map<string, OrderItem[]>> {
-  const byOrder = new Map<string, OrderItem[]>();
-  if (orderIds.length === 0) return byOrder;
-  const { rows } = await pool.query<OrderItemRow>(
-    `SELECT * FROM order_items WHERE tenant_id = $1 AND order_id = ANY($2::uuid[]) ORDER BY item_index ASC`,
-    [tenantId, orderIds],
-  );
-  for (const r of rows) {
-    const item = rowToOrderItem(r);
-    const list = byOrder.get(item.order_id);
-    if (list) list.push(item);
-    else byOrder.set(item.order_id, [item]);
-  }
-  return byOrder;
-}
-
-/**
- * Recompute the `orders` header mirror + summed quantity/total from the current `order_items` rows.
- * The SOLE writer of the header product mirror after creation — anything that mutates lines must
- * call this so the header never desyncs from the basket. Runs on the given client (inside a txn).
- * A commissionable order's `commission_amount` is re-derived as 5% of the new summed total so a
- * draft quantity edit can never leave the stored commission stale against the header total (only
- * draft orders are line-editable, so billed/paid rows are never touched by this path).
- */
-export async function recomputeOrderHeaderFromItems(
-  orderId: string,
-  tenantId: string,
-  client: PoolClient | typeof pool = pool,
-): Promise<void> {
-  await client.query(
-    `WITH primary_line AS (
-       SELECT product_id, product_name, unit_price
-       FROM order_items
-       WHERE order_id = $1
-       ORDER BY total_price DESC, item_index ASC
-       LIMIT 1
-     ),
-     agg AS (
-       SELECT COALESCE(SUM(quantity), 0) AS q_sum, COALESCE(SUM(total_price), 0) AS t_sum
-       FROM order_items WHERE order_id = $1
-     )
-     UPDATE orders o
-     SET product_id   = (SELECT product_id FROM primary_line),
-         product_name = COALESCE((SELECT product_name FROM primary_line), o.product_name),
-         unit_price   = COALESCE((SELECT unit_price FROM primary_line), o.unit_price),
-         quantity     = GREATEST((SELECT q_sum FROM agg), 1),
-         total_price  = (SELECT t_sum FROM agg),
-         commission_amount = CASE
-           WHEN o.is_commissionable THEN ROUND((SELECT t_sum FROM agg) * 0.05, 2)
-           ELSE o.commission_amount
-         END,
-         updated_at   = now()
-     WHERE o.id = $1 AND o.tenant_id = $2`,
-    [orderId, tenantId],
-  );
+  return rowToOrder(rows[0]);
 }
 
 const ORDER_SORT_SQL: Record<OrderListSortColumn, string> = {
@@ -478,14 +286,10 @@ export async function listOrdersForTenant(filters: OrderListFilters): Promise<{
     [...values, limit, offset],
   );
 
-  const itemsByOrder = await listOrderItemsForOrders(filters.tenantId, rows.map((r) => r.id));
   return {
     orders: rows.map((r) => {
       const { channel_type, ...rest } = r;
-      return {
-        ...rowToOrder(rest, itemsByOrder.get(r.id) ?? []),
-        channel_type: channel_type ?? 'facebook',
-      };
+      return { ...rowToOrder(rest), channel_type: channel_type ?? 'facebook' };
     }),
     total,
   };
@@ -509,10 +313,9 @@ export async function findOrderWithRelationsForTenant(
   const order = await findOrderByIdForTenant(id, tenantId);
   if (!order) return null;
 
-  const [conversation, contact, items] = await Promise.all([
+  const [conversation, contact] = await Promise.all([
     findConversationByIdForTenant(order.conversation_id, tenantId),
     findContactById(order.contact_id),
-    listOrderItemsForOrder(tenantId, order.id),
   ]);
 
   if (!conversation || !contact || contact.tenant_id !== tenantId) {
@@ -526,7 +329,6 @@ export async function findOrderWithRelationsForTenant(
 
   return {
     ...order,
-    items,
     conversation,
     contact,
     channel: channel
@@ -636,11 +438,10 @@ export async function listActionRequiredOrdersForTenant(
     [tenantId],
   );
 
-  const itemsByOrder = await listOrderItemsForOrders(tenantId, rows.map((r) => r.id));
   return rows.map((row) => {
     const { contact_name, channel_type, request_reason, ...rest } = row;
     return {
-      ...rowToOrder(rest, itemsByOrder.get(row.id) ?? []),
+      ...rowToOrder(rest),
       contact_name,
       channel_type: channel_type ?? 'facebook',
       conversation_id: rest.conversation_id,
@@ -964,69 +765,25 @@ export async function updateDraftOrderForTenant(
     return findOrderByIdForTenant(id, tenantId);
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  const setClauses: string[] = [];
+  const values: unknown[] = [id, tenantId];
+  let paramIdx = 3;
 
-    // Only draft orders are editable; lock the row so the header recompute stays consistent.
-    const { rows: guard } = await client.query<{ id: string }>(
-      `SELECT id FROM orders WHERE id = $1 AND tenant_id = $2 AND status = 'draft' FOR UPDATE`,
-      [id, tenantId],
-    );
-    if (!guard[0]) {
-      await client.query('ROLLBACK');
-      return null;
-    }
-
-    // Header-only fields (delivery_address, notes) update the orders row directly.
-    const headerSet: string[] = [];
-    const headerVals: unknown[] = [id, tenantId];
-    let p = 3;
-    for (const key of ['delivery_address', 'notes'] as const) {
-      if (key in fields) {
-        headerSet.push(`${key} = $${p}`);
-        headerVals.push(fields[key]);
-        p++;
-      }
-    }
-    if (headerSet.length > 0) {
-      headerSet.push('updated_at = now()');
-      await client.query(
-        `UPDATE orders SET ${headerSet.join(', ')} WHERE id = $1 AND tenant_id = $2`,
-        headerVals,
-      );
-    }
-
-    // A quantity edit applies to the PRIMARY line (highest line total); the header quantity/total
-    // are then re-derived from the lines. For a single-line order this is identical to the legacy
-    // `total_price = unit_price * quantity` recompute.
-    if (fields.quantity != null) {
-      const qty = Math.max(1, Math.floor(fields.quantity));
-      await client.query(
-        // $3::int in both slots so Postgres deduces one consistent type — bare $3 is inferred
-        // integer from `quantity = $3` but numeric from `unit_price * $3`, which errors (42P08).
-        `UPDATE order_items
-         SET quantity = $3::int, total_price = ROUND(unit_price * $3::int, 2), updated_at = now()
-         WHERE id = (
-           SELECT id FROM order_items WHERE order_id = $1 AND tenant_id = $2
-           ORDER BY total_price DESC, item_index ASC LIMIT 1
-         )`,
-        [id, tenantId, qty],
-      );
-    }
-
-    await recomputeOrderHeaderFromItems(id, tenantId, client);
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
+  for (const key of keys) {
+    setClauses.push(`${key} = $${paramIdx}`);
+    values.push(fields[key]);
+    paramIdx++;
   }
+  setClauses.push('updated_at = now()');
+  setClauses.push(`total_price = unit_price * quantity`);
 
-  const order = await findOrderByIdForTenant(id, tenantId);
-  if (!order) return null;
-  return { ...order, items: await listOrderItemsForOrder(tenantId, id) };
+  const { rows } = await pool.query<OrderRow>(
+    `UPDATE orders SET ${setClauses.join(', ')}
+     WHERE id = $1 AND tenant_id = $2 AND status = 'draft'
+     RETURNING *`,
+    values,
+  );
+  return rows[0] ? rowToOrder(rows[0]) : null;
 }
 
 export type OrderWithChannelType = Order & { channel_type: ChannelType };
@@ -1059,14 +816,10 @@ export async function listOrdersForContactForTenant(
     [contactId, tenantId, limit, offset],
   );
 
-  const itemsByOrder = await listOrderItemsForOrders(tenantId, rows.map((r) => r.id));
   return {
     orders: rows.map((r) => {
       const { channel_type, ...rest } = r;
-      return {
-        ...rowToOrder(rest, itemsByOrder.get(r.id) ?? []),
-        channel_type: channel_type ?? 'facebook',
-      };
+      return { ...rowToOrder(rest), channel_type: channel_type ?? 'facebook' };
     }),
     total,
   };

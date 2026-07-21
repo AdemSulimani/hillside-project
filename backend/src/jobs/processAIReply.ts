@@ -79,7 +79,6 @@ import {
   createOrder,
   findLatestActiveOrderForConversation,
   findLatestOpenOrderForContactForEscalation,
-  listOrderItemsForOrder,
   markOrderCancellationRequested,
   markOrderRefundRequested,
   updateOrderCustomerInfoForAI,
@@ -87,7 +86,6 @@ import {
 } from '../db/models/order';
 import { findActiveProductNamesForTenant, type Product } from '../db/models/product';
 import { resolveOrderProduct } from '../services/orderProductResolutionService';
-import { assembleOrderLines } from '../services/orderLineAssembly';
 import { findAIConfigByTenant } from '../db/models/aiConfig';
 import {
   classifyFollowUpInvitationInReply,
@@ -121,13 +119,8 @@ import {
   augmentImageTargetsFromCatalog,
   decideImageRequestOutcome,
   buildImageReplyText,
-  productNameTokenMatch,
 } from '../services/productImageRequestService';
-import {
-  productsDeniedInReply,
-  extractCandidateNameGrams,
-  resolveGramsToProducts,
-} from '../services/inboundNamePinning';
+import { productsDeniedInReply } from '../services/inboundNamePinning';
 import type { ProductImageRef } from '../services/productImageRequestService';
 import { markSelfSentMessageEcho } from '../services/outboundEchoRegistry';
 import { extractCustomerNameFromMessages } from '../services/orderCustomerDetails';
@@ -230,7 +223,6 @@ import {
 } from '../services/aiQualityService';
 import { createFeedbackLog } from '../db/models/feedbackLog';
 import { detect } from '../services/intentDetectionService';
-import { mapIntentPayload } from '../services/intentPayload';
 import { sendMessage, sendImageMessage } from '../services/channelSenderService';
 import { stageAndSend, isStageBeforeSendEnabled } from '../services/stageAndSend';
 import { socketService } from '../services/socketService';
@@ -876,15 +868,6 @@ const ORDER_STAGE_MACHINE_MODE = ((): 'off' | 'shadow' | 'on' => {
  */
 const COMMISSION_STORED_TIMESTAMP =
   (process.env.COMMISSION_STORED_TIMESTAMP ?? 'false').trim().toLowerCase() === 'true';
-
-/**
- * Multi-product orders (migration 088). Off (default): the order-detection tail creates one line
- * from the primary product only — the legacy single-product path, byte-for-byte. On: it resolves,
- * prices and merges every product in the intent basket, skips unresolvable/out-of-stock lines
- * (registering the rest), sums the total and commissions on the sum. Read once at module load
- * because the knob is declared `binding: 'frozen'` (fingerprint participation).
- */
-const MULTI_PRODUCT_ORDERS = knobBool('MULTI_PRODUCT_ORDERS');
 
 /**
  * P1-1 (RC-20): when the outbox relay owns dispatch (both flags on), the staged reply's
@@ -3795,18 +3778,6 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     ? detectRequestedAttributes(inboundText, attributeIntent.attributes)
     : [];
 
-  // For deciding WHICH attributes are missing we must use only EXPLICITLY-detected
-  // attributes — never the category-follow-up all-keys expansion. Otherwise a bare browse
-  // follow-up ("what options do you have?") expands to all 7 keys and the deterministic net
-  // flags every NULL column (brand, color, variant) as unavailable, naming attributes the
-  // customer never asked about. The expanded set above still drives the
-  // isProductInformationQuestion gate (so WHEN the block runs is unchanged).
-  const explicitRequestedAttributes = inboundText
-    ? detectRequestedAttributes(inboundText, attributeIntent.attributes, {
-        expandCategoryFollowUp: false,
-      })
-    : [];
-
   // A product-information question needs catalog facts: an explicit product-knowledge
   // / attribute intent, OR a detected structured attribute request. Pure price
   // questions ("how much is X") resolve to neither, so the AI's price answer is sent
@@ -3942,7 +3913,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       // none of these can confirm are escalated, so a known value is never contradicted.
       const availableKeys = new Set<string>([...imageUsableKeys, ...aiSpecifiedKeys]);
       const deterministicMissingKeys = computeMissingStructuredAttributes(
-        explicitRequestedAttributes,
+        requestedStructuredAttributes,
         matchedProducts.map((p) => getProductInferredAttributes(p)),
         availableKeys,
       );
@@ -3952,18 +3923,14 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         failClosed: true,
       });
 
-      // Structured-attribute labels are owned SOLELY by the deterministic net below
-      // (scoped to the customer's REQUESTED attributes and honouring name-inference).
-      // The LLM assessor may only ever contribute allowlisted FREE-FORM info gaps
-      // (ingredients, usage, …); its structured-attribute synonyms and stochastic
-      // question echoes ("ma shum", "cila eshte me e mire") are stripped here. This
-      // sanitation now runs UNCONDITIONALLY — decoupled from GAP_GATE_DETERMINISTIC_FIRST
-      // — so the assessor can never name a structured attribute the customer did not ask
-      // about (the "we'll notify you about the brand" class, RC-01 IN1 missing=['marka']),
-      // regardless of the escalation-policy flag. `gapDeterministicFirst` still governs the
-      // escalation DECISION (decideGapEscalation) and the errored-assessor log below, so
-      // when we escalate is unchanged — only which attribute is named.
-      const llmMissingLabels = filterFreeFormInfoLabels(assessment.missing);
+      // Deterministic-first (P0-3, RC-01): the LLM's stochastic `missing` labels may
+      // only contribute allowlisted FREE-FORM info gaps (ingredients, usage, …).
+      // Structured attributes are decided solely by the deterministic net below, and
+      // question echoes ("ma shum", "cila eshte me e mire") are suppressed. Legacy
+      // mode passes the labels through untouched.
+      const llmMissingLabels = gapDeterministicFirst
+        ? filterFreeFormInfoLabels(assessment.missing)
+        : assessment.missing;
       if (gapDeterministicFirst && assessment.errored) {
         console.warn('[ai.reply] gap assessor errored — deterministic-first gate failing OPEN to deterministic evidence only', {
           conversationId,
@@ -4005,7 +3972,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       // ---------------------------------------------------------------------------
       const perProductMissingLabels: string[] = [];
       if (matchedProducts.length > 1) {
-        for (const key of explicitRequestedAttributes) {
+        for (const key of requestedStructuredAttributes) {
           // Already flagged as globally missing by the deterministic net → skip.
           if (deterministicMissingKeys.includes(key)) continue;
           // Per-product check: is this attribute absent from at least one product?
@@ -4073,7 +4040,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
                 kind: 'product_information_gap',
                 partial: status === 'partial',
                 missing_info: finalMergedMissing,
-                requested_attributes: explicitRequestedAttributes,
+                requested_attributes: requestedStructuredAttributes,
                 customer_question: inboundText,
                 answered_info: status === 'partial' ? assessment.answer : null,
               },
@@ -4910,38 +4877,10 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     containsNegativeAvailabilityPhrase &&
     !uncertainGuardAlreadyEscalated &&
     !isOosCannedReply &&
-    !isOrderConfirmationReply
+    !isOrderConfirmationReply &&
+    inboundNamedProducts.length > 0
   ) {
-    let denialCheckProducts = inboundNamedProducts;
-    if (denialCheckProducts.length === 0) {
-      // Order-flow gap (live 2026-07-21, convs 44e5c9a3/1da5bc96/aa5b47e3): on a details or
-      // affirmation turn ("emri…, telefoni…" / "Po, konfirmoj") the CURRENT inbound names no
-      // product, so inbound-name pinning is empty and a false denial of the products the
-      // customer ordered TWO TURNS earlier sailed past this check ("Iso Protein Pro dhe BSN
-      // Creatine 216gr nuk janë në dispozicion" — both active catalog rows). Fall back to the
-      // deterministic ladder over the last few CUSTOMER messages — but only for grams the
-      // REPLY itself mentions (a denial names what it denies): the details message is full of
-      // name/address grams ("blerta testi telefoni…") that would otherwise exhaust the
-      // ladder's bounded lookup budget before any product gram is tried (root cause of the
-      // first, whole-text version of this fallback silently resolving nothing). Still
-      // clause-scoped by productsDeniedInReply, so an R13 "deny X, offer Y" reply keeps
-      // scoring only the denied clause; runs only on denial-phrased replies that pinned
-      // nothing.
-      const recentCustomerText = recentMessages
-        .filter((m) => m.sent_by === 'customer' && typeof m.content === 'string')
-        .slice(-3)
-        .map((m) => m.content as string)
-        .join('\n');
-      const replyMentionedGrams = extractCandidateNameGrams(recentCustomerText).filter((gram) =>
-        productNameTokenMatch(gram, finalReplyText),
-      );
-      if (replyMentionedGrams.length > 0) {
-        denialCheckProducts = await resolveGramsToProducts(tenantId, replyMentionedGrams);
-      }
-    }
-    if (denialCheckProducts.length > 0) {
-      deniedProductsInCatalog = productsDeniedInReply(denialCheckProducts, finalReplyText);
-    }
+    deniedProductsInCatalog = productsDeniedInReply(inboundNamedProducts, finalReplyText);
   }
   const deniedProductExistsInCatalog = deniedProductsInCatalog.length > 0;
 
@@ -6117,23 +6056,12 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     const catalogProductNames = await findActiveProductNamesForTenant(tenantId);
     // P1-3 (RC-08): verdicts persisted per (conversation, logical inbound) — a retry/tail-resume
     // consumes the first attempt's scores instead of re-rolling the classifiers.
-    const intentVerdictRaw = await getOrComputeClassifierVerdict({
+    const intent = await getOrComputeClassifierVerdict({
       conversationId,
       inboundExternalId: data.messageExternalId,
       detector: 'purchase_intent',
       compute: () => detect(messagesForIntent, tenantId, catalogProductNames),
     });
-    // Re-normalize through the pure mapper: the verdict store returns a cached hit as
-    // JSON.parse verbatim (it never re-runs the mapper), so a verdict cached BEFORE the
-    // items[] deploy has no `items` key and `intent.items.length` below would throw —
-    // swallowed into order_detection_failed, i.e. the order silently not created.
-    // mapIntentPayload is idempotent on an already-mapped result, so the fresh path is
-    // byte-for-byte unchanged while a stale cached blob degrades to the scalar-synth line.
-    const intent = mapIntentPayload(
-      (intentVerdictRaw && typeof intentVerdictRaw === 'object'
-        ? intentVerdictRaw
-        : {}) as unknown as Record<string, unknown>,
-    );
     const qtyDisplay = intent.quantity === null ? 'null' : String(intent.quantity);
     console.info(
       `[INTENT DETECTION] tenantId: ${tenantId} conversationId: ${conversationId} score: ${intent.intent_score} is_ready: ${intent.is_ready_to_order} product_name: ${logJsonStringOrNull(intent.product_name)} quantity: ${qtyDisplay} delivery_address: ${logJsonStringOrNull(intent.delivery_address)} reasoning: ${JSON.stringify(intent.reasoning)}`,
@@ -6428,67 +6356,34 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       .map((m) => m.content as string)
       .join('\n');
 
-    // MULTI_PRODUCT_ORDERS on ⇒ resolve every product in the intent basket; off ⇒ the primary
-    // product only, so order creation is byte-for-byte the legacy single-product path.
-    const requestedItems: Array<{ product_name: string; quantity: number | null }> =
-      MULTI_PRODUCT_ORDERS && intent.items.length > 0
-        ? intent.items
-        : [{ product_name: nameFromIntent ?? '', quantity: intent.quantity }];
+    const resolution = await resolveOrderProduct({
+      tenantId,
+      intentProductName: nameFromIntent ?? null,
+      customerSelectionText,
+    });
+    const matchedProduct = resolution.product;
 
-    // Resolve each requested product independently against the catalog (resolver unchanged).
-    const resolutions: Array<{
-      item: { product_name: string; quantity: number | null };
-      resolution: Awaited<ReturnType<typeof resolveOrderProduct>>;
-    }> = [];
-    for (const item of requestedItems) {
-      const resolution = await resolveOrderProduct({
-        tenantId,
-        intentProductName: item.product_name || null,
-        customerSelectionText,
-      });
-      resolutions.push({ item, resolution });
-      console.info(
-        `[ORDER_PRODUCT_RESOLUTION] tenantId: ${tenantId} conversationId: ${conversationId}` +
-        ` intentProductName: ${logJsonStringOrNull(item.product_name || null)}` +
-        ` reason: ${resolution.reason} ambiguous: ${resolution.ambiguous}` +
-        ` selected: ${logJsonStringOrNull(resolution.product?.name ?? null)}` +
-        ` selectedId: ${logJsonStringOrNull(resolution.product?.id ?? null)}` +
-        ` candidates: ${JSON.stringify(resolution.candidates.map((c) => c.name))}`,
-      );
-    }
-
-    const assembly = assembleOrderLines(
-      resolutions.map((r) => ({ resolution: r.resolution, requestedQuantity: r.item.quantity })),
+    console.info(
+      `[ORDER_PRODUCT_RESOLUTION] tenantId: ${tenantId} conversationId: ${conversationId}` +
+      ` intentProductName: ${logJsonStringOrNull(nameFromIntent ?? null)}` +
+      ` reason: ${resolution.reason} ambiguous: ${resolution.ambiguous}` +
+      ` selected: ${logJsonStringOrNull(matchedProduct?.name ?? null)}` +
+      ` selectedId: ${logJsonStringOrNull(matchedProduct?.id ?? null)}` +
+      ` candidates: ${JSON.stringify(resolution.candidates.map((c) => c.name))}`,
     );
 
-    // Out-of-stock / unmatched items are skipped per line — the rest of the order is still
-    // registered. Log each so a merchant can see exactly what was dropped and why.
-    for (const oos of assembly.outOfStock) {
-      console.info('[ai.reply] Skipping order line: product is out of stock', {
-        conversationId,
-        tenantId,
-        productName: oos.productName,
-      });
-    }
-    for (const miss of assembly.unmatched) {
-      console.warn('[ai.reply] Skipping order line: product from intent could not be matched in catalog', {
-        conversationId,
-        tenantId,
-        reason: miss.reason,
-      });
-    }
-
-    // When a variant remains ambiguous, ask the customer to choose (once) — creating an order for
-    // the wrong variant is worse than not creating one. We do NOT sink the order: any resolvable
-    // lines are still registered below. We only ask once to avoid looping on the question.
-    if (assembly.ambiguous.length > 0) {
-      const ambiguousCandidates = assembly.ambiguous[0].candidates;
+    // When several variants remain plausible and the customer's wording does not pin one,
+    // refuse to guess: creating an order for the wrong variant is worse than not creating one.
+    // Instead, ask the customer to choose between the specific candidates so the next turn
+    // carries a distinguishing attribute. We only ask once to avoid looping on the question.
+    if (resolution.ambiguous) {
       console.warn(
-        '[ORDER_PRODUCT_AMBIGUOUS] Order line matched multiple variants; asking the customer to choose',
+        '[ORDER_PRODUCT_AMBIGUOUS] Skipping draft order: customer selection matched multiple variants',
         {
           conversationId,
           tenantId,
-          candidateNames: ambiguousCandidates.map((c) => c.name),
+          intentProductName: nameFromIntent,
+          candidateNames: resolution.candidates.map((c) => c.name),
         },
       );
 
@@ -6504,7 +6399,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
 
       if (!alreadyAskedClarification) {
         const clarificationText = buildVariantClarificationMessage(
-          ambiguousCandidates.map((c) => c.name),
+          resolution.candidates.map((c) => c.name),
           replyLocale,
         );
         let clarifySendResult: Awaited<ReturnType<typeof sendMessage>> | null = null;
@@ -6554,69 +6449,75 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         console.info('[ORDER_PRODUCT_CLARIFICATION_SENT]', {
           conversationId,
           tenantId,
-          candidateNames: ambiguousCandidates.map((c) => c.name),
+          candidateNames: resolution.candidates.map((c) => c.name),
           sendSuccess: clarifySendResult?.success === true,
         });
       }
+      return;
     }
 
-    // No resolvable, in-stock line ⇒ create no order. Covers the single-product ambiguous / out-of-
-    // stock / no-match cases (byte-for-byte the legacy early returns) AND a multi-product order
-    // whose every line was skipped. We never create a 0-line / 0-total order.
-    if (assembly.lines.length === 0) {
-      console.info('[ai.reply] Skipping draft order: no resolvable in-stock product line', {
+    if (matchedProduct && matchedProduct.in_stock === false) {
+      console.info('[ai.reply] Skipping draft order: product is out of stock', {
         conversationId,
         tenantId,
-        intent_score: intent.intent_score,
-        ambiguous: assembly.ambiguous.length,
-        outOfStock: assembly.outOfStock.length,
-        unmatched: assembly.unmatched.length,
+        productId: matchedProduct.id,
+        productName: matchedProduct.name,
       });
       return;
     }
 
-    const primaryLine = assembly.lines[0];
-    const totalPrice = assembly.orderTotal;
+    const productName = matchedProduct?.name ?? nameFromIntent;
+    if (!productName) {
+      console.info('[ai.reply] Order intent detected but no product name to record', {
+        conversationId,
+        intent_score: intent.intent_score,
+      });
+      return;
+    }
 
-    // Order-level dedupe: compare the incoming resolved-name SET against the existing active order's
-    // line names. "Product changed" ⇒ the incoming set introduces a name not already on that order.
+    if (!matchedProduct) {
+      console.warn(
+        '[ai.reply] Skipping draft order: product from intent could not be matched in catalog',
+        {
+          conversationId,
+          tenantId,
+          intentProductName: nameFromIntent,
+        },
+      );
+      return;
+    }
+
+    const quantity = Math.max(1, intent.quantity ?? 1);
+    const unitPrice = Number(matchedProduct.price);
+    const totalPrice = unitPrice * quantity;
+
     const latestActiveOrder = await findLatestActiveOrderForConversation(tenantId, conversationId);
     if (latestActiveOrder) {
-      // Off the flag, keep the legacy header-name comparison (no extra query, byte-for-byte).
-      const existingItems = MULTI_PRODUCT_ORDERS
-        ? await listOrderItemsForOrder(tenantId, latestActiveOrder.id)
-        : [];
-      const existingNames = new Set(
-        (existingItems.length > 0
-          ? existingItems.map((i) => i.product_name)
-          : [latestActiveOrder.product_name]
-        )
-          .map(normalizeLooseText)
-          .filter((n) => n.length > 0),
-      );
-      const incomingNames = assembly.resolvedNames.map(normalizeLooseText).filter((n) => n.length > 0);
-      const productChanged = incomingNames.some((n) => !existingNames.has(n));
+      const incomingProduct = normalizeLooseText(productName);
+      const existingProduct = normalizeLooseText(latestActiveOrder.product_name);
+      const productChanged = incomingProduct.length > 0 && incomingProduct !== existingProduct;
 
       if (!productChanged && !explicitNewOrder) {
         console.info('[ai.reply] Skipping duplicate order creation', {
           conversationId,
           existingOrderId: latestActiveOrder.id,
-          productNames: assembly.resolvedNames,
+          productName,
           intent_score: intent.intent_score,
         });
         return;
       }
 
-      // An order already exists in this conversation. Even when the resolved products differ from
-      // the existing ones, only allow a new order when the CURRENT message itself signals new-order
-      // intent. Historical affirmations (recentCustomerAffirmation) from the now-completed order
-      // flow must not re-trigger order creation on unrelated follow-up messages.
+      // An order already exists in this conversation. Even when the resolved product
+      // differs from the existing one, only allow a new order when the CURRENT message
+      // itself signals new-order intent. Historical affirmations (recentCustomerAffirmation)
+      // from the now-completed order flow must not re-trigger order creation on unrelated
+      // follow-up messages (e.g. "Do you have any other creatine products?").
       if (!explicitNewOrder && !latestMessageAffirmsOrder) {
         console.info('[ai.reply] Skipping follow-up order: existing order found and current message carries no new-order signal', {
           conversationId,
           existingOrderId: latestActiveOrder.id,
           existingProduct: latestActiveOrder.product_name,
-          incomingProducts: assembly.resolvedNames,
+          incomingProduct: productName,
           intent_score: intent.intent_score,
         });
         return;
@@ -6638,20 +6539,16 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       tenantId,
       isCommissionable,
       humanInOrderWindow,
-      orderTotal: totalPrice,
-      lineCount: assembly.lines.length,
     });
 
     const order = await createOrder({
       tenant_id: tenantId,
       conversation_id: conversationId,
       contact_id: conversation.contact_id,
-      // Header scalars are derived from `items` inside createOrder; the primary line is passed as
-      // the fallback used only if items were empty (which never happens here).
-      product_id: primaryLine.product_id,
-      product_name: primaryLine.product_name,
-      quantity: primaryLine.quantity,
-      unit_price: primaryLine.unit_price,
+      product_id: matchedProduct.id,
+      product_name: productName,
+      quantity,
+      unit_price: unitPrice,
       total_price: totalPrice,
       status: 'draft',
       customer_name: resolvedCustomerName.fullName ?? 'Unknown',
@@ -6661,13 +6558,6 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       detected_by: 'ai',
       is_commissionable: isCommissionable,
       commission_amount: commissionAmount,
-      items: assembly.lines.map((l) => ({
-        product_id: l.product_id,
-        product_name: l.product_name,
-        quantity: l.quantity,
-        unit_price: l.unit_price,
-        total_price: l.total_price,
-      })),
     });
 
     void logEvent(tenantId, 'order_created', {
@@ -6676,12 +6566,6 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       product_id: order.product_id,
       product_name: order.product_name,
       quantity: order.quantity,
-      item_count: order.items.length,
-      items: order.items.map((i) => ({
-        product_id: i.product_id,
-        product_name: i.product_name,
-        quantity: i.quantity,
-      })),
     });
 
     socketService.emitOrderCreated(tenantId, order);

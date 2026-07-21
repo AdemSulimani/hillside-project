@@ -4,7 +4,6 @@ import type { ChannelType } from '@/types/conversation';
 import type {
   ActionRequiredOrder,
   ActionTabAlertTask,
-  OrderLineItem,
   OrderListItem,
   OrderResolutionStatus,
   OrderStatus,
@@ -23,37 +22,6 @@ function toNum(v: unknown): number {
 function toInt(v: unknown): number {
   const n = toNum(v);
   return Math.floor(n);
-}
-
-/**
- * Normalize an order's product lines. Synth fallback: when the backend response carries no `items`
- * (a pre-088 payload, or a cached one), build a single line from the header scalars so the UI always
- * renders at least the primary product.
- */
-function normalizeOrderItems(raw: Record<string, unknown>): OrderLineItem[] {
-  const rawItems = Array.isArray(raw.items) ? (raw.items as Record<string, unknown>[]) : [];
-  if (rawItems.length > 0) {
-    return rawItems.map((it, idx) => ({
-      id: it.id != null ? String(it.id) : `${String(raw.id)}-${idx}`,
-      product_id: it.product_id != null ? String(it.product_id) : null,
-      product_name: String(it.product_name ?? ''),
-      quantity: toInt(it.quantity) || 1,
-      unit_price: toNum(it.unit_price),
-      total_price: toNum(it.total_price),
-      item_index: it.item_index != null ? toInt(it.item_index) : idx,
-    }));
-  }
-  return [
-    {
-      id: `${String(raw.id)}-0`,
-      product_id: raw.product_id != null ? String(raw.product_id) : null,
-      product_name: String(raw.product_name ?? ''),
-      quantity: toInt(raw.quantity) || 1,
-      unit_price: toNum(raw.unit_price),
-      total_price: toNum(raw.total_price),
-      item_index: 0,
-    },
-  ];
 }
 
 export function normalizeOrderListItem(raw: Record<string, unknown>): OrderListItem {
@@ -84,7 +52,6 @@ export function normalizeOrderListItem(raw: Record<string, unknown>): OrderListI
     created_at: String(raw.created_at ?? ''),
     updated_at: String(raw.updated_at ?? ''),
     channel_type: (raw.channel_type as ChannelType) ?? 'whatsapp',
-    items: normalizeOrderItems(raw),
   };
 }
 
