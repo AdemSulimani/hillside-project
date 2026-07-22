@@ -22,6 +22,17 @@ export type OrderResolutionStatus =
   | 'rejected'
   | 'store_credit_offered';
 
+/** A single product line on an order (migration 088). Multi-product orders carry more than one. */
+export interface OrderLineItem {
+  id: string;
+  product_id: string | null;
+  product_name: string;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+  item_index: number;
+}
+
 export interface OrderListItem {
   id: string;
   tenant_id: string;
@@ -47,6 +58,8 @@ export interface OrderListItem {
   created_at: string;
   updated_at: string;
   channel_type: ChannelType;
+  /** All product lines, ordered by item_index. Always at least one (the header product). */
+  items: OrderLineItem[];
 }
 
 export interface ActionRequiredOrder extends OrderListItem {

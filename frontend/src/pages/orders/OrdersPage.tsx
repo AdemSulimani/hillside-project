@@ -470,7 +470,9 @@ export default function OrdersPage() {
                         <p className="truncate text-base font-semibold">{order.customer_name}</p>
                       </div>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {order.product_name} · Sasia {order.quantity} · {formatCurrency(order.total_price)} ·{' '}
+                        {order.product_name}
+                        {order.items.length > 1 ? ` +${order.items.length - 1} më shumë` : ''} · Sasia{' '}
+                        {order.quantity} · {formatCurrency(order.total_price)} ·{' '}
                         {formatRelativeShort(order.created_at)}
                       </p>
                     </div>
@@ -736,8 +738,20 @@ export default function OrdersPage() {
                       className="border-b border-border last:border-0 hover:bg-muted/30"
                     >
                       <td className="px-3 py-2.5 font-medium">{row.customer_name}</td>
-                      <td className="max-w-[200px] truncate px-3 py-2.5" title={row.product_name}>
-                        {row.product_name}
+                      <td
+                        className="max-w-[200px] px-3 py-2.5"
+                        title={
+                          row.items.length > 1
+                            ? row.items.map((i) => `${i.product_name} ×${i.quantity}`).join(', ')
+                            : row.product_name
+                        }
+                      >
+                        <span className="block truncate">{row.product_name}</span>
+                        {row.items.length > 1 && (
+                          <span className="mt-0.5 inline-block rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                            +{row.items.length - 1} më shumë
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2.5 tabular-nums">{row.quantity}</td>
                       <td className="px-3 py-2.5 text-right tabular-nums font-medium">
