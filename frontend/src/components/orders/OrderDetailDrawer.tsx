@@ -117,8 +117,11 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
       }
       setFieldErrors({});
       const qty = parseInt(parsed.data.quantityInput, 10);
+      // For a multi-line order the single quantity field is hidden, so we never send a quantity —
+      // it would otherwise be applied to the primary line only. Per-line editing is a later feature.
+      const isMultiLine = (order?.items.length ?? 0) > 1;
       return updateDraftOrder(orderId!, {
-        quantity: qty,
+        ...(isMultiLine ? {} : { quantity: qty }),
         delivery_address: parsed.data.delivery_address.trim() || null,
         notes: parsed.data.notes.trim() || null,
       });
@@ -211,20 +214,50 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
                 </div>
 
                 <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
-                  <div className="flex justify-between gap-2">
-                    <span className="text-muted-foreground">Produkti</span>
-                    <span className="text-right font-medium">{order.product_name}</span>
-                  </div>
-                  <div className="mt-2 flex justify-between gap-2">
-                    <span className="text-muted-foreground">Çmimi për njësi</span>
-                    <span className="tabular-nums">{formatCurrency(order.unit_price)}</span>
-                  </div>
-                  <div className="mt-2 flex justify-between gap-2">
-                    <span className="text-muted-foreground">Totali i rreshtit</span>
-                    <span className="font-semibold tabular-nums">
-                      {formatCurrency(order.total_price)}
-                    </span>
-                  </div>
+                  {order.items.length > 1 ? (
+                    <>
+                      <ul className="space-y-2.5">
+                        {order.items.map((item) => (
+                          <li key={item.id} className="flex justify-between gap-3">
+                            <span className="min-w-0">
+                              <span className="block font-medium text-foreground">
+                                {item.product_name}
+                              </span>
+                              <span className="text-xs text-muted-foreground tabular-nums">
+                                {item.quantity} × {formatCurrency(item.unit_price)}
+                              </span>
+                            </span>
+                            <span className="shrink-0 font-medium tabular-nums">
+                              {formatCurrency(item.total_price)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="mt-3 flex justify-between gap-2 border-t border-border pt-2.5">
+                        <span className="text-muted-foreground">Totali</span>
+                        <span className="font-semibold tabular-nums">
+                          {formatCurrency(order.total_price)}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-muted-foreground">Produkti</span>
+                        <span className="text-right font-medium">{order.product_name}</span>
+                      </div>
+                      <div className="mt-2 flex justify-between gap-2">
+                        <span className="text-muted-foreground">Çmimi për njësi</span>
+                        <span className="tabular-nums">{formatCurrency(order.unit_price)}</span>
+                      </div>
+                      <div className="mt-2 flex justify-between gap-2">
+                        <span className="text-muted-foreground">Totali i rreshtit</span>
+                        <span className="font-semibold tabular-nums">
+                          {formatCurrency(order.total_price)}
+                        </span>
+                      </div>
+                    </>
+                  )}
                   <p className="mt-2 text-xs text-muted-foreground">
                     Zbuluar nga{' '}
                     {order.detected_by === 'ai' ? 'IA' : order.detected_by === 'human' ? 'njeriu' : order.detected_by}
@@ -233,20 +266,27 @@ export function OrderDetailDrawer({ orderId, open, onOpenChange }: OrderDetailDr
 
                 {isDraft ? (
                   <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="order-qty">Sasia</Label>
-                      <Input
-                        id="order-qty"
-                        inputMode="numeric"
-                        value={quantityInput}
-                        onChange={(e) => setQuantityInput(e.target.value)}
-                        className={cn(fieldErrors.quantityInput && 'border-destructive')}
-                        aria-invalid={Boolean(fieldErrors.quantityInput)}
-                      />
-                      {fieldErrors.quantityInput ? (
-                        <p className="text-xs text-destructive">{fieldErrors.quantityInput}</p>
-                      ) : null}
-                    </div>
+                    {order.items.length > 1 ? (
+                      <p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+                        Kjo porosi ka disa produkte. Sasitë për secilin produkt do të mund të
+                        ndryshohen së shpejti; tani mund të përditësoni adresën dhe shënimet.
+                      </p>
+                    ) : (
+                      <div className="space-y-2">
+                        <Label htmlFor="order-qty">Sasia</Label>
+                        <Input
+                          id="order-qty"
+                          inputMode="numeric"
+                          value={quantityInput}
+                          onChange={(e) => setQuantityInput(e.target.value)}
+                          className={cn(fieldErrors.quantityInput && 'border-destructive')}
+                          aria-invalid={Boolean(fieldErrors.quantityInput)}
+                        />
+                        {fieldErrors.quantityInput ? (
+                          <p className="text-xs text-destructive">{fieldErrors.quantityInput}</p>
+                        ) : null}
+                      </div>
+                    )}
                     <div className="space-y-2">
                       <Label htmlFor="order-address">Adresa e dërgesës</Label>
                       <Textarea

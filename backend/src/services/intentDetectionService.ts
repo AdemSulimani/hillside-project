@@ -4,6 +4,12 @@ import { withModelRole } from './openaiCallTracker';
 import { logSafeStructured } from '../utils/redact';
 import { logger } from '../utils/logger';
 import { buildJsonSchema, parseStructuredCompletion, z } from './structuredClassifier';
+import { EMPTY_INTENT_RESULT, mapIntentPayload, type IntentResult } from './intentPayload';
+
+// Re-export so existing importers keep a single, stable entry point even though the pure
+// payload-mapping logic now lives in the openaiClient-free `intentPayload` module (testability).
+export { mapIntentPayload } from './intentPayload';
+export type { IntentOrderItem, IntentResult } from './intentPayload';
 
 /**
  * P2-2 (Slice A): when ON, the purchase-intent detector uses a strict `json_schema`
@@ -23,6 +29,7 @@ const INTENT_RESULT_SCHEMA: Record<string, unknown> = {
     'intent_score',
     'product_name',
     'quantity',
+    'items',
     'delivery_address',
     'customer_first_name',
     'is_ready_to_order',
@@ -34,8 +41,22 @@ const INTENT_RESULT_SCHEMA: Record<string, unknown> = {
     // refuses would 400 EVERY intent call at flag-on. The declared-range half of the contract is
     // enforced in the Zod layer below instead — same fail direction (retryable contract error).
     intent_score: { type: 'number' },
+    // Scalar product_name/quantity are kept as the PRIMARY-product slot (backward compat with every
+    // existing scalar reader); `items` carries the full multi-product basket (migration 088).
     product_name: { type: ['string', 'null'] },
     quantity: { type: ['integer', 'null'] },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['product_name', 'quantity'],
+        properties: {
+          product_name: { type: ['string', 'null'] },
+          quantity: { type: ['integer', 'null'] },
+        },
+      },
+    },
     delivery_address: { type: ['string', 'null'] },
     customer_first_name: { type: ['string', 'null'] },
     is_ready_to_order: { type: 'boolean' },
@@ -50,16 +71,6 @@ const INTENT_RESULT_SCHEMA: Record<string, unknown> = {
  * legacy '>1 ? /100' scale-guess class on the flag-on path.
  */
 const intentPayloadSchema = z.object({ intent_score: z.number().min(0).max(1) }).passthrough();
-
-export interface IntentResult {
-  intent_score: number;
-  product_name: string | null;
-  quantity: number | null;
-  delivery_address: string | null;
-  customer_first_name: string | null;
-  is_ready_to_order: boolean;
-  reasoning: string;
-}
 
 function formatTranscript(messages: Message[]): string {
   const lines: string[] = [];
@@ -76,71 +87,6 @@ function formatTranscript(messages: Message[]): string {
     lines.push(`${speaker}: ${m.content.trim()}`);
   }
   return lines.join('\n');
-}
-
-const EMPTY_INTENT_RESULT: IntentResult = {
-  intent_score: 0,
-  product_name: null,
-  quantity: null,
-  delivery_address: null,
-  customer_first_name: null,
-  is_ready_to_order: false,
-  reasoning: '',
-};
-
-/**
- * Maps a parsed intent payload to the coerced/clamped {@link IntentResult}. Shared by the legacy
- * fail-open `json_object` path and the strict `json_schema` path so both produce identical results
- * from identical JSON — the only difference is response_format + the malformed-output fail policy.
- */
-function mapIntentPayload(parsed: Record<string, unknown>): IntentResult {
-  // Preserve the legacy number-only coercion EXACTLY (a stringified score stays 0) so the flag-off
-  // path is byte-for-byte identical. Strict json_schema guarantees a number on the flag-on path, so
-  // this is equally correct there — deliberately NOT routed through normalizeClassifierConfidence,
-  // whose extra numeric-string parsing would change flag-off order-creation behaviour.
-  const intentScoreRaw = parsed.intent_score;
-  let intent_score = 0;
-  if (typeof intentScoreRaw === 'number' && Number.isFinite(intentScoreRaw)) {
-    intent_score = intentScoreRaw > 1 ? intentScoreRaw / 100 : intentScoreRaw;
-  }
-  intent_score = Math.min(1, Math.max(0, intent_score));
-
-  const product_name =
-    typeof parsed.product_name === 'string' && parsed.product_name.trim()
-      ? parsed.product_name.trim()
-      : null;
-
-  let quantity: number | null = null;
-  if (typeof parsed.quantity === 'number' && Number.isFinite(parsed.quantity) && parsed.quantity > 0) {
-    quantity = Math.floor(parsed.quantity);
-  }
-
-  const delivery_address =
-    typeof parsed.delivery_address === 'string' && parsed.delivery_address.trim()
-      ? parsed.delivery_address.trim()
-      : null;
-
-  const customer_first_name =
-    typeof parsed.customer_first_name === 'string' && parsed.customer_first_name.trim()
-      ? parsed.customer_first_name.trim()
-      : null;
-
-  const is_ready_to_order = parsed.is_ready_to_order === true;
-
-  const reasoning =
-    typeof parsed.reasoning === 'string' && parsed.reasoning.trim()
-      ? parsed.reasoning.trim()
-      : '';
-
-  return {
-    intent_score,
-    product_name,
-    quantity,
-    delivery_address,
-    customer_first_name,
-    is_ready_to_order,
-    reasoning,
-  };
 }
 
 /** Legacy fail-open parse: on invalid JSON returns the all-zero intent (preserved under flag-off). */
@@ -192,7 +138,8 @@ The customer has not asked any more clarifying questions in their latest message
 
 A medium score (0.4 to 0.74) means the customer is interested but has not committed — they are asking about price, availability, or details.
 A low score (below 0.4) means the customer is browsing, asking general questions, or the message is unrelated to purchasing.
-Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, delivery_address: string | null, customer_first_name: string | null, is_ready_to_order: boolean, reasoning: string }
+Return JSON: { intent_score: number, product_name: string | null, quantity: number | null, items: Array<{ product_name: string, quantity: number | null }>, delivery_address: string | null, customer_first_name: string | null, is_ready_to_order: boolean, reasoning: string }
+List EVERY distinct product the customer is ordering in the items array, each with its own quantity — when the customer orders more than one product (e.g. a protein AND a creatine), include one entry per product. Apply the same catalog-name normalization to each item's product_name as you do for the scalar product_name. Set the scalar product_name and quantity to the FIRST item (the primary product). When exactly one product is ordered, items has a single entry matching product_name/quantity. Use an empty items array only when no product is being ordered.
 Extract customer_first_name when the customer explicitly provided it in the transcript (not from channel profile metadata), including multi-line order-detail messages where the first line is often the customer name before phone and address. Use null when missing or uncertain.
 The is_ready_to_order field must only be true if intent_score is above 0.85 AND all four purchase signals above are present. Do not set is_ready_to_order to true based on intent_score alone.${catalogSection}
 

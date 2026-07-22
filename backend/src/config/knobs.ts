@@ -561,6 +561,16 @@ export const KNOBS: readonly KnobSpec[] = [
     binding: 'per-call',
     description: 'Deterministic order-stage FSM: off | shadow | on (P2-2)',
   },
+  bool('MULTI_PRODUCT_ORDERS', false,
+    'Register EVERY product from a multi-product order as its own order line (migration 088). Off ⇒ only the primary (first) product is recorded — the legacy single-product behaviour, byte-for-byte', {
+      rationale:
+        'The intent extractor now returns an items[] basket, but off this flag the order tail still ' +
+        'creates one line from items[0] only, so a two-product order records one product — today\'s ' +
+        'behaviour. On, the tail resolves and prices every item, merges duplicates, skips ' +
+        'unresolvable/out-of-stock lines (registering the rest), sums the total and commissions on ' +
+        'the sum. Frozen ⇒ fingerprinted: two workers on different values would register different ' +
+        'baskets from identical input, exactly the fleet-drift class the registry detects.',
+    }),
   {
     // P3-4 (RC-15). Enum, not a bool pair: the states are ordered and mutually exclusive, and two
     // independent booleans would admit a meaningless fourth combination. Mirrors the proven
