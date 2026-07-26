@@ -136,6 +136,7 @@ import { isProductRecommendationOrComparisonQuestion } from '../services/product
 import {
   buildProductKnowledgeContext,
   detectRequestedAttributes,
+  expandProductsForAttributeQuery,
   getProductInferredAttributes,
   isOtherOptionsFollowUp,
 } from '../services/productRetrievalService';
@@ -177,6 +178,7 @@ import {
   dedupeInfoLabels,
   deriveAnswerabilityStatus,
   filterFreeFormInfoLabels,
+  filterFreeFormLabelsByQuestionRelevance,
   localizedAttributeLabels,
   reconcileMissingAgainstAnswer,
   stripContradictoryMissingInfoNotice,
@@ -860,6 +862,23 @@ const RATE_LIMIT_COUNT_DELIVERED_ONLY =
  */
 const ORDER_STAGE_MACHINE_MODE = ((): 'off' | 'shadow' | 'on' => {
   const v = (process.env.ORDER_STAGE_MACHINE ?? 'off').trim().toLowerCase();
+  return v === 'on' || v === 'shadow' ? v : 'off';
+})();
+
+/**
+ * P0-B (attribute investigation): scope the product-information gap machinery to the
+ * FOCAL products — the ones the customer actually named this turn (inbound-name pins,
+ * expanded to variant siblings for single-SKU attribute questions) — instead of the
+ * full fused retrieval window. Ledger evidence: a 2-product question injected 10
+ * keyword-matched same-category products (conv e05575e2, semantic count 0), and the
+ * per-product missing pass + availability checks then ran over all 10 — one
+ * attribute-less UNRELATED product forced a "shija/marka" alert onto a fully-answered
+ * question. `shadow` records the would-be scope in the decision ledger without
+ * changing behaviour; `on` uses the scoped set. Category-wide turns (no name pin)
+ * keep the full window in every mode.
+ */
+const GAP_FOCAL_PRODUCT_SCOPE_MODE = ((): 'off' | 'shadow' | 'on' => {
+  const v = (process.env.GAP_FOCAL_PRODUCT_SCOPE ?? 'off').trim().toLowerCase();
   return v === 'on' || v === 'shadow' ? v : 'off';
 })();
 
@@ -3786,8 +3805,15 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   // Structured attributes the customer explicitly asked about (brand, flavor, size,
   // color, variant, weight, category). This also catches mixed "price + attribute"
   // questions that the price intent would otherwise suppress.
+  //
+  // Evidence-gated: the intent LLM's `attributes` hint is deliberately NOT unioned in
+  // here. It over-produces (it added "brand" to the availability question "a keni
+  // nitro tech ripped edhe carbo one me limon?" — alerts c5f481f0/422ef456), and any
+  // spurious requested attribute turns an empty catalog column into a "marka"-style
+  // escalation the customer never asked for. The hint still shapes the reply prompt
+  // inside generateReply; only the customer's own words may widen the gap net.
   const requestedStructuredAttributes = inboundText
-    ? detectRequestedAttributes(inboundText, attributeIntent.attributes)
+    ? detectRequestedAttributes(inboundText)
     : [];
 
   // A product-information question needs catalog facts: an explicit product-knowledge
@@ -3881,12 +3907,45 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         });
       }
 
+      // P0-B: resolve the FOCAL product set the gap machinery judges. When the
+      // customer named specific products this turn (inbound-name pins), the
+      // availability / assessor / per-product checks should run over those products
+      // (plus variant siblings for a single-SKU attribute question) — not over the
+      // whole fused retrieval window, whose same-category keyword matches otherwise
+      // force "missing for at least one product" escalations onto answered questions.
+      let gapProducts = matchedProducts;
+      let gapScopedToFocal = false;
+      if (GAP_FOCAL_PRODUCT_SCOPE_MODE !== 'off' && inboundNamedProducts.length > 0) {
+        let focal = inboundNamedProducts;
+        try {
+          focal = await expandProductsForAttributeQuery(tenantId, inboundNamedProducts, attributeIntent);
+        } catch (err) {
+          console.warn('[ai.reply] focal-scope sibling expansion failed — using pinned products only', {
+            conversationId,
+            tenantId,
+            err,
+          });
+        }
+        recordDecision({
+          classifier: 'gap_scope',
+          raw_score: null,
+          threshold: null,
+          boost_applied: false,
+          passed: GAP_FOCAL_PRODUCT_SCOPE_MODE === 'on',
+          branch: `${GAP_FOCAL_PRODUCT_SCOPE_MODE}:inbound_named:${focal.length}of${matchedProducts.length}`,
+        });
+        if (GAP_FOCAL_PRODUCT_SCOPE_MODE === 'on' && focal.length > 0) {
+          gapProducts = focal;
+          gapScopedToFocal = true;
+        }
+      }
+
       // Build the knowledge a human/LLM can answer from: structured catalog facts plus
       // high-confidence packaging details read from the product's own images.
-      let knowledgeContext = buildProductKnowledgeContext(matchedProducts);
+      let knowledgeContext = buildProductKnowledgeContext(gapProducts);
       let imageUsableKeys = new Set<string>();
       try {
-        const imageDerived = await getProductImageDerivedContext(tenantId, matchedProducts);
+        const imageDerived = await getProductImageDerivedContext(tenantId, gapProducts);
         if (imageDerived.block) {
           knowledgeContext += `\n\nVerified packaging details read from product images (treat as available, reliable catalog knowledge when answering):\n${imageDerived.block}`;
         }
@@ -3906,7 +3965,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       try {
         aiSpecifiedKeys = await detectSpecifiedAttributes(
           requestedStructuredAttributes,
-          matchedProducts,
+          gapProducts,
         );
       } catch (err) {
         console.warn('[ai.reply] attribute availability classifier failed', {
@@ -3926,7 +3985,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       const availableKeys = new Set<string>([...imageUsableKeys, ...aiSpecifiedKeys]);
       const deterministicMissingKeys = computeMissingStructuredAttributes(
         requestedStructuredAttributes,
-        matchedProducts.map((p) => getProductInferredAttributes(p)),
+        gapProducts.map((p) => getProductInferredAttributes(p)),
         availableKeys,
       );
 
@@ -3940,8 +3999,16 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       // Structured attributes are decided solely by the deterministic net below, and
       // question echoes ("ma shum", "cila eshte me e mire") are suppressed. Legacy
       // mode passes the labels through untouched.
+      // Deterministic-first also requires QUESTION RELEVANCE: an allowlisted free-form
+      // label ("përbërësit") may escalate only when the customer's own message asks
+      // about that concept — the assessor volunteers gaps nobody raised (alert
+      // d0219113: a pure availability question shipped "we'll notify you shortly
+      // about the ingredients").
       const llmMissingLabels = gapDeterministicFirst
-        ? filterFreeFormInfoLabels(assessment.missing)
+        ? filterFreeFormLabelsByQuestionRelevance(
+            filterFreeFormInfoLabels(assessment.missing),
+            inboundText,
+          )
         : assessment.missing;
       if (gapDeterministicFirst && assessment.errored) {
         console.warn('[ai.reply] gap assessor errored — deterministic-first gate failing OPEN to deterministic evidence only', {
@@ -3983,12 +4050,12 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       // the answer may mention it for Product A, but the notice is still valid for B/C.
       // ---------------------------------------------------------------------------
       const perProductMissingLabels: string[] = [];
-      if (matchedProducts.length > 1) {
+      if (gapProducts.length > 1) {
         for (const key of requestedStructuredAttributes) {
           // Already flagged as globally missing by the deterministic net → skip.
           if (deterministicMissingKeys.includes(key)) continue;
           // Per-product check: is this attribute absent from at least one product?
-          const anyProductMissingIt = matchedProducts.some((p) => {
+          const anyProductMissingIt = gapProducts.some((p) => {
             const val = getProductInferredAttributes(p)[key];
             return !(typeof val === 'string' && val.trim().length > 0);
           });
@@ -4055,6 +4122,11 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
                 requested_attributes: requestedStructuredAttributes,
                 customer_question: inboundText,
                 answered_info: status === 'partial' ? assessment.answer : null,
+                scope: {
+                  kind: gapScopedToFocal ? 'specific' : 'window',
+                  signal: gapScopedToFocal ? 'inbound_named' : 'matched',
+                  product_names: gapProducts.slice(0, 10).map((p) => p.name),
+                },
               },
             },
             client,
@@ -4544,6 +4616,10 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
         branch: verdict.status,
       });
       if (GROUNDING_GATE_ATTRIBUTE_FACTS !== 'off') {
+        // P1-B: contradicted (exclusion lane) and absent (membership lane) are counted
+        // separately so the shadow window can judge each lane's false-positive rate on its own.
+        const contradictedCount = observedAttributes.filter((a) => a.support === 'contradicted').length;
+        const absentCount = observedAttributes.filter((a) => a.support === 'absent').length;
         recordDecision({
           classifier: 'grounding_attribute_lane',
           raw_score: observedAttributes.length,
@@ -4552,7 +4628,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           passed: observedAttributes.length > 0,
           branch:
             `${GROUNDING_GATE_ATTRIBUTE_FACTS}:declared=${declaredAttributeCount}` +
-            `:contradicted=${observedAttributes.length}` +
+            `:contradicted=${contradictedCount}:absent=${absentCount}` +
             `:scopes=${observedAttributes.map((a) => a.scope).join('|') || 'none'}`,
         });
       }

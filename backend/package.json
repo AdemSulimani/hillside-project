@@ -27,6 +27,7 @@
     "migrate:verify": "tsx src/db/migrateVerify.ts",
     "migrate:down": "tsx src/db/migrateDown.ts",
     "embed-all": "tsx src/scripts/embedAllProducts.ts",
+    "attribute-backfill": "tsx src/scripts/backfillProductAttributes.ts",
     "healthcheck": "tsx src/scripts/healthCheck.ts",
     "encrypt-token": "tsx src/scripts/encryptAccessToken.ts",
     "create-platform-owner": "tsx src/scripts/createPlatformOwner.ts"

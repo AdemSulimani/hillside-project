@@ -98,6 +98,12 @@ export class AttachSpreadsheetService extends AttachDocumentService {
           if (urls.length > 0) product.image_urls = urls;
         }
       }
+      for (const key of ['flavor', 'size', 'color', 'variant', 'weight'] as const) {
+        const column = fieldMap[key];
+        if (column) {
+          product[key] = repairMojibake(String(row[column] ?? '').trim()) || undefined;
+        }
+      }
 
       return product;
     }).filter((p) => p.name || p.price);
@@ -122,6 +128,12 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       category: /^(category|type|group|class)/,
       image:
         /^(image[_\s-]?urls?|images?|photos?(?:[_\s-]?urls?)?|pictures?(?:[_\s-]?urls?)?|img(?:[_\s-]?urls?)?|thumbnails?(?:[_\s-]?urls?)?|fotos?(?:[_\s-]?urls?)?)/,
+      // Structured attributes (P1-A) — English + Albanian header spellings.
+      flavor: /^(flavou?rs?|shija|shije|aroma)/,
+      size: /^(size|madh[eë]sia?)/,
+      color: /^(colou?r|ngjyra)/,
+      variant: /^(variant)/,
+      weight: /^(weight|pesha)/,
     };
 
     const fieldOrder = [
@@ -135,6 +147,11 @@ export class AttachSpreadsheetService extends AttachDocumentService {
       'tags',
       'category',
       'image',
+      'flavor',
+      'size',
+      'color',
+      'variant',
+      'weight',
     ] as const;
 
     for (const field of fieldOrder) {

@@ -61,8 +61,8 @@ describe('productRetrievalService', () => {
   });
 
   // Layer 1 (root cause for the "we'll notify you about the flavor" contradiction):
-  // an attribute present only in the product NAME / description / extracted text / tags
-  // must be reported as AVAILABLE so the deterministic missing-attribute net never
+  // an attribute present only in the product NAME / description / tags must be
+  // reported as AVAILABLE so the deterministic missing-attribute net never
   // contradicts an answer that already stated the value.
   describe('getProductInferredAttributes (text-aware availability)', () => {
     it('reads a flavor embedded in the product name when the column is empty', () => {
@@ -92,6 +92,55 @@ describe('productRetrievalService', () => {
     it('returns null for an attribute genuinely absent everywhere', () => {
       const product = mockProduct({ id: 'c4', name: 'Mystery Tub', brand: null });
       assert.equal(getProductInferredAttributes(product).brand, null);
+    });
+
+    it('ignores extracted_text — a shared document dump must not vouch a flavor', () => {
+      // Dev-catalog reality: 256 products share one ~230KB extracted_text blob that
+      // contains virtually every flavor word. Scanning it "found" an arbitrary flavor
+      // for any product (the BSN "Cherry" fabrication class) and masked real gaps.
+      const product = mockProduct({
+        id: 'c5',
+        name: 'BSN Creatine 216gr',
+        flavor: null,
+        description: null,
+        extracted_text: 'Catalog dump: Carbo One lemon flavor, Whey chocolate, Creatine cherry …',
+      });
+      assert.equal(getProductInferredAttributes(product).flavor, null);
+    });
+
+    it('recognizes Albanian "pa aromë" (unflavored) as a stated flavor', () => {
+      const product = mockProduct({
+        id: 'c6',
+        name: 'BSN Creatine 216gr',
+        flavor: null,
+        description: 'Pluhur kreatine pa aromë, i mikronizuar.',
+      });
+      assert.equal(getProductInferredAttributes(product).flavor, 'pa aromë');
+    });
+
+    it('recognizes "pa shije" in the product name as a stated flavor', () => {
+      const product = mockProduct({ id: 'c7', name: 'Dedicated Creatine 500gr pa shije', flavor: null });
+      assert.equal(getProductInferredAttributes(product).flavor, 'pa shije');
+    });
+
+    it('recognizes the Gheg "Qokollad" chocolate spelling family in product names', () => {
+      // The catalog spells chocolate with Q in most names ("Nitro Tech Ripped
+      // Qokollad", "X-Mass 3kg Qokolad") — the old `cokollat[eë]` token missed them
+      // all, so their name-borne flavor read as missing and drove "shija" alerts.
+      assert.equal(
+        getProductInferredAttributes(mockProduct({ id: 'c8', name: 'Nitro Tech Ripped Qokollad' })).flavor,
+        'Qokollad',
+      );
+      assert.equal(
+        getProductInferredAttributes(mockProduct({ id: 'c9', name: 'X-Mass 3kg Qokolad' })).flavor,
+        'Qokolad',
+      );
+      assert.equal(
+        getProductInferredAttributes(
+          mockProduct({ id: 'c10', name: 'Whey 2kg', description: 'Me shije çokollatë.' }),
+        ).flavor,
+        'çokollatë',
+      );
     });
   });
 

@@ -9,8 +9,9 @@
  *  - It rejects keys not in the requested set (model cannot widen the decision).
  *  - It rejects invalid/unknown keys.
  *  - It returns empty on malformed JSON and on empty "specified" arrays.
- *  - buildProductAvailabilityBlock includes name, description, extracted text (capped),
- *    structured fields, and tags — all sources the classifier reads from.
+ *  - buildProductAvailabilityBlock includes name, description, structured fields, and
+ *    tags — and EXCLUDES extracted_text (a shared document dump that would let the
+ *    classifier confirm one product's attribute from another product's text).
  *  - buildAvailabilityCacheKey is stable and changes when products or keys change.
  */
 import { describe, it } from 'node:test';
@@ -19,7 +20,6 @@ import type { Product } from '../../db/models/product';
 import {
   buildAvailabilityCacheKey,
   buildProductAvailabilityBlock,
-  MAX_EXTRACTED_TEXT_CHARS,
   parseSpecifiedAttributes,
 } from '../productAttributeAvailabilityHelpers';
 
@@ -146,16 +146,15 @@ describe('buildProductAvailabilityBlock', () => {
     assert.ok(block.includes('Coconut'));
   });
 
-  it('caps extracted_text at MAX_EXTRACTED_TEXT_CHARS', () => {
-    const longText = 'X'.repeat(MAX_EXTRACTED_TEXT_CHARS + 200);
-    const p = mockProduct({ id: 'p5', name: 'P', extracted_text: longText });
+  it('excludes extracted_text entirely (shared document dump — not product-specific evidence)', () => {
+    const p = mockProduct({
+      id: 'p5',
+      name: 'Creatine 216gr',
+      extracted_text: 'Full catalog dump: Cherry flavor, Lemon flavor, Mango flavor …',
+    });
     const block = buildProductAvailabilityBlock(p, 0);
-    // The capped extracted text should appear in the block, but no more than the cap.
-    const marker = 'packaging/extracted text:';
-    const idx = block.indexOf(marker);
-    assert.ok(idx !== -1);
-    const afterMarker = block.slice(idx + marker.length);
-    assert.ok(afterMarker.length <= MAX_EXTRACTED_TEXT_CHARS + 50); // small formatting overhead
+    assert.ok(!block.includes('Cherry'));
+    assert.ok(!block.includes('extracted text'));
   });
 
   it('includes tags', () => {

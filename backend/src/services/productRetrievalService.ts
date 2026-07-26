@@ -448,12 +448,26 @@ const NAME_ATTRIBUTE_PATTERNS: Array<{ key: StructuredAttributeKey; re: RegExp }
     // English + Albanian flavor vocabulary. The deterministic missing-attribute net
     // relies on this to recognize a flavor stated in the product NAME/description
     // (e.g. "Carbo One 1kg me shije limon"), so it never escalates a flavor the
-    // grounded answer already provides.
-    re: /\b(chocolate|cokollat[eë]|vanilla|vanilje|strawberry|luleshtrydhe|berry|mjed[eë]r|unflavored|unflavoured|banana|banane|cookies?\s*&?\s*cream|cookies? and cream|mango|lemon|limon|orange|portokall|mint|mente|caramel|karamel|coffee|kafe|neutral|neutrale|coconut|kokos|peach|pjeshk[eë]|cherry|qershi|apple|moll[eë])\b/i,
+    // grounded answer already provides. "pa arom[eë]"/"pa shije" (unflavored) count
+    // as a stated flavor: a description that says the product is unflavored answers
+    // a flavor question (alert a5e280a5 fired alongside a correct "pa aromë" reply).
+    // Unicode lookarounds instead of \b: JS \b is ASCII-word based, so an ë-final
+    // token ("aromë", "çokollatë") followed by punctuation never matched under \b.
+    // [cçq]okoll?a[dt][eë]? covers the chocolate spelling family the catalog actually
+    // uses — "çokollatë", "cokollate", "Qokolad", "Qokollad", "Qokollat" (Gheg Q-forms
+    // appear in most product names, e.g. "Nitro Tech Ripped Qokollad").
+    // Vocabulary calibrated against the real catalog names (2026-07-26 backfill dry-run):
+    // "Vanil", "Dredhz", "Keksi", "Mjedre", "Qershis", "shije limoni/Portokalli", "Lemonad",
+    // "Exotic", "cola", "Ananas", "Fruit", "blue Raspbery" are all live name-borne flavors the
+    // previous list missed. Albanian definite suffixes are spelled out per token (limoni,
+    // portokalli, qershis) because the trailing (?!\p{L}) otherwise rejects them.
+    re: /(?<!\p{L})(chocolate|[cçq]okoll?a[dt][eë]?|vanil(?:la|je)?[eë]?|strawberry|luleshtrydhe|dredhz[ae]?|(?:blue )?raspber+y|berry|mjed[eë]r|mjedr[eë]|unflavored|unflavoured|pa arom[eë]|pa shije|banana|banane|cookies?\s*&?\s*cream|cookies? and cream|keks(?:i|it)?|mango|lemon|limon(?:i|it)?|lemonad[eë]?|orange|portokall(?:i|it)?|mint|mente|caramel|carramel|kar+amel|coffee|kafe|neutral|neutrale|coconut|kokos|peach|pjeshk[eë]|cherry|qershi(?:a|s|t)?|apple|moll[eë]|ananas|exotic|cola|fruit|bostan[i]?)(?!\p{L})/iu,
   },
   { key: 'color', re: /\b(red|blue|black|white|green|yellow|pink|purple|grey|gray|silver|gold)\b/i },
-  { key: 'size', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|ml|l|oz|lb|lbs|capsules?|caps|tablets?|servings?))\b/i },
-  { key: 'weight', re: /\b(\d+(?:\.\d+)?\s*(?:g|kg|oz|lb|lbs))\b/i },
+  // 'gr'/'tab'/'tableta'/'servime' are how the real catalog writes units ("216gr", "100tab",
+  // "90 tableta", "30servime") — without them 78 name-borne sizes read as missing.
+  { key: 'size', re: /\b(\d+(?:\.\d+)?\s*(?:g|gr|kg|ml|l|oz|lb|lbs|capsules?|caps|tab|tableta|tablets?|servings?|servime))\b/i },
+  { key: 'weight', re: /\b(\d+(?:\.\d+)?\s*(?:g|gr|kg|oz|lb|lbs))\b/i },
 ];
 
 function inferAttributeFromText(
@@ -463,10 +477,14 @@ function inferAttributeFromText(
   const structured = getProductStructuredAttributes(product)[key];
   if (structured) return structured;
 
+  // extracted_text is deliberately NOT part of the haystack: it is a raw document
+  // dump that in practice is shared across the whole imported catalog (dev tenant:
+  // 2 distinct blobs across 256 products, up to ~230KB) and contains virtually every
+  // flavor word — scanning it "finds" an arbitrary flavor for any product, masking
+  // real gaps and fabricating values (the BSN "Cherry" incident).
   const hay = [
     product.name,
     product.description ?? '',
-    product.extracted_text ?? '',
     product.tags.join(' '),
   ].join(' ');
 
@@ -484,10 +502,10 @@ function inferAttributeFromText(
 
 /**
  * Resolve EVERY structured attribute for a product using both the structured catalog
- * columns AND the product's free text (name, description, extracted catalog text,
- * tags). This mirrors exactly what the knowledge context fed to the LLM composer can
- * answer from, so the deterministic "missing attribute" net never contradicts a value
- * the model legitimately read from the product name/description.
+ * columns AND the product's own free text (name, description, tags). This mirrors
+ * exactly what the knowledge context fed to the LLM composer can answer from, so the
+ * deterministic "missing attribute" net never contradicts a value the model
+ * legitimately read from the product name/description.
  *
  * Example: "Carbo One 1kg me shije limon" has an empty `flavor` column but the flavor
  * is present in the name — this resolver returns flavor="limon", preventing a bogus
@@ -677,10 +695,9 @@ export function buildProductKnowledgeContext(products: Product[]): string {
           ? `Price: €${p.price} (discounted: €${p.discounted_price})`
           : `Price: €${p.price}`;
 
-      // Prefer structured/verified-image facts over raw extracted_text; apply a
-      // quality gate to strip garbled OCR lines before feeding to the LLM.
-      const cleanedExtractedText = p.extracted_text ? sanitizeExtractedText(p.extracted_text) : null;
-
+      // extracted_text is deliberately excluded: the raw document dump is shared
+      // across imported products (not product-specific), so feeding it here lets the
+      // gap assessor "answer" one product's question from another product's text.
       return [
         `Product: ${p.name}`,
         p.brand ? `Brand: ${p.brand}` : null,
@@ -688,7 +705,6 @@ export function buildProductKnowledgeContext(products: Product[]): string {
         priceLabel,
         attrLines ? `Attributes: ${attrLines}` : null,
         p.description ? `Description: ${p.description}` : null,
-        cleanedExtractedText ? `Extracted catalog text: ${cleanedExtractedText}` : null,
         p.usage_description ? `Usage: ${p.usage_description}` : null,
         p.tags.length ? `Tags: ${p.tags.join(', ')}` : null,
       ]

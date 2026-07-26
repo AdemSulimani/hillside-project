@@ -34,6 +34,7 @@ import {
   dedupeInfoLabels,
   deriveAnswerabilityStatus,
   filterFreeFormInfoLabels,
+  filterFreeFormLabelsByQuestionRelevance,
   localizedAttributeLabels,
   reconcileMissingAgainstAnswer,
   type AnswerabilityStatus,
@@ -105,6 +106,68 @@ describe('filterFreeFormInfoLabels', () => {
     assert.deepEqual(
       filterFreeFormInfoLabels(['marka', 'përbërësit', 'ma shum', 'usage']),
       ['përbërësit', 'usage'],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// filterFreeFormLabelsByQuestionRelevance — a free-form gap may escalate only when
+// the customer's own message asks about that concept (alert d0219113: a pure
+// availability question shipped "we'll notify you shortly about the ingredients")
+// ---------------------------------------------------------------------------
+
+describe('filterFreeFormLabelsByQuestionRelevance', () => {
+  it('drops an allowlisted label the customer never asked about', () => {
+    assert.deepEqual(
+      filterFreeFormLabelsByQuestionRelevance(
+        ['përbërësit'],
+        'Mfal a keni nitro tech ripped edhe carbo one me limon?',
+      ),
+      [],
+    );
+  });
+
+  it('keeps a label whose concept the question raises (inflection-tolerant, sq)', () => {
+    assert.deepEqual(
+      filterFreeFormLabelsByQuestionRelevance(
+        ['përbërësit'],
+        'Qfar përbërësish ka ky produkt?',
+      ),
+      ['përbërësit'],
+    );
+  });
+
+  it('keeps a label whose concept the question raises (en)', () => {
+    assert.deepEqual(
+      filterFreeFormLabelsByQuestionRelevance(
+        ['ingredients'],
+        'What ingredients does the whey contain?',
+      ),
+      ['ingredients'],
+    );
+  });
+
+  it('filters per-label: only question-relevant concepts survive a mixed list', () => {
+    assert.deepEqual(
+      filterFreeFormLabelsByQuestionRelevance(
+        ['gluten', 'afati i skadencës'],
+        'A permban gluten ky produkt?',
+      ),
+      ['gluten'],
+    );
+  });
+
+  it('returns empty when the question raises no free-form concept at all', () => {
+    assert.deepEqual(
+      filterFreeFormLabelsByQuestionRelevance(['expiry date'], 'Sa kushton Carbo one 1kg Limon?'),
+      [],
+    );
+  });
+
+  it('multi-word stems match on both sides ("sa proteina")', () => {
+    assert.deepEqual(
+      filterFreeFormLabelsByQuestionRelevance(['sa proteina ka'], 'Sa proteina ka nje doze?'),
+      ['sa proteina ka'],
     );
   });
 });

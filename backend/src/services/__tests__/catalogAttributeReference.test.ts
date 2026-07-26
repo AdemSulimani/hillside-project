@@ -26,7 +26,21 @@ const row = (
   description: string | null = null,
   usage_description: string | null = null,
   category: string | null = 'Proteina',
-): CatalogAttributeSourceRow => ({ id, name, category, description, usage_description });
+  structured: Partial<Pick<CatalogAttributeSourceRow, 'brand' | 'flavor' | 'size' | 'color' | 'variant' | 'weight'>> = {},
+): CatalogAttributeSourceRow => ({
+  id,
+  name,
+  category,
+  description,
+  usage_description,
+  brand: null,
+  flavor: null,
+  size: null,
+  color: null,
+  variant: null,
+  weight: null,
+  ...structured,
+});
 
 /** Real shapes from the dev catalog: a rich description, and a row with no free text at all. */
 const ROWS: CatalogAttributeSourceRow[] = [
@@ -90,6 +104,26 @@ describe('buildAttributeIndexFromRows', () => {
     for (let i = 0; i < 5; i += 1) {
       assert.equal(JSON.stringify(buildAttributeIndexFromRows(ROWS, 1000)), a);
     }
+  });
+
+  // P1-B: backfilled structured columns are membership evidence.
+  it('structured attribute values become their own folded clauses', () => {
+    const index = buildAttributeIndexFromRows(
+      [row('9', 'BSN Creatine 216gr', null, null, 'Kreatina', { flavor: 'Qershi', weight: '216gr', brand: 'BSN' })],
+      100,
+    );
+    const clauses = index.rows[0].clauses;
+    assert.ok(clauses.includes('qershi'));
+    assert.ok(clauses.includes('216gr'));
+    assert.ok(clauses.includes('bsn'));
+  });
+
+  it('structured values do NOT make a free-text-less row `populated` (exclusion-lane contract)', () => {
+    const index = buildAttributeIndexFromRows(
+      [row('9', 'BSN Creatine 216gr', null, null, 'Kreatina', { flavor: 'Qershi' })],
+      100,
+    );
+    assert.equal(index.rows[0].populated, false);
   });
 });
 

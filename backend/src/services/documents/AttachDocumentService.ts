@@ -12,6 +12,14 @@ export interface ExtractedProductData {
   tags?: string[];
   category?: string;
   image_urls?: string[];
+  // Structured attributes (P1-A). Before these members existed no import path could
+  // populate the products columns AT ALL — hence flavor 1/257, size/color/variant/weight
+  // 0/257 on the dev catalog. Extraction is explicit-only (the prompt forbids guessing).
+  flavor?: string;
+  size?: string;
+  color?: string;
+  variant?: string;
+  weight?: string;
 }
 
 export function extractedDataToProductInput(
@@ -47,6 +55,11 @@ export function extractedDataToProductInput(
     sku: repairOptionalUtf8Text(data.sku)?.slice(0, 100) ?? null,
     category,
     tags: (data.tags ?? (category ? [category] : [])).map((tag) => repairOptionalUtf8Text(tag) ?? tag),
+    flavor: repairOptionalUtf8Text(data.flavor)?.slice(0, 255) ?? null,
+    size: repairOptionalUtf8Text(data.size)?.slice(0, 255) ?? null,
+    color: repairOptionalUtf8Text(data.color)?.slice(0, 255) ?? null,
+    variant: repairOptionalUtf8Text(data.variant)?.slice(0, 255) ?? null,
+    weight: repairOptionalUtf8Text(data.weight)?.slice(0, 255) ?? null,
     image_urls: validImageUrls.length > 0 ? validImageUrls : undefined,
     source_type: sourceType,
     extracted_text: rawText,

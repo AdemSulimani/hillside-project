@@ -103,7 +103,13 @@ function normalizeLabel(label: string): string {
 const ATTRIBUTE_SYNONYM_GROUPS: Record<string, string[]> = {
   brand: ['brand', 'brands', 'brandi', 'brend', 'brendi', 'marka', 'marke', 'markes', 'trademark', 'prodhuesi', 'manufacturer'],
   weight: ['weight', 'pesha', 'masa', 'gramazhi', 'gramatura'],
-  flavor: ['flavor', 'flavour', 'taste', 'shija', 'shije', 'aroma'],
+  // 'arom' covers the Albanian inflections the composer actually emits by prefix —
+  // "aroma", "arome"/"aromë", "aromen": an answer that says "është pa aromë"
+  // (unflavored) states the flavor concept and must reconcile away a spurious "shija"
+  // missing-label (alerts a5e280a5/a3e8376d fired alongside correct "pa aromë"
+  // answers because "arome" did not prefix-match 'aroma'). 'aroma'/'arome' stay for
+  // the exact-match synonym→group lookup dedupeInfoLabels relies on.
+  flavor: ['flavor', 'flavour', 'taste', 'shija', 'shije', 'aroma', 'arome', 'arom'],
   size: ['size', 'madhesia', 'permasa', 'permasat', 'dimension', 'dimensions'],
   color: ['color', 'colour', 'ngjyra'],
   variant: ['variant', 'varianti'],
@@ -370,6 +376,40 @@ export function filterFreeFormInfoLabels(labels: string[]): string[] {
     if (!norm) return false;
     if (SYNONYM_GROUP_BY_LABEL.has(norm)) return false;
     return matchesFreeFormStem(norm);
+  });
+}
+
+/** The free-form stems a normalized label matches (empty when it matches none). */
+function freeFormStemsForText(norm: string): string[] {
+  if (!norm) return [];
+  const words = norm.split(' ');
+  return FREE_FORM_INFO_STEMS.filter((stem) =>
+    stem.includes(' ') ? norm.includes(stem) : words.some((w) => w.startsWith(stem)),
+  );
+}
+
+/**
+ * SAFEGUARD (question relevance): keep an allowlisted free-form `missing` label ONLY
+ * when the customer's own message asks about the same concept. The LLM assessor
+ * routinely volunteers gaps the customer never raised — e.g. a pure availability
+ * question ("a keni X edhe Y?") came back with `missing: ["përbërësit"]` and shipped
+ * "we'll notify you shortly about the ingredients" plus an alert (d0219113) for an
+ * ingredients question nobody asked. Matching is stem-based and inflection-tolerant
+ * on BOTH sides (label "përbërësit" and question "përbërësish" both match stem
+ * 'perberes'), reusing the same stem semantics as the allowlist itself. The assessor
+ * answers in the customer's language, so label and question stems share a locale.
+ * Fails soft: a dropped label means the grounded answer ships with no escalation.
+ */
+export function filterFreeFormLabelsByQuestionRelevance(
+  labels: string[],
+  customerQuestion: string,
+): string[] {
+  const questionStems = new Set(freeFormStemsForText(normalizeForConceptScan(customerQuestion)));
+  if (questionStems.size === 0) return [];
+  return labels.filter((label) => {
+    const norm = normalizeLabel(label);
+    if (!norm) return false;
+    return freeFormStemsForText(norm).some((stem) => questionStems.has(stem));
   });
 }
 
