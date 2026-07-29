@@ -16,21 +16,23 @@ import {
 
 export const VALID_ATTRIBUTE_KEYS = new Set<string>(ALL_STRUCTURED_ATTRIBUTE_KEYS);
 
-/** Per-product max characters of free text fed to the classifier (keeps the prompt small). */
-export const MAX_EXTRACTED_TEXT_CHARS = 600;
 /** Cap on products per call so the prompt stays bounded for large category matches. */
 export const MAX_PRODUCTS_IN_PROMPT = 25;
 
-/** Build the per-product description block included in the classifier prompt. */
+/**
+ * Build the per-product description block included in the classifier prompt.
+ *
+ * extracted_text is deliberately excluded: it is a raw document dump that in practice
+ * is shared across the whole imported catalog (not product-specific), so including it
+ * lets the classifier confirm an attribute for a product using ANOTHER product's text —
+ * a false "specified" verdict that suppresses genuine gaps and grounds fabrications.
+ */
 export function buildProductAvailabilityBlock(product: Product, index: number): string {
   const attrs = getProductStructuredAttributes(product);
   const structured = Object.entries(attrs)
     .filter(([, v]) => v)
     .map(([k, v]) => `${k}=${v}`)
     .join(', ');
-  const extracted = product.extracted_text?.trim()
-    ? product.extracted_text.trim().slice(0, MAX_EXTRACTED_TEXT_CHARS)
-    : '';
   return [
     `Product ${index + 1}:`,
     `  name: ${product.name}`,
@@ -38,7 +40,6 @@ export function buildProductAvailabilityBlock(product: Product, index: number): 
     product.category ? `  category: ${product.category}` : null,
     structured ? `  structured fields: ${structured}` : null,
     product.description ? `  description: ${product.description}` : null,
-    extracted ? `  packaging/extracted text: ${extracted}` : null,
     product.tags.length ? `  tags: ${product.tags.join(', ')}` : null,
   ]
     .filter(Boolean)

@@ -35,7 +35,12 @@ import {
 import type { NameVerificationResult } from './catalogGuardReferenceService';
 import { normalizeText } from './productTitleNormalization';
 import { foldDialect } from './dialectNormalization';
-import { containsPhrase, locateClaimInProse, parseAttributeClaim } from './attributeClaimLexicon';
+import {
+  containsPhrase,
+  locateClaimInProse,
+  locateValueClaimInProse,
+  parseAttributeClaim,
+} from './attributeClaimLexicon';
 // Everything below is from the PURE attribute module — the redis/pg-backed
 // catalogAttributeReferenceService is injected through `deps`, never imported here, so the gate
 // stays offline-testable and the eval suite's walked import graph stays clean.
@@ -331,9 +336,22 @@ export function evaluateGroundingFacts(input: {
   // so when a claim and its product never co-occur nothing is excised — and sending the remainder
   // would ship text we know carries a refuted claim. Scoped to the attribute lane on purpose: the
   // price and name paths keep their original semantics exactly.
+  //
+  // P1-B: an ABSENT (membership) verdict additionally requires its located value phrase to be
+  // gone from the surviving text. The carry check alone is blind when the reply names the product
+  // only PARTIALLY ("BSN Creatine" for "BSN Creatine 216gr" — the literal dev fabrication reply):
+  // no sentence contains the full resolved name, so nothing is stripped AND the whole-text carry
+  // check stays false, and without this conjunct the fabricated sentence would ship as a
+  // "successful" strip. Exclusion claims keep the carry-only rule — their claim phrase ("pa
+  // sheqer") legitimately recurs in TRUE sentences about other products (the fcd0af7e invariant),
+  // whereas a membership value surviving anywhere means the fabrication may still be in the text.
+  const strippedFolded = foldDialect(stripped);
+  const absentSpansGone = ungroundedAttributes
+    .filter((a) => a.support === 'absent')
+    .every((a) => !a.proseSpan || !containsPhrase(strippedFolded, a.proseSpan));
   const attributesExcised =
     ungroundedAttributes.length === 0 ||
-    !sentenceCarriesAttribute(stripped, ungroundedAttributes);
+    (!sentenceCarriesAttribute(stripped, ungroundedAttributes) && absentSpansGone);
   if (attributesExcised && stripped.length >= Math.max(0, input.stripFloor)) {
     return {
       status: 'stripped',
@@ -532,12 +550,17 @@ async function judgeDeclaredAttributes(
   if (!proseFolded) return none;
 
   // Declaration order, not sorted — the cap must be a stable prefix of what the model said.
+  // Kind-aware (P1-B): exclusion claims locate via the eligibility-gated locator (contradiction
+  // lane, byte-identical to P3-1); every other declared value is a membership ('value') claim and
+  // locates via its own locator when concrete enough to judge.
   const located: Array<{ productRef: string; claim: ReturnType<typeof parseAttributeClaim>; proseSpan: string }> = [];
   for (const fact of declaredAttributes) {
     if (located.length >= maxClaims) break;
     const claim = parseAttributeClaim(fact.value);
-    if (!claim.eligible) continue;
-    const proseSpan = locateClaimInProse(claim, proseFolded);
+    const proseSpan =
+      claim.kind === 'exclusion'
+        ? locateClaimInProse(claim, proseFolded)
+        : locateValueClaimInProse(claim, proseFolded);
     if (!proseSpan) continue;
     located.push({ productRef: fact.product_ref ?? '', claim, proseSpan });
   }

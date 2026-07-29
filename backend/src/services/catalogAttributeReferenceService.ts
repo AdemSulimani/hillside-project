@@ -69,7 +69,16 @@ export function buildAttributeIndexFromRows(
 ): CatalogAttributeIndex {
   const built: CatalogAttributeRow[] = rows.map((row) => {
     const freeText = [row.description ?? '', row.usage_description ?? ''].join('\n').trim();
-    const source = [row.name ?? '', row.category ?? '', freeText].filter(Boolean).join('\n');
+    // Structured attribute values (P1-B): one clause per value, so the membership predicate can
+    // ground a declared "Qershi" against a backfilled flavor column exactly as it would against
+    // the name. Kept OUT of `populated` — that flag governs contradiction eligibility for the
+    // exclusion lane, whose evidence base is free text.
+    const structuredValues = [row.brand, row.flavor, row.size, row.color, row.variant, row.weight]
+      .map((v) => v?.trim() ?? '')
+      .filter(Boolean);
+    const source = [row.name ?? '', row.category ?? '', freeText, ...structuredValues]
+      .filter(Boolean)
+      .join('\n');
     return {
       id: row.id,
       name: row.name,

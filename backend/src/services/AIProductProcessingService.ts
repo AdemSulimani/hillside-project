@@ -17,11 +17,17 @@ Return a JSON array of product objects. Each product object should have these fi
 - sku (string): Product SKU, code, barcode, or identifier
 - tags (string[]): Relevant tags/keywords for the product
 - category (string): The product category
+- flavor (string): The product flavor, ONLY if explicitly stated in the text (e.g. "Lemon", "Qershi", "pa aromë" for unflavored) — never guess
+- size (string): The package size or count, ONLY if explicitly stated (e.g. "1kg", "90 caps") — never guess
+- color (string): The product color, ONLY if explicitly stated — never guess
+- variant (string): The product variant, ONLY if explicitly stated — never guess
+- weight (string): The product weight, ONLY if explicitly stated (e.g. "216gr") — never guess
 
 Rules:
 - Extract ALL products found in the text
 - If price is not found, omit the field
 - If a field cannot be determined, omit it
+- flavor/size/color/variant/weight must be copied from the text verbatim — omit them when the text does not state them
 - Return ONLY valid JSON, no markdown or extra text
 - If no products can be identified, return an empty array []`;
 
@@ -143,6 +149,12 @@ export class AIProductProcessingService {
         }
         if (typeof item.category === 'string' && item.category.trim()) {
           product.category = item.category.trim();
+        }
+        for (const key of ['flavor', 'size', 'color', 'variant', 'weight'] as const) {
+          const value = item[key];
+          if (typeof value === 'string' && value.trim()) {
+            product[key] = value.trim().slice(0, 255);
+          }
         }
 
         return product;

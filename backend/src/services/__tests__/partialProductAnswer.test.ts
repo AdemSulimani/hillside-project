@@ -127,6 +127,16 @@ describe('reconcileMissingAgainstAnswer', () => {
     assert.deepEqual(reconcileMissingAgainstAnswer(['shija'], 'Shijet janë limon.'), []);
   });
 
+  it('recognizes an "unflavored" answer as stating the flavor concept (pa aromë)', () => {
+    // Alerts a5e280a5/a3e8376d: the correct answer "Ky pluhur kreatine është pa aromë."
+    // still escalated "shija" because "arome" did not prefix-match the old 'aroma'
+    // synonym token — the exact self-contradiction class this layer exists to stop.
+    assert.deepEqual(
+      reconcileMissingAgainstAnswer(['shija'], 'Ky pluhur kreatine është pa aromë.'),
+      [],
+    );
+  });
+
   it('returns all labels unchanged when the answer is empty (none case)', () => {
     assert.deepEqual(reconcileMissingAgainstAnswer(['marka', 'shija'], ''), ['marka', 'shija']);
   });

@@ -551,6 +551,25 @@ export const KNOBS: readonly KnobSpec[] = [
   },
   bool('GUARD_VALIDATE_AGAINST_FULL_CATALOG', false, 'Validate guards against the full active catalog (P0-2)', { binding: 'per-call' }),
   bool('GAP_GATE_DETERMINISTIC_FIRST', false, 'Gap gate escalates only on deterministic evidence (P0-3)', { binding: 'per-call' }),
+  {
+    key: 'GAP_FOCAL_PRODUCT_SCOPE',
+    kind: 'enum',
+    values: ['off', 'shadow', 'on'],
+    requiredness: { kind: 'optional', default: 'off' },
+    binding: 'per-call',
+    description:
+      'Scope the product-information gap machinery to the focal (inbound-named + variant-sibling) products: off | shadow (ledger-only) | on',
+    rationale:
+      'The gap availability checks, LLM assessor context and per-product missing pass run over the ' +
+      'FULL fused retrieval window (10–25 products), not the products the customer asked about. ' +
+      'Ledger evidence (conv e05575e2): a 2-product availability question retrieved 10 keyword ' +
+      'matches (semantic count 0 at threshold 0.65), and one attribute-less same-category product ' +
+      'then forced a "missing for at least one product" escalation onto a fully-answered question ' +
+      '— the dominant product_question_unanswered false-positive class. When the turn has ' +
+      'inbound-name pins, this scopes the gap set to pins + variant siblings ' +
+      '(expandProductsForAttributeQuery); category-wide turns keep the full window. `shadow` ' +
+      'records the would-be scope as a gap_scope ledger decision without changing behaviour.',
+  },
   bool('SENSITIVE_PATH_FAIL_CLOSED', false, 'Sensitive-intent path fails closed (P0-4)', { binding: 'per-call' }),
   bool('RATE_LIMIT_COUNT_DELIVERED_ONLY', false, 'Count only delivered replies against the rate limit (P0-6/RC-18)', { binding: 'per-call' }),
   {

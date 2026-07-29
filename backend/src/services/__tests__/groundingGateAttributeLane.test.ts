@@ -229,15 +229,18 @@ describe('P3-1 attribute lane — flag-off byte identity', () => {
     assert.equal(resolveCalls, 0);
   });
 
-  it('LAZY: no index read when nothing eligible was declared, even at enforce', async () => {
+  it('LAZY: no index read when no declared claim is both judgeable and present in the prose', async () => {
     let indexCalls = 0;
     const v = await evaluateConsolidatedGrounding({
       ...BASE,
       prose: 'Kemi Carbo One 1kg Orange për €18.00.',
-      // A flavour and a weight can never reach the flag branch — eligibility is the firewall.
+      // P1-B: value claims ARE judgeable now (membership lane), so laziness is guaranteed by the
+      // located-in-prose narrowing and the concreteness floor instead of blanket ineligibility:
+      // 'shije portokall' is membership-eligible but the prose says "Orange", never "portokall";
+      // '18.00' folds to the letterless "18 00" and is not membership-eligible at all.
       factsUsed: [
         { type: 'attribute', product_ref: 'Carbo One 1kg Orange', value: 'shije portokall' },
-        { type: 'attribute', product_ref: 'Carbo One 1kg Orange', value: '1kg' },
+        { type: 'attribute', product_ref: 'Carbo One 1kg Orange', value: '18.00' },
       ],
       deps: attrDeps({
         getAttributeIndex: async () => {
@@ -247,7 +250,7 @@ describe('P3-1 attribute lane — flag-off byte identity', () => {
       }),
       attributeMode: 'enforce',
     });
-    assert.equal(indexCalls, 0, 'the vast majority of turns must cost zero attribute I/O');
+    assert.equal(indexCalls, 0, 'unlocated/non-concrete claims must cost zero attribute I/O');
     assert.equal(v.status, 'grounded');
   });
 
@@ -458,5 +461,186 @@ describe('P3-1 — the gap cannot be silently un-closed (inverse tripwire)', () 
       'the gate no longer consumes declared ATTRIBUTE facts — P3-1 has been reverted and the ' +
         '"false sentence built from true words" class is unguarded on the send path again',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-B — MEMBERSHIP lane for declared VALUE claims (the "Qershi" fabrication class).
+//
+// Acceptance evidence (dev DB, 2026-07-22): the model shipped "BSN Creatine është në shije
+// Qershi." and self-declared {type:'attribute', value:'Qershi', product_ref:'BSN Creatine 216gr'}
+// in facts_used; BSN's own description says "pa aromë" (unflavored). The exclusion lane could not
+// judge it (no substance, no exclusion marker). Membership can: a declared value absent from the
+// referenced product's own evidence is a fabrication signal by contract.
+// ---------------------------------------------------------------------------
+
+/** Real shapes: BSN (unflavored — desc from the dev row), plus flavored siblings. */
+const BSN_FREETEXT =
+  'Pluhur kreatine lehtësisht i tretshëm dhe pa aromë, mund ta kombinoni me pluhura proteinash.';
+
+function membershipIndex(truncated = false): CatalogAttributeIndex {
+  return {
+    rows: [
+      mkRow('10', 'BSN Creatine 216gr', BSN_FREETEXT),
+      mkRow('11', 'Creatine 500gr Qershi', ''),
+      mkRow('12', 'Take a Whey 1kg Qokolad', ''),
+    ],
+    truncated,
+  };
+}
+
+const QERSHI_FACT = {
+  type: 'attribute' as const,
+  product_ref: 'BSN Creatine 216gr',
+  value: 'Qershi',
+};
+
+describe('P1-B membership lane — acceptance (fabricated value flagged)', () => {
+  it('enforce: a declared value absent from the referenced row strips the carrying sentence', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'BSN Creatine 216gr është në shije Qershi. Carbo One 1kg Orange kushton €18.00.',
+      factsUsed: [QERSHI_FACT],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'stripped');
+    assert.equal(v.escalate, false);
+    assert.ok(!v.text.includes('Qershi'));
+    assert.ok(v.text.includes('Carbo One 1kg Orange'));
+    assert.equal(v.ungroundedAttributes?.length, 1);
+    assert.equal(v.ungroundedAttributes?.[0].support, 'absent');
+    assert.equal(v.ungroundedAttributes?.[0].matchedProduct, 'BSN Creatine 216gr');
+  });
+
+  it('enforce: an unexcisable absent value escalates with hallucinated_product_attribute', async () => {
+    // The prose names the product only partially ("BSN Creatine"), so the sentence-carry check
+    // cannot excise it — the reply must not ship with the fabricated value intact.
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'BSN Creatine është në shije Qershi.',
+      factsUsed: [QERSHI_FACT],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.escalate, true);
+    assert.equal(v.reason, 'hallucinated_product_attribute');
+  });
+
+  it('shadow: observes the absent value without acting — the exact dev-DB replay', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'BSN Creatine 216gr është në shije Qershi.',
+      factsUsed: [QERSHI_FACT],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'shadow',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal(v.escalate, false);
+    assert.equal(v.shadowAttributes?.length, 1);
+    assert.equal(v.shadowAttributes?.[0].support, 'absent');
+    assert.equal(v.shadowAttributes?.[0].value, 'Qershi');
+  });
+});
+
+describe('P1-B membership lane — true values pass', () => {
+  it('a value grounded by the referenced row\'s NAME is supported and untouched', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'Creatine 500gr Qershi ka shije Qershi.',
+      factsUsed: [
+        { type: 'attribute', product_ref: 'Creatine 500gr Qershi', value: 'Qershi' },
+      ],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal(v.escalate, false);
+    assert.equal('ungroundedAttributes' in v, false);
+  });
+
+  it('a value grounded via a dialect variant (çokollatë vs Qokolad) is supported', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'Take a Whey 1kg Qokolad ka shije çokollatë.',
+      factsUsed: [
+        { type: 'attribute', product_ref: 'Take a Whey 1kg Qokolad', value: 'çokollatë' },
+      ],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal(v.escalate, false);
+  });
+
+  it('an "unflavored" value is grounded by the description (pa aromë)', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'BSN Creatine 216gr është pa aromë.',
+      factsUsed: [
+        { type: 'attribute', product_ref: 'BSN Creatine 216gr', value: 'pa aromë' },
+      ],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal(v.escalate, false);
+  });
+});
+
+describe('P1-B membership lane — false-positive controls', () => {
+  it('an UNRESOLVED product_ref keeps tenant scope and never flags an absent value', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'Ky produkt është në shije Qershi.',
+      factsUsed: [
+        { type: 'attribute', product_ref: 'Nje Produkt Qe Nuk Ekziston Fare', value: 'Qershi' },
+      ],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal(v.escalate, false);
+  });
+
+  it('a TRUNCATED index never flags an absent value', async () => {
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'BSN Creatine 216gr është në shije Qershi.',
+      factsUsed: [QERSHI_FACT],
+      deps: attrDeps({ index: membershipIndex(true) }),
+      attributeMode: 'enforce',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal(v.escalate, false);
+  });
+
+  it('a tenant-wide match on ANOTHER row still rescues at tenant scope (unresolved ref)', async () => {
+    // "Qershi" exists in the catalog (Creatine 500gr Qershi) — an unresolved ref must let the
+    // tenant-wide evidence support it rather than judging against nothing.
+    const v = await evaluateConsolidatedGrounding({
+      ...BASE,
+      prose: 'Kreatina është në shije Qershi.',
+      factsUsed: [{ type: 'attribute', product_ref: 'Kreatina jonë', value: 'Qershi' }],
+      deps: attrDeps({ index: membershipIndex() }),
+      attributeMode: 'shadow',
+    });
+    assert.equal(v.status, 'grounded');
+    assert.equal('shadowAttributes' in v, false);
+  });
+
+  it('determinism: 20 identical runs of the acceptance input', async () => {
+    const run = () =>
+      evaluateConsolidatedGrounding({
+        ...BASE,
+        prose: 'BSN Creatine 216gr është në shije Qershi.',
+        factsUsed: [QERSHI_FACT],
+        deps: attrDeps({ index: membershipIndex() }),
+        attributeMode: 'shadow',
+      });
+    const first = JSON.stringify(await run());
+    for (let i = 0; i < 19; i += 1) {
+      assert.equal(JSON.stringify(await run()), first);
+    }
   });
 });

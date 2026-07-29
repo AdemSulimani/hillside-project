@@ -40,9 +40,18 @@ import {
   SUBSTANCE_LEXICON,
   type AttributeClaim,
 } from './attributeClaimLexicon';
+import { expandDialectVariants } from './dialectNormalization';
 
 export type AttributeGateMode = 'off' | 'shadow' | 'enforce';
-export type AttributeSupport = 'supported' | 'contradicted' | 'silent';
+/**
+ * `supported`/`contradicted`/`silent` come from the exclusion lane; `absent` is the membership
+ * lane's flag outcome (P1-B): a declared VALUE claim whose folded form (or dialect variant)
+ * appears nowhere in the referenced product's own evidence. Membership does not have the
+ * silence problem the docblock above describes — the grounding contract requires declared facts
+ * verbatim from the product context, so "absent from the referenced row" means the model bound a
+ * value to the wrong product (cross-product transfer) or invented it outright.
+ */
+export type AttributeSupport = 'supported' | 'contradicted' | 'silent' | 'absent';
 
 /**
  * Whether the claim was judged against ONE resolved catalog row or against the tenant's whole
@@ -200,10 +209,68 @@ export function evaluateAttributeClaim(
 }
 
 /**
+ * MEMBERSHIP predicate for a declared VALUE claim (P1-B — the "Qershi" fabrication class).
+ *
+ * Tri-state: `supported` when the claim's folded form (or a known dialect/content variant —
+ * qokolad↔cokollate↔chocolate, dredhze↔luleshtrydhe) occupies whole-token positions in ANY of the
+ * referenced row's evidence clauses; `absent` when it does not; `silent` when the claim is not
+ * judgeable at all.
+ *
+ * The false-positive discipline mirrors the exclusion lane exactly:
+ *  - tenant scope never flags (rescue-only — an unresolved/ambiguous product_ref must not turn
+ *    into a strip against the wrong row);
+ *  - a truncated index never flags (the missing rows could carry the resolution);
+ *  - unlike the exclusion lane there is deliberately NO `populated` requirement: the product NAME
+ *    is itself a legitimate evidence clause for a value claim ("Creatine 500gr Qershi" grounds
+ *    "Qershi" from its name alone), and post-backfill the structured-attributes clause is too.
+ */
+/**
+ * Phrase variants of a folded value claim: the claim itself plus every single-token dialect
+ * substitution ("shije qokollad" → "shije cokollate", "shije chocolate", …).
+ * `expandDialectVariants` is token-level and additive; one substitution at a time keeps the set
+ * small and deterministic.
+ */
+function valueClaimVariants(folded: string): string[] {
+  const tokens = folded.split(' ').filter(Boolean);
+  const variants = new Set<string>([folded]);
+  tokens.forEach((token, i) => {
+    for (const alt of expandDialectVariants([token])) {
+      if (alt === token) continue;
+      const substituted = [...tokens];
+      substituted[i] = alt;
+      variants.add(substituted.join(' '));
+    }
+  });
+  return [...variants];
+}
+
+export function evaluateValueClaimMembership(
+  claim: AttributeClaim,
+  evidence: AttributeEvidence,
+  scope: AttributeScope,
+): AttributeSupport {
+  if (claim.kind !== 'value' || !claim.membershipEligible) return 'silent';
+
+  const variants = valueClaimVariants(claim.folded);
+  for (const clause of evidence.clauses) {
+    for (const variant of variants) {
+      if (variant && containsPhrase(clause, variant)) return 'supported';
+    }
+  }
+
+  if (scope !== 'product' || evidence.truncated) return 'silent';
+  return 'absent';
+}
+
+/**
  * Fold a set of located claims into the flagged/observed lists.
  *
+ * Claims route by kind: `exclusion` claims through the contradiction-only predicate,
+ * `value` claims through the membership predicate. `contradicted` and `absent` are the two
+ * flaggable outcomes.
+ *
  * `flagged` drives customer-visible action and is empty at every mode except `enforce`.
- * `observed` is every contradiction the lane saw, at every mode except `off` — it is what the
+ * `observed` is every flaggable verdict the lane saw, at every mode except `off` — it is what the
  * shadow window reads. Keeping both means enabling `enforce` changes only whether the list is
  * ACTED on, never what was computed, so a shadow bake-in genuinely predicts the cutover.
  */
@@ -215,8 +282,11 @@ export function decideAttributeVerdicts(input: {
 
   const observed: UngroundedAttribute[] = [];
   for (const item of input.claims) {
-    const support = evaluateAttributeClaim(item.claim, item.evidence, item.scope);
-    if (support !== 'contradicted') continue;
+    const support =
+      item.claim.kind === 'value'
+        ? evaluateValueClaimMembership(item.claim, item.evidence, item.scope)
+        : evaluateAttributeClaim(item.claim, item.evidence, item.scope);
+    if (support !== 'contradicted' && support !== 'absent') continue;
     observed.push({
       value: item.claim.raw,
       proseSpan: item.proseSpan,

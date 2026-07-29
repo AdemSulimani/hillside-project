@@ -16,6 +16,7 @@ import {
   containsPhrase,
   parseAttributeClaim,
   locateClaimInProse,
+  locateValueClaimInProse,
   segmentClauses,
   SUBSTANCE_LEXICON,
   SUPPORT_ONLY_BRIDGE,
@@ -26,6 +27,7 @@ import {
 import {
   decideAttributeVerdicts,
   evaluateAttributeClaim,
+  evaluateValueClaimMembership,
   evidenceForRow,
   tenantWideEvidence,
   type AttributeEvidence,
@@ -431,5 +433,130 @@ describe('lexicon hygiene', () => {
     assert.ok(clauses[0].includes('pa sheqer'));
     // The list stays in ONE clause, so the leading "pa" still governs lactose.
     assert.ok(clauses[0].includes('laktoze'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1-B. MEMBERSHIP predicate for declared VALUE claims (the "Qershi" class).
+//
+// Runtime evidence (dev DB, 2026-07-22): "BSN Creatine është në shije Qershi." shipped with the
+// model's own facts_used declaring {type:'attribute', value:'Qershi', product_ref:'BSN Creatine
+// 216gr'} while BSN's real description says "pa aromë" (unflavored). The value was transferred
+// from sibling rows ("Creatine 500gr Qershi") present in the same retrieval window.
+// ---------------------------------------------------------------------------
+
+/** BSN Creatine 216gr — real description shape: explicitly UNFLAVORED. */
+const BSN_CREATINE =
+  'BSN Creatine 216gr\nKreatina\n' +
+  'Pluhur kreatine lehtësisht i tretshëm dhe pa aromë, mund ta kombinoni me pluhura proteinash.';
+
+/** Flavor lives only in the NAME — the dominant real-catalog shape (78/257 names). */
+const CREATINE_QERSHI = 'Creatine 500gr Qershi\nKreatina';
+
+const judgeValue = (value: string, source: string, scope: 'product' | 'tenant' = 'product') =>
+  evaluateValueClaimMembership(parseAttributeClaim(value), evidenceFrom(source), scope);
+
+describe('parseAttributeClaim — claim kinds (P1-B)', () => {
+  it('an exclusion claim keeps kind exclusion and stays out of the membership lane', () => {
+    const claim = parseAttributeClaim('pa sheqer');
+    assert.equal(claim.kind, 'exclusion');
+    assert.equal(claim.eligible, true);
+    assert.equal(claim.membershipEligible, false);
+  });
+
+  it('a concrete value claim is kind value and membership-eligible', () => {
+    for (const v of ['Qershi', 'shije vanilje', '1kg', '216gr']) {
+      const claim = parseAttributeClaim(v);
+      assert.equal(claim.kind, 'value', v);
+      assert.equal(claim.eligible, false, v);
+      assert.equal(claim.membershipEligible, true, v);
+    }
+  });
+
+  it('letterless or too-short values are not membership-eligible (mistyped prices, fragments)', () => {
+    for (const v of ['18.00', '0', 'ok', '  ']) {
+      assert.equal(parseAttributeClaim(v).membershipEligible, false, v);
+    }
+  });
+});
+
+describe('locateValueClaimInProse', () => {
+  it('locates a value the reply actually states', () => {
+    const claim = parseAttributeClaim('Qershi');
+    assert.equal(locateValueClaimInProse(claim, foldDialect('BSN Creatine është në shije Qershi.')), 'qershi');
+  });
+
+  it('returns null when the reply never says the value — null can never strip', () => {
+    const claim = parseAttributeClaim('Qershi');
+    assert.equal(locateValueClaimInProse(claim, foldDialect('Çmimi është 25 euro.')), null);
+  });
+
+  it('never locates an exclusion claim (that lane has its own locator)', () => {
+    const claim = parseAttributeClaim('pa sheqer');
+    assert.equal(locateValueClaimInProse(claim, foldDialect('Ky produkt është pa sheqer.')), null);
+  });
+});
+
+describe('evaluateValueClaimMembership', () => {
+  it('ABSENT: "Qershi" against the real BSN row — the acceptance fabrication', () => {
+    assert.equal(judgeValue('Qershi', BSN_CREATINE), 'absent');
+  });
+
+  it('SUPPORTED: the referenced row grounds the value from its NAME alone', () => {
+    assert.equal(judgeValue('Qershi', CREATINE_QERSHI), 'supported');
+  });
+
+  it('SUPPORTED: description grounds an unflavored value ("pa aromë")', () => {
+    assert.equal(judgeValue('pa aromë', BSN_CREATINE), 'supported');
+  });
+
+  it('SUPPORTED: dialect variants bridge spelling families (çokollatë vs Qokolad)', () => {
+    const row = 'Take a Whey 1kg Qokolad\nProteina';
+    assert.equal(judgeValue('çokollatë', row), 'supported');
+  });
+
+  it('SILENT at tenant scope — an unresolved ref can never flag', () => {
+    assert.equal(judgeValue('Qershi', BSN_CREATINE, 'tenant'), 'silent');
+  });
+
+  it('SILENT on a truncated index — a partial view can never flag', () => {
+    const evidence = { ...evidenceFrom(BSN_CREATINE), truncated: true };
+    assert.equal(evaluateValueClaimMembership(parseAttributeClaim('Qershi'), evidence, 'product'), 'silent');
+  });
+
+  it('SILENT for claims that are not membership-eligible', () => {
+    assert.equal(judgeValue('18.00', BSN_CREATINE), 'silent');
+  });
+});
+
+describe('decideAttributeVerdicts — membership routing (P1-B)', () => {
+  const absentClaim = {
+    claim: parseAttributeClaim('Qershi'),
+    productRef: 'BSN Creatine 216gr',
+    proseSpan: 'qershi',
+    evidence: evidenceFrom(BSN_CREATINE),
+    matchedProduct: 'BSN Creatine 216gr',
+    scope: 'product' as const,
+  };
+
+  it('shadow observes an absent value without flagging', () => {
+    const { flagged, observed } = decideAttributeVerdicts({ claims: [absentClaim], mode: 'shadow' });
+    assert.equal(flagged.length, 0);
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].support, 'absent');
+    assert.equal(observed[0].value, 'Qershi');
+  });
+
+  it('enforce flags the same computation shadow observed', () => {
+    const { flagged, observed } = decideAttributeVerdicts({ claims: [absentClaim], mode: 'enforce' });
+    assert.deepEqual(flagged, observed);
+    assert.equal(flagged[0].support, 'absent');
+  });
+
+  it('a supported value claim is never observed', () => {
+    const supportedClaim = { ...absentClaim, evidence: evidenceFrom(CREATINE_QERSHI) };
+    const { flagged, observed } = decideAttributeVerdicts({ claims: [supportedClaim], mode: 'enforce' });
+    assert.equal(flagged.length, 0);
+    assert.equal(observed.length, 0);
   });
 });

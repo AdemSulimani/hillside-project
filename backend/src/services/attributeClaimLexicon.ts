@@ -130,16 +130,38 @@ export const NON_ASSERTIVE_FRAMES: readonly string[] = [
   'ndjeshem ndaj',
 ];
 
+/**
+ * The two judgeable claim families (P3-1 + P1-B):
+ *  - 'exclusion' — "pa sheqer" / "sugar-free": judged by the contradiction-only predicate
+ *    (`evaluateAttributeClaim`), where SILENCE never flags — see the module docblock.
+ *  - 'value'     — a concrete attribute VALUE ("Qershi", "1kg", "shije vanilje"): judged by the
+ *    MEMBERSHIP predicate (`evaluateValueClaimMembership`). Membership does not have the silence
+ *    problem: the grounding contract requires declared facts to be taken verbatim from the product
+ *    context, so a declared value absent from the referenced product's own evidence is a
+ *    fabrication signal by construction (the "BSN Creatine është në shije Qershi" class, where the
+ *    model transferred a sibling product's flavor and self-declared it in facts_used).
+ */
+export type ClaimKind = 'exclusion' | 'value';
+
 export interface AttributeClaim {
   /** The value exactly as the model declared it. */
   raw: string;
   /** `foldDialect(raw)` — the form every comparison actually uses. */
   folded: string;
   polarity: ClaimPolarity;
+  kind: ClaimKind;
   /** Canonical substance keys the claim is about, in lexicon order. */
   substances: string[];
   /** True only for an exclusion claim over at least one known substance. */
   eligible: boolean;
+  /**
+   * True for a 'value' claim concrete enough to membership-check: at least 3 folded chars and at
+   * least one letter. The letter requirement keeps mislabeled bare numerics (a price "18.00"
+   * declared as type:'attribute' folds to "18 00") out of the membership lane — a bare number
+   * absent from the evidence clauses is far more likely a mistyped price than a fabricated
+   * attribute, and flagging it would be noise.
+   */
+  membershipEligible: boolean;
 }
 
 /** Whole-token containment: `needle` must occupy complete token positions inside `haystack`. */
@@ -208,12 +230,15 @@ export function parseAttributeClaim(value: string): AttributeClaim {
   const folded = foldDialect(raw);
   const substances = substancesIn(folded);
   const exclusion = hasExclusionMarker(folded) && substances.length > 0;
+  const kind: ClaimKind = exclusion ? 'exclusion' : 'value';
   return {
     raw,
     folded,
     polarity: exclusion ? 'exclusion' : 'other',
+    kind,
     substances,
     eligible: exclusion && folded.length > 0,
+    membershipEligible: kind === 'value' && folded.length >= 3 && /\p{L}/u.test(folded),
   };
 }
 
@@ -226,6 +251,15 @@ export function parseAttributeClaim(value: string): AttributeClaim {
  */
 export function locateClaimInProse(claim: AttributeClaim, proseFolded: string): string | null {
   if (!claim.eligible || !claim.folded) return null;
+  return containsPhrase(proseFolded, claim.folded) ? claim.folded : null;
+}
+
+/**
+ * `locateClaimInProse` for the membership ('value') lane — same reply-must-say-it narrowing,
+ * gated on `membershipEligible` instead of the exclusion-only `eligible`.
+ */
+export function locateValueClaimInProse(claim: AttributeClaim, proseFolded: string): string | null {
+  if (!claim.membershipEligible || !claim.folded) return null;
   return containsPhrase(proseFolded, claim.folded) ? claim.folded : null;
 }
 

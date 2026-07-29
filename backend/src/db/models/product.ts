@@ -896,6 +896,12 @@ export interface CatalogAttributeSourceRow {
   category: string | null;
   description: string | null;
   usage_description: string | null;
+  brand: string | null;
+  flavor: string | null;
+  size: string | null;
+  color: string | null;
+  variant: string | null;
+  weight: string | null;
 }
 
 /**
@@ -918,7 +924,9 @@ export async function listActiveCatalogAttributeRowsForTenant(
   rowLimit: number,
 ): Promise<CatalogAttributeSourceRow[]> {
   const { rows } = await pool.query<CatalogAttributeSourceRow>(
-    `SELECT id, name, category, description, usage_description FROM products
+    `SELECT id, name, category, description, usage_description,
+            brand, flavor, size, color, variant, weight
+     FROM products
      WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
      ORDER BY name ASC
      LIMIT $2::int`,
