@@ -183,13 +183,32 @@ export function mapMessageRow(row: Message): Message {
  * `messages` is expected oldest-first (as returned by `findMessagesByConversation`).
  */
 export function collectRecentlyDiscussedProductIds(messages: Message[]): string[] {
+  return collectRecentlyDiscussedProductContext(messages).ids;
+}
+
+/**
+ * Like {@link collectRecentlyDiscussedProductIds}, but also returns the TEXT of the AI
+ * message the ids came from. `product_ids` persists the whole fused retrieval pool
+ * (10–25 rows), while the customer has only ever SEEN the products the reply wrote out —
+ * callers that scope follow-up behaviour to "what we discussed" need the reply text to
+ * tell those apart (live bug: "A ka najfar shije a jo" after "Po, kemi BSN Creatine
+ * 216gr…" ran the gap machinery over all 10 pooled creatines and escalated "shija" for
+ * products the customer never saw).
+ */
+export function collectRecentlyDiscussedProductContext(messages: Message[]): {
+  ids: string[];
+  sourceText: string | null;
+} {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.sent_by !== 'ai') continue;
     const ids = Array.isArray(msg.product_ids) ? msg.product_ids : [];
-    if (ids.length > 0) return [...ids];
+    if (ids.length > 0) {
+      const text = (msg.content ?? '').trim();
+      return { ids: [...ids], sourceText: text.length > 0 ? text : null };
+    }
   }
-  return [];
+  return { ids: [], sourceText: null };
 }
 
 /** Snapshot text + first media URL from a stored message for reply_to_* columns. */

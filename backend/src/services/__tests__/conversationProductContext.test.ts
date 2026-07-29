@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  collectRecentlyDiscussedProductContext,
   collectRecentlyDiscussedProductIds,
   type Message,
 } from '../../db/models/message';
@@ -124,5 +125,48 @@ describe('isContextOnlyFollowUp — informal / plural / deictic price follow-ups
       false,
     );
     assert.equal(isContextOnlyFollowUp('a keni mass gainer 3kg'), false);
+  });
+});
+
+describe('collectRecentlyDiscussedProductContext (ids + source reply text)', () => {
+  it('returns the ids AND the text of the AI message they came from', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'A keni bsn creatine vlla edhe sa kushton', sent_by: 'customer' }),
+      mockMessage({
+        content: 'Po, kemi BSN Creatine 216gr dhe çmimi është €25.00.',
+        sent_by: 'ai',
+        product_ids: ['A', 'B', 'C'],
+      }),
+      mockMessage({ content: 'A ka najfar shije a jo', sent_by: 'customer' }),
+    ];
+    const ctx = collectRecentlyDiscussedProductContext(history);
+    assert.deepEqual(ctx.ids, ['A', 'B', 'C']);
+    assert.equal(ctx.sourceText, 'Po, kemi BSN Creatine 216gr dhe çmimi është €25.00.');
+  });
+
+  it('sourceText is null when the source AI message has no text (image-only reply)', () => {
+    const history: Message[] = [
+      mockMessage({ content: null, sent_by: 'ai', product_ids: ['A'] }),
+      mockMessage({ content: 'faleminderit', sent_by: 'customer' }),
+    ];
+    const ctx = collectRecentlyDiscussedProductContext(history);
+    assert.deepEqual(ctx.ids, ['A']);
+    assert.equal(ctx.sourceText, null);
+  });
+
+  it('skips AI messages without product_ids, matching the ids helper exactly', () => {
+    const history: Message[] = [
+      mockMessage({ content: 'Mass gainer, Mega mass', sent_by: 'ai', product_ids: ['A', 'B'] }),
+      mockMessage({ content: 'ok', sent_by: 'customer' }),
+      mockMessage({ content: 'Së shpejti do t\'ju kontaktojë një specialist.', sent_by: 'ai', product_ids: [] }),
+    ];
+    const ctx = collectRecentlyDiscussedProductContext(history);
+    assert.deepEqual(ctx.ids, collectRecentlyDiscussedProductIds(history));
+    assert.equal(ctx.sourceText, 'Mass gainer, Mega mass');
+  });
+
+  it('returns empty when no AI message surfaced products', () => {
+    const history: Message[] = [mockMessage({ content: 'hi', sent_by: 'customer' })];
+    assert.deepEqual(collectRecentlyDiscussedProductContext(history), { ids: [], sourceText: null });
   });
 });
