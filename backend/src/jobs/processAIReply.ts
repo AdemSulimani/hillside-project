@@ -884,6 +884,22 @@ const GAP_FOCAL_PRODUCT_SCOPE_MODE = ((): 'off' | 'shadow' | 'on' => {
 })();
 
 /**
+ * P0-1 (description investigation): evidence set for the usage-question guards.
+ * Legacy judges usage_description ALONE (U1) or escalates + pauses on a NULL
+ * usage_description having read no evidence at all (U2 / U3's no-text branch) —
+ * and by setting usageEscalated it suppresses the gap gate that WOULD have read
+ * description, structured attributes and packaging details. Widened evidence is
+ * buildProductKnowledgeContext — the exact context the gap assessor reads — so
+ * the guards and the gate judge the same facts. `shadow` records the widened
+ * verdict as a `usage_guard_evidence` ledger decision while legacy acts.
+ * Per-call binding: read on every use, no module-load freeze.
+ */
+const usageGuardEvidenceMode = (): 'legacy' | 'shadow' | 'on' => {
+  const v = knobString('USAGE_GUARD_EVIDENCE').trim().toLowerCase();
+  return v === 'on' || v === 'shadow' ? v : 'legacy';
+};
+
+/**
  * P2-2 (RC-22): when ON, the AI-order commission human-participation check anchors on the stored
  * consent-inbound timestamp instead of NOW() and bounds the window at that timestamp, so a retry /
  * late run (or a human reply during retry latency) cannot flip is_commissionable. Defaults OFF:
@@ -3571,9 +3587,110 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   let usageEscalated = false;
   let usageQuestionUnanswered: boolean | null = null;
 
+  // P0-1 (description investigation): widened evidence for the usage guards — the same
+  // knowledge context the gap gate reads (description + structured attrs + packaging
+  // reads), so "answerable" is judged over what the catalog actually knows instead of
+  // usage_description alone (U1) or nothing at all (U2/U3, which escalated on NULL).
+  // Built once per turn, only when a usage question needs it. Best-effort: a build
+  // failure falls back to legacy evidence, never blocks the guards.
+  const usageGuardMode = usageGuardEvidenceMode();
+  let usageGuardEvidence: string | null = null;
+  if (usageGuardMode !== 'legacy' && usageQuestionIntent && usageCandidates.length > 0) {
+    try {
+      let evidence = buildProductKnowledgeContext(usageCandidates);
+      try {
+        const imageDerived = await getProductImageDerivedContext(tenantId, usageCandidates);
+        if (imageDerived.block) {
+          evidence += `\n\nVerified packaging details read from product images (treat as available, reliable catalog knowledge when answering):\n${imageDerived.block}`;
+        }
+      } catch (err) {
+        console.warn('[ai.reply] usage guard packaging context failed — using catalog text only', {
+          conversationId,
+          tenantId,
+          err,
+        });
+      }
+      usageGuardEvidence = evidence.trim() ? evidence : null;
+    } catch (err) {
+      console.warn('[ai.reply] usage guard evidence build failed — falling back to legacy evidence', {
+        conversationId,
+        tenantId,
+        err,
+      });
+    }
+  }
+
+  /**
+   * Judge a usage question against the mode-selected evidence. On the widened lane the
+   * verdict is recorded as a `usage_guard_evidence` ledger decision; in shadow the
+   * widened classifier runs additionally (record-only) while the legacy verdict acts.
+   * Callers guarantee usageDescription is non-null on the legacy lane.
+   */
+  const judgeUsageQuestionUnanswered = async (site: 'u1' | 'u3'): Promise<boolean> => {
+    if (usageGuardMode === 'on' && usageGuardEvidence) {
+      const widened = await isUsageQuestionUnanswered(inboundText, usageGuardEvidence, 'catalog');
+      recordDecision({
+        classifier: 'usage_guard_evidence',
+        raw_score: null,
+        threshold: null,
+        boost_applied: false,
+        passed: !widened,
+        branch: `${site}:on:widened=${widened}`,
+      });
+      return widened;
+    }
+    const legacy = await isUsageQuestionUnanswered(inboundText, usageDescription as string);
+    if (usageGuardMode === 'shadow' && usageGuardEvidence) {
+      try {
+        const widened = await isUsageQuestionUnanswered(inboundText, usageGuardEvidence, 'catalog');
+        recordDecision({
+          classifier: 'usage_guard_evidence',
+          raw_score: null,
+          threshold: null,
+          boost_applied: false,
+          passed: !widened,
+          branch: `${site}:shadow:legacy=${legacy}:widened=${widened}`,
+        });
+      } catch (err) {
+        console.warn('[ai.reply] shadow widened usage classifier failed', { conversationId, tenantId, err });
+      }
+    }
+    return legacy;
+  };
+
+  /**
+   * U2/U3 no-usage-text lane: legacy escalates on sight (usage_description is NULL).
+   * Widened lane asks whether the rest of the catalog evidence answers the question;
+   * returns true when the escalation should be SKIPPED under `on`. Fail-closed: a
+   * classifier error keeps the legacy escalate-on-sight behaviour.
+   */
+  const widenedEvidenceAnswersUsageQuestion = async (site: 'u2' | 'u3'): Promise<boolean> => {
+    if (usageGuardMode === 'legacy' || !usageGuardEvidence) return false;
+    try {
+      const widened = await isUsageQuestionUnanswered(inboundText, usageGuardEvidence, 'catalog');
+      recordDecision({
+        classifier: 'usage_guard_evidence',
+        raw_score: null,
+        threshold: null,
+        boost_applied: false,
+        passed: !widened,
+        branch: `${site}:${usageGuardMode}:legacy=true:widened=${widened}`,
+      });
+      return usageGuardMode === 'on' && !widened;
+    } catch (err) {
+      console.warn('[ai.reply] widened usage evidence classifier failed — escalating per legacy', {
+        conversationId,
+        tenantId,
+        site,
+        err,
+      });
+      return false;
+    }
+  };
+
   if (usageRelated && usageDescription && !usedVerbatimUsageDescription) {
     try {
-      const unanswered = await isUsageQuestionUnanswered(inboundText, usageDescription);
+      const unanswered = await judgeUsageQuestionUnanswered('u1');
       usageQuestionUnanswered = unanswered;
       if (unanswered) {
         const client = await pool.connect();
@@ -3629,7 +3746,18 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
   // question (flavor, size, color, etc.) — those are answered from structured catalog
   // fields, not from usage_description, so missing usage text is expected and should
   // not trigger a usage escalation.
+  // P0-1: under USAGE_GUARD_EVIDENCE=on, "no usage_description" is no longer grounds to
+  // escalate on sight — the widened classifier first checks whether the description,
+  // structured attributes or packaging reads answer the question (the dominant premature
+  // usage_question_unanswered class: 5 of 257 dev rows have usage text, 219 have
+  // description). Escalate-on-sight remains when the evidence context is entirely empty.
   if (!usageEscalated && usageQuestionIntent && !attributeIntent.is_attribute_question && !usageDescription && !isOosCannedReply) {
+    if (await widenedEvidenceAnswersUsageQuestion('u2')) {
+      console.info('[ai.reply] Skipping usage escalation: widened catalog evidence answers the question (U2)', {
+        conversationId,
+        tenantId,
+      });
+    } else {
     const client = await pool.connect();
     let alert: AIAlert | undefined;
     try {
@@ -3669,6 +3797,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       });
       socketService.emitConversationUpdated(tenantId, conversationId);
     }
+    }
   }
 
   if (!usageEscalated && isUsageEscalationHoldingMessage(finalReplyText)) {
@@ -3680,7 +3809,7 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     } else if (usageDescription && usageQuestionIntent) {
       if (usageQuestionUnanswered === null) {
         try {
-          usageQuestionUnanswered = await isUsageQuestionUnanswered(inboundText, usageDescription);
+          usageQuestionUnanswered = await judgeUsageQuestionUnanswered('u3');
         } catch (err) {
           console.warn('[ai.reply] usage unanswered classifier failed in fallback guard', {
             conversationId,
@@ -3736,6 +3865,14 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
           socketService.emitConversationUpdated(tenantId, conversationId);
         }
       }
+    } else if (await widenedEvidenceAnswersUsageQuestion('u3')) {
+      // P0-1: no usage_description, but the widened catalog evidence answers the
+      // question — mirror the U3 covered-question skip above (model text ships, no
+      // alert, no pause) instead of legacy's escalate-on-sight.
+      console.info('[ai.reply] Skipping usage escalation fallback: widened catalog evidence answers the question (U3)', {
+        conversationId,
+        tenantId,
+      });
     } else {
     const client = await pool.connect();
     let alert: AIAlert | undefined;

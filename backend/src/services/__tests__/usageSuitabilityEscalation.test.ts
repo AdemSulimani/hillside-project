@@ -703,3 +703,103 @@ describe('classifyFollowUpInvitationInReply fast-path contract (pattern parity)'
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7.  P0-1 (USAGE_GUARD_EVIDENCE): Guard U2 widened-evidence contract
+//
+//     Legacy U2 escalated + paused whenever a usage question arrived and
+//     usage_description was NULL — having read NO evidence at all (never the
+//     description column, structured attributes, or packaging reads) — and by
+//     setting usageEscalated it suppressed the gap gate that WOULD have read
+//     them. The widened lane first asks the classifier whether the full product
+//     knowledge context answers the question, and escalates only on "yes,
+//     unanswered". This mirror encodes the exact decision shape wired in
+//     processAIReply (the real path delegates the verdict to the LLM).
+// ---------------------------------------------------------------------------
+
+describe('P0-1 Guard U2 widened-evidence decision contract', () => {
+  /** Mirrors the U2 decision after the P0-1 change. Returns true when U2 escalates. */
+  function u2Escalates(args: {
+    mode: 'legacy' | 'shadow' | 'on';
+    usageQuestionIntent: boolean;
+    isAttributeQuestion: boolean;
+    usageDescription: string | null;
+    isOosCannedReply: boolean;
+    /** null = no evidence context could be built (empty catalog text). */
+    widenedEvidence: string | null;
+    /** The widened classifier verdict; null = classifier errored. */
+    widenedUnanswered: boolean | null;
+  }): boolean {
+    // Preconditions unchanged from legacy.
+    if (!args.usageQuestionIntent || args.isAttributeQuestion) return false;
+    if (args.usageDescription || args.isOosCannedReply) return false;
+    // Widened lane: only `on` + available evidence + a clean "answered" verdict skips.
+    if (args.mode === 'on' && args.widenedEvidence && args.widenedUnanswered === false) {
+      return false;
+    }
+    // Everything else — legacy mode, shadow mode, empty evidence, "unanswered"
+    // verdict, or a classifier error — keeps the escalate-on-sight behaviour.
+    return true;
+  }
+
+  const base = {
+    usageQuestionIntent: true,
+    isAttributeQuestion: false,
+    usageDescription: null as string | null,
+    isOosCannedReply: false,
+    widenedEvidence: 'Product: X\nDescription: Take one scoop daily after training.' as string | null,
+  };
+
+  it('ON + evidence answers the question → no escalation (the premature-alert fix)', () => {
+    assert.equal(
+      u2Escalates({ ...base, mode: 'on', widenedUnanswered: false }),
+      false,
+    );
+  });
+
+  it('ON + evidence does NOT answer → still escalates (fail-closed preserved)', () => {
+    assert.equal(u2Escalates({ ...base, mode: 'on', widenedUnanswered: true }), true);
+  });
+
+  it('ON + classifier error → escalates per legacy (fail-closed on degradation)', () => {
+    assert.equal(u2Escalates({ ...base, mode: 'on', widenedUnanswered: null }), true);
+  });
+
+  it('ON + no evidence context at all → escalate-on-sight remains', () => {
+    assert.equal(
+      u2Escalates({ ...base, mode: 'on', widenedEvidence: null, widenedUnanswered: null }),
+      true,
+    );
+  });
+
+  it('SHADOW acts like legacy even when the widened verdict says answered', () => {
+    assert.equal(u2Escalates({ ...base, mode: 'shadow', widenedUnanswered: false }), true);
+  });
+
+  it('LEGACY is byte-identical: escalates whenever usage_description is NULL', () => {
+    assert.equal(u2Escalates({ ...base, mode: 'legacy', widenedUnanswered: null }), true);
+  });
+
+  it('attribute questions stay exempt in every mode', () => {
+    for (const mode of ['legacy', 'shadow', 'on'] as const) {
+      assert.equal(
+        u2Escalates({ ...base, mode, isAttributeQuestion: true, widenedUnanswered: false }),
+        false,
+      );
+    }
+  });
+
+  it('a present usage_description keeps U2 out of scope in every mode (U1 owns it)', () => {
+    for (const mode of ['legacy', 'shadow', 'on'] as const) {
+      assert.equal(
+        u2Escalates({
+          ...base,
+          mode,
+          usageDescription: 'Take 2 scoops daily.',
+          widenedUnanswered: false,
+        }),
+        false,
+      );
+    }
+  });
+});

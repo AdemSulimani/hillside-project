@@ -570,6 +570,65 @@ export const KNOBS: readonly KnobSpec[] = [
       '(expandProductsForAttributeQuery); category-wide turns keep the full window. `shadow` ' +
       'records the would-be scope as a gap_scope ledger decision without changing behaviour.',
   },
+  {
+    key: 'CATALOG_TEXT_EVIDENCE_MODE',
+    kind: 'enum',
+    values: ['off', 'shadow', 'on'],
+    requiredness: { kind: 'optional', default: 'off' },
+    binding: 'per-call',
+    description:
+      'Evidence-aware per-product catalog text rendering: off | shadow (compute + log the ' +
+      'would-be modes, render legacy) | on (question-relevant products render full/extracted ' +
+      'description and usage text instead of the blind 200-char brief slice)',
+    rationale:
+      'The generator reads descriptions truncated to a query-agnostic 200-char prefix slice ' +
+      'unless a fixed-vocabulary regex (isProductDescriptionQuestion) fires — so a factual ' +
+      'question with no cue word ("a eshte pa sheqer?", "is it gluten free?") gets a prompt ' +
+      'from which the answer is physically absent. Measured: 187 of 219 dev descriptions ' +
+      'exceed 200 chars (avg 937), and the recorded sugar-question turn had its answer at ' +
+      'char ~1150 — the reply only survived because the gap assessor (which reads UNCAPPED ' +
+      'text) replaced it. This knob makes the escape hatch evidence-aware: a folded question ' +
+      'token found in a product\'s text BEYOND the brief boundary escalates that product to ' +
+      'full mode (top-K, char-budgeted; overflow degrades to extracted sentences, never back ' +
+      'to the blind prefix). Deterministic — no extra LLM call on the critical path.',
+  },
+  num('CATALOG_FULL_TEXT_MAX_PRODUCTS', 'int', 3, { min: 1, max: 25 }, 'per-call',
+    'Max products per turn escalated to full catalog text by the evidence-aware mode'),
+  num('CATALOG_FULL_TEXT_TURN_BUDGET_CHARS', 'int', 6000, { min: 1000, max: 30_000 }, 'per-call',
+    'Per-turn char budget for evidence-escalated full catalog text (overflow degrades to extracted sentences)', {
+      rationale:
+        'Uncapped full mode is 25 products x (5k description + 10k usage) ≈ 375k chars — an order ' +
+        'of magnitude over PROMPT_ASSEMBLY_MAX_CHARS. 6k ≈ 18% of the 34k budget: enough for ' +
+        '~3 typical dev-catalog descriptions (avg 937 chars), safe for the incoming 5k-product ' +
+        'tenant whose per-turn retrieval window is still ≤25 products.',
+    }),
+  num('CATALOG_DESCRIPTION_BRIEF_MAX_CHARS', 'int', 200, { min: 100, max: 1000 }, 'frozen',
+    'Char cap for the brief (default) catalog description line'),
+  num('CATALOG_USAGE_BRIEF_MAX_CHARS', 'int', 200, { min: 100, max: 1000 }, 'frozen',
+    'Char cap for the brief (default) catalog usage line'),
+  {
+    key: 'USAGE_GUARD_EVIDENCE',
+    kind: 'enum',
+    values: ['legacy', 'shadow', 'on'],
+    requiredness: { kind: 'optional', default: 'legacy' },
+    binding: 'per-call',
+    description:
+      'Evidence set for the usage-question guards (U1/U2/U3): legacy (usage_description only; ' +
+      'escalate on NULL) | shadow (widened verdict computed + ledgered, legacy acts) | on (judge ' +
+      'against the full product knowledge context: description, attributes, packaging reads)',
+    rationale:
+      'The usage guards predate the gap gate and read a narrower evidence set than the rest of ' +
+      'the escalation machinery: U1 judges usage_description ALONE and U2/U3 escalate + pause ' +
+      'on a NULL usage_description with NO evidence read at all — never consulting description, ' +
+      'structured attributes, or image-derived packaging details — and by setting usageEscalated ' +
+      'they also suppress the downstream gap gate that WOULD read them. Measured on the 257-row ' +
+      'dev catalog only 5 rows have usage_description while 219 have description, so U2 fires on ' +
+      'virtually every usage question the description could answer (all 7 historical ' +
+      'usage_question_unanswered alerts are NULL-usage rows). Widened evidence = ' +
+      'buildProductKnowledgeContext — the exact context the gap assessor reads — so the guards ' +
+      'and the gate finally judge the same facts. The classifier prompt stays fail-closed ' +
+      '(rule 4: when in doubt, escalate); `shadow` measures the flip rate before `on` acts.',
+  },
   bool('SENSITIVE_PATH_FAIL_CLOSED', false, 'Sensitive-intent path fails closed (P0-4)', { binding: 'per-call' }),
   bool('RATE_LIMIT_COUNT_DELIVERED_ONLY', false, 'Count only delivered replies against the rate limit (P0-6/RC-18)', { binding: 'per-call' }),
   {

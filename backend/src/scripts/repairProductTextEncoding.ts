@@ -104,6 +104,11 @@ async function main(): Promise<void> {
       }
       idx += 1;
     }
+    // Repaired text invalidates the stored embedding-input hash so the 6h
+    // reconcile re-embeds unconditionally instead of racing a hash comparison.
+    // The vector itself is kept — serving the pre-repair embedding until the
+    // re-embed lands beats blinding semantic retrieval for the whole window.
+    setClauses.push('embedding_input_hash = NULL');
     setClauses.push('updated_at = now()');
 
     await pool.query(

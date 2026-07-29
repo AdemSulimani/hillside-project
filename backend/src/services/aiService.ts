@@ -122,7 +122,10 @@ import {
   type ProductAttributeIntentResult,
 } from './productAttributeIntentService';
 import {
+  computeCatalogTextEvidence,
+  formatCatalogDescriptionExcerpts,
   formatCatalogDescriptionLine,
+  formatCatalogUsageExcerpts,
   formatCatalogUsageLine,
   isProductDescriptionQuestion,
   isProductRecommendationOrComparisonQuestion,
@@ -130,6 +133,8 @@ import {
   PRODUCT_DESCRIPTION_CONCISE_APPEND,
   PRODUCT_DESCRIPTION_TARGETED_APPEND,
   SHORTEST_ANSWER_APPEND,
+  type CatalogTextDecision,
+  type CatalogTextEvidenceResult,
   type CatalogTextMode,
 } from './productDescriptionPromptService';
 import {
@@ -2403,6 +2408,13 @@ export type FormatProductCatalogOptions = {
   /** Brief summaries by default to prevent the model from copying long descriptions. */
   descriptionMode?: CatalogTextMode;
   usageDescriptionMode?: CatalogTextMode | 'omit';
+  /**
+   * P0-2: per-product evidence-aware render decisions (product id → decision).
+   * A decision escalates that product's field to 'full' or 'extract' (brief +
+   * verbatim overlapping sentences); products without a decision keep the
+   * turn-global modes above. A 'full' turn-global mode always wins.
+   */
+  textDecisions?: Map<string, CatalogTextDecision>;
   /** Customer photo did not match any catalog product — do not ask for more details. */
   productNotInCatalog?: boolean;
 };
@@ -2459,9 +2471,25 @@ export function formatProductCatalog(
           parts.push('  Discounted price: not configured (no discount available)');
         }
       }
-      const descriptionLine = formatCatalogDescriptionLine(p.description, descriptionMode);
+      const decision = options?.textDecisions?.get(p.id);
+      const effectiveDescriptionMode: CatalogTextMode =
+        descriptionMode === 'full' || decision?.descriptionMode === 'full' ? 'full' : 'brief';
+      const descriptionLine = formatCatalogDescriptionLine(p.description, effectiveDescriptionMode);
       if (descriptionLine) parts.push(descriptionLine);
-      parts.push(...formatCatalogUsageLine(p.usage_description, usageDescriptionMode));
+      if (effectiveDescriptionMode !== 'full' && decision?.descriptionMode === 'extract') {
+        const excerptLine = formatCatalogDescriptionExcerpts(decision.descriptionExcerpts ?? []);
+        if (excerptLine) parts.push(excerptLine);
+      }
+      const effectiveUsageMode: CatalogTextMode | 'omit' =
+        usageDescriptionMode === 'full' || decision?.usageMode === 'full'
+          ? 'full'
+          : decision?.usageMode === 'extract'
+            ? 'brief'
+            : usageDescriptionMode;
+      parts.push(...formatCatalogUsageLine(p.usage_description, effectiveUsageMode));
+      if (effectiveUsageMode !== 'full' && decision?.usageMode === 'extract') {
+        parts.push(...formatCatalogUsageExcerpts(decision.usageExcerpts ?? []));
+      }
       if (p.category) parts.push(`  Category: ${p.category}`);
       const attrParts: string[] = [];
       if (p.flavor) attrParts.push(`Flavor: ${p.flavor}`);
@@ -2680,16 +2708,7 @@ export function buildRetailAISystemPrompt(
  */
 export { buildRestrictionsFooter };
 
-export async function isUsageQuestionUnanswered(
-  inboundMessage: string,
-  productUsageDescription: string,
-): Promise<boolean> {
-  const completion = await openai.chat.completions.create({
-    model: OPENAI_CLASSIFIER_MODEL,
-    messages: [
-      {
-        role: 'system',
-        content: `You are a strict semantic classifier. Determine whether the product usage description SPECIFICALLY AND DIRECTLY answers the customer's question.
+const USAGE_UNANSWERED_SYSTEM_PROMPT = `You are a strict semantic classifier. Determine whether the product usage description SPECIFICALLY AND DIRECTLY answers the customer's question.
 
 The text may be in Albanian (Shqip) or English, including informal spellings or missing diacritics.
 
@@ -2716,11 +2735,66 @@ Examples:
 - Customer: "Is this suitable for me if I don't exercise?" / Description says "Best used with regular training" → {"is_unanswered": true}
 - Customer: "Can I use this without exercising?" / Description says "Take daily as directed" → {"is_unanswered": true}
 
-Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`,
+Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`;
+
+/**
+ * P0-1 widened lane (USAGE_GUARD_EVIDENCE): same strict contract, but the evidence is
+ * the full catalog knowledge context (name, category, price, structured attributes,
+ * Description:, Usage:, tags, verified packaging reads) rather than usage_description
+ * alone — a usage answer stated in the description column counts as answered. The
+ * fail-closed rule (4) is unchanged: silence still escalates.
+ */
+const USAGE_UNANSWERED_CATALOG_EVIDENCE_SYSTEM_PROMPT = `You are a strict semantic classifier. Determine whether the CATALOG EVIDENCE for the product(s) SPECIFICALLY AND DIRECTLY answers the customer's question about product usage.
+
+The catalog evidence may contain product name, category, price, structured attributes, a "Description:" section, a "Usage:" section, tags, and verified packaging details read from product images. Information found in ANY of these sections counts as available catalog knowledge — a usage instruction stated inside the description counts exactly as much as one in the usage section.
+
+The text may be in Albanian (Shqip) or English, including informal spellings or missing diacritics.
+
+STRICT RULES — apply in order:
+
+1. SUITABILITY / PERSONAL CIRCUMSTANCE QUESTIONS (highest priority):
+   If the customer asks whether the product is suitable, safe, or problematic for their specific personal situation, health condition, or lifestyle (e.g. "I don't work out, can I use this?", "Is this suitable for me?", "Any problem if I don't exercise?", "I'm pregnant, is this ok?"), the catalog evidence MUST EXPLICITLY mention that specific circumstance to return {"is_unanswered": false}.
+   General usage instructions (dosage, frequency, how to take) do NOT answer suitability questions about personal circumstances. Never generalize from a different circumstance (e.g. "not recommended for children under 12" says NOTHING about pregnancy).
+   If the specific circumstance is not explicitly addressed → return {"is_unanswered": true}.
+
+2. SPECIFIC DETAIL QUESTIONS:
+   If the customer asks about a specific detail (e.g. "how many times per day", "can I mix with water"), the catalog evidence must contain that specific information to return {"is_unanswered": false}.
+
+3. GENERAL USAGE QUESTIONS:
+   Return {"is_unanswered": false} only when the catalog evidence clearly and directly addresses what the customer asked — not merely when it is on the same general topic.
+
+4. WHEN IN DOUBT → return {"is_unanswered": true} (fail closed — escalate rather than guess).
+
+Examples:
+- Customer: "sa here ne dite" / Evidence includes "Perdoret 1 here ne dite" (in Description or Usage) → {"is_unanswered": false}
+- Customer: "how many times per day" / Description says "Take one scoop daily after training" → {"is_unanswered": false}
+- Customer: "can pregnant women use it" / Evidence only mentions frequency or age limits → {"is_unanswered": true}
+- Customer: "I don't work out, is there any problem?" / Evidence says "Take 2 scoops before workout" → {"is_unanswered": true}
+- Customer: "how do I prepare it" / Evidence has only name, price and flavor → {"is_unanswered": true}
+
+Return only JSON: {"is_unanswered": true} or {"is_unanswered": false}.`;
+
+export async function isUsageQuestionUnanswered(
+  inboundMessage: string,
+  productUsageDescription: string,
+  evidenceKind: 'usage' | 'catalog' = 'usage',
+): Promise<boolean> {
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_CLASSIFIER_MODEL,
+    messages: [
+      {
+        role: 'system',
+        content:
+          evidenceKind === 'catalog'
+            ? USAGE_UNANSWERED_CATALOG_EVIDENCE_SYSTEM_PROMPT
+            : USAGE_UNANSWERED_SYSTEM_PROMPT,
       },
       {
         role: 'user',
-        content: `Customer message:\n${inboundMessage}\n\nProduct usage description:\n${productUsageDescription}`,
+        content:
+          evidenceKind === 'catalog'
+            ? `Customer message:\n${inboundMessage}\n\nCatalog evidence:\n${productUsageDescription}`
+            : `Customer message:\n${inboundMessage}\n\nProduct usage description:\n${productUsageDescription}`,
       },
     ],
     response_format: { type: 'json_object' },
@@ -4340,6 +4414,49 @@ export async function generateReply(
   const descriptionQuestionTurn =
     isProductDescriptionQuestion(searchText) || isVagueProductReferenceFollowUp(searchText);
 
+  // P0-2 (description investigation): evidence-aware per-product text modes. The regex
+  // gates above have a fixed cue vocabulary, so a factual question without a cue word
+  // ("a eshte pa sheqer?") rendered every description as the blind 200-char brief slice —
+  // the answer could be physically absent from the prompt. The deterministic scan
+  // escalates exactly the products whose own text holds question tokens beyond the brief
+  // boundary. `shadow` computes + logs without changing the render; `on` applies it.
+  const catalogTextEvidenceMode = ((): 'off' | 'shadow' | 'on' => {
+    const v = knobString('CATALOG_TEXT_EVIDENCE_MODE').trim().toLowerCase();
+    return v === 'on' || v === 'shadow' ? v : 'off';
+  })();
+  let catalogTextEvidence: CatalogTextEvidenceResult | null = null;
+  if (
+    catalogTextEvidenceMode !== 'off' &&
+    searchText.trim().length > 0 &&
+    products.length > 0 &&
+    !(typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0)
+  ) {
+    try {
+      catalogTextEvidence = computeCatalogTextEvidence(searchText, products);
+      if (catalogTextEvidence.briefOnlyMiss) {
+        console.info('[aiService] catalog_text_evidence', {
+          tenantId,
+          mode: catalogTextEvidenceMode,
+          fullCount: catalogTextEvidence.fullCount,
+          extractCount: catalogTextEvidence.extractCount,
+          briefOnlyMiss: catalogTextEvidence.briefOnlyMiss,
+          regexFullDescription: descriptionQuestionTurn,
+          regexFullUsage: usageQuestionTurn,
+          products: products.length,
+        });
+      }
+    } catch (err) {
+      console.warn('[aiService] catalog text evidence scan failed — rendering legacy modes', {
+        tenantId,
+        err,
+      });
+    }
+  }
+  const appliedTextDecisions =
+    catalogTextEvidenceMode === 'on' && catalogTextEvidence && catalogTextEvidence.decisions.size > 0
+      ? catalogTextEvidence.decisions
+      : undefined;
+
   let resolvedProductCatalogContext =
     typeof productCatalogContext === 'string' && productCatalogContext.trim().length > 0
       ? productCatalogContext
@@ -4349,6 +4466,7 @@ export async function generateReply(
           totalCatalogCount,
           descriptionMode: descriptionQuestionTurn ? 'full' : 'brief',
           usageDescriptionMode: usageQuestionTurn ? 'full' : 'brief',
+          textDecisions: appliedTextDecisions,
           productNotInCatalog,
         });
 
@@ -4559,7 +4677,10 @@ Customer is asking for more/other products in the same category (IMPORTANT):
   if (customerAskedPrice && products.length > 5) {
     section('price_list_compact', PRICE_LIST_COMPACT_APPEND, 'low');
   }
-  if (descriptionQuestionTurn) {
+  // P0-2: the targeted-description instruction is no longer coupled to the same regex
+  // that gates the full-text render — any turn that actually carries escalated (full or
+  // extracted) description text gets the "answer ONLY what they asked" instruction too.
+  if (descriptionQuestionTurn || appliedTextDecisions !== undefined) {
     section('description_targeted', PRODUCT_DESCRIPTION_TARGETED_APPEND, 'low');
   }
   if (attributeIntent.is_attribute_question) {
