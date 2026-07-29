@@ -1270,7 +1270,12 @@ function isProductFollowUpReference(
     attributeIntent.is_attribute_question ||
     attributeIntent.is_product_knowledge_question ||
     needsConversationProductContext(message) ||
-    isProductDescriptionQuestion(message)
+    isProductDescriptionQuestion(message) ||
+    // Usage/dosage follow-ups ("Sa her ndite muna me perdor?") name no product and are
+    // built from stopword-heavy tokens — a fresh search matches unrelated products, the
+    // usage guards then judge THOSE products' (missing) usage text, and a perfectly
+    // answerable question escalates (live bug: Nitro Tech Ripped, usage text present).
+    matchesUsageQuestionKeyword(message)
   ) {
     return true;
   }
@@ -4162,7 +4167,14 @@ export async function generateReply(
     !isOtherOptionsRequest &&
     (needsConversationProductContext(searchText) ||
       attributeIntent.is_attribute_question ||
-      isComparisonOrRecommendation);
+      isComparisonOrRecommendation ||
+      // Usage/dosage questions route through the discussed products: their wording carries
+      // no product identity ("Sa her ndite muna me perdor?"), so a fresh fusion search
+      // returns stopword matches and the usage guards then escalate an answerable question
+      // (the product's own usage_description never enters the evidence). A usage question
+      // that DOES name a product is unaffected — inbound-name pins are prepended to the
+      // contextual set and always win.
+      matchesUsageQuestionKeyword(searchText));
 
   if (isOtherOptionsRequest) {
     // Use the category_hint from the classifier when available (most specific), otherwise
