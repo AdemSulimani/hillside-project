@@ -1,13 +1,17 @@
+import { knobNumber } from '../config/knobs';
 import { GHEG_RECOMMENDATION_EXTRA_PATTERNS, withGhegPatterns } from './ghegLexicons';
 import { PROMPT_ALLOWLIST_BUDGET } from './promptAssemblyService';
 
-/** Max characters for brief catalog description lines (~1–2 lines in chat). */
-export const CATALOG_DESCRIPTION_BRIEF_MAX_CHARS = 200;
+/** Max characters for brief catalog description lines (~1–2 lines in chat). Knob-declared (frozen). */
+export const CATALOG_DESCRIPTION_BRIEF_MAX_CHARS = knobNumber('CATALOG_DESCRIPTION_BRIEF_MAX_CHARS');
 
-/** Max characters for usage text shown in catalog when the turn is not a usage question. */
-export const CATALOG_USAGE_BRIEF_MAX_CHARS = 200;
+/** Max characters for usage text shown in catalog when the turn is not a usage question. Knob-declared (frozen). */
+export const CATALOG_USAGE_BRIEF_MAX_CHARS = knobNumber('CATALOG_USAGE_BRIEF_MAX_CHARS');
 
 export type CatalogTextMode = 'brief' | 'full';
+
+/** Per-field render mode once the evidence scan has run: 'extract' = brief + relevant excerpts. */
+export type CatalogFieldTextMode = CatalogTextMode | 'extract';
 
 export function normalizeCatalogWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -70,6 +74,244 @@ export function formatCatalogUsageLine(
   }
   const brief = summarizeTextForCatalogPrompt(trimmed, CATALOG_USAGE_BRIEF_MAX_CHARS);
   return [`  Usage summary (omit unless customer asks about usage/dosage): ${brief}`];
+}
+
+/** Verbatim sentences from the description that overlap the customer's question. */
+export function formatCatalogDescriptionExcerpts(sentences: string[]): string | null {
+  if (sentences.length === 0) return null;
+  return `  Relevant description excerpts (verbatim from the catalog — answer ONLY from these, do not paste all of them): ${sentences.join(' ')}`;
+}
+
+/** Verbatim sentences from the usage description that overlap the customer's question. */
+export function formatCatalogUsageExcerpts(sentences: string[]): string[] {
+  if (sentences.length === 0) return [];
+  return [
+    `  Relevant usage excerpts (verbatim from the catalog — answer ONLY from these, do not paste all of them): ${sentences.join(' ')}`,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// P0-2 (description investigation): evidence-aware per-product text modes.
+//
+// The brief slice is a query-agnostic 200-char prefix, and the 'full' escape
+// hatch was gated on a fixed-vocabulary regex — so a factual question with no
+// cue word ("a eshte pa sheqer?", "is it gluten free?") got a prompt from
+// which the answer was physically absent (measured: 187/219 dev descriptions
+// exceed 200 chars; the recorded sugar-question turn had its answer at char
+// ~1150). computeCatalogTextEvidence closes the gap deterministically: a
+// folded question token found in a product's own text BEYOND the brief
+// boundary escalates that product's field to 'full' (top-K products, per-turn
+// char budget) or, past the budget, to 'extract' (the overlapping sentences,
+// verbatim) — never silently back to the blind prefix. No LLM call.
+// ---------------------------------------------------------------------------
+
+/** Per-product render decision produced by the evidence scan. */
+export interface CatalogTextDecision {
+  descriptionMode: CatalogFieldTextMode;
+  usageMode: CatalogFieldTextMode;
+  descriptionExcerpts?: string[];
+  usageExcerpts?: string[];
+}
+
+export interface CatalogTextEvidenceResult {
+  /** Product id → render decision. Only products with evidence beyond the brief slice appear. */
+  decisions: Map<string, CatalogTextDecision>;
+  /** Products escalated to full text. */
+  fullCount: number;
+  /** Products degraded to sentence excerpts (budget/cap overflow). */
+  extractCount: number;
+  /** At least one product had question-relevant text beyond the brief slice — the F2 defect counter. */
+  briefOnlyMiss: boolean;
+}
+
+export interface CatalogTextEvidenceOptions {
+  maxFullProducts?: number;
+  fullTextBudgetChars?: number;
+}
+
+/**
+ * Question words, copulas and catalog-generic terms that must not trigger a full-text
+ * escalation on their own (folded, diacritic-free — the scan runs on folded text).
+ * Verbs like "contains" are stopped because the NOUN carries the signal: matching
+ * "permban" would escalate every description that says "Përmban ..." about anything.
+ */
+const EVIDENCE_SCAN_STOPWORDS = new Set<string>([
+  // Albanian question/function words (folded)
+  'cfare', 'qfare', 'cfar', 'qfar', 'cila', 'cili', 'cilin', 'cilen', 'cilat', 'kush',
+  'eshte', 'esht', 'osht', 'asht', 'jane', 'jemi', 'jeni', 'kam', 'kemi', 'keni', 'kane', 'kini',
+  'mund', 'muna', 'munem', 'mundem', 'munen', 'duhet', 'dua', 'doja', 'doni', 'deshironi',
+  'per', 'nga', 'dhe', 'ose', 'por', 'prej', 'kur', 'pse', 'tek', 'deri', 'edhe', 'apo',
+  'vetem', 'shume', 'pak', 'mire', 'keq', 'këtë', 'kete', 'ketij', 'kesaj', 'ketu', 'atje',
+  'produkt', 'produkti', 'produktin', 'produktit', 'produktet', 'produkte', 'artikull',
+  'permban', 'permbajne', 'permbaje', 'mban', 'brenda', 'pershendetje', 'mfal', 'falem',
+  'faleminderit', 'miredita', 'mirembrema', 'perdor', 'perdoret', 'perdorim', 'perdorni',
+  // English question/function words
+  'the', 'and', 'for', 'are', 'you', 'your', 'this', 'that', 'have', 'has', 'had',
+  'does', 'can', 'could', 'would', 'should', 'what', 'which', 'when', 'where', 'how', 'why',
+  'with', 'without', 'about', 'more', 'info', 'information', 'please', 'tell', 'there',
+  'they', 'them', 'from', 'contain', 'contains', 'containing', 'any', 'product', 'products',
+  'hello', 'thanks', 'thank', 'use', 'used', 'using',
+]);
+
+/** Folded, diacritic-stripped, letters/digits only — the comparison space for the scan. */
+function foldForEvidenceScan(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Common Albanian/English inflection suffixes, longest first, stripped down to a ≥4-char stem. */
+const EVIDENCE_STEM_SUFFIXES = ['eve', 'ave', 'ove', 'in', 'en', 'un', 'it', 'et', 'ut', 've', 'es', 'i', 'e', 'a', 'n', 't', 's'];
+
+/** The token plus de-inflected stem variants (min 4-char stem), for substring matching. */
+function evidenceTokenVariants(token: string): string[] {
+  const variants = new Set<string>([token]);
+  for (const suffix of EVIDENCE_STEM_SUFFIXES) {
+    if (token.endsWith(suffix) && token.length - suffix.length >= 4) {
+      variants.add(token.slice(0, token.length - suffix.length));
+    }
+  }
+  return [...variants];
+}
+
+/** Content tokens of the customer message worth scanning for (folded, stopworded, ≥3 chars). */
+function evidenceScanTokens(searchText: string): string[][] {
+  const folded = foldForEvidenceScan(searchText);
+  if (!folded) return [];
+  const seen = new Set<string>();
+  const tokens: string[][] = [];
+  for (const raw of folded.split(' ')) {
+    if (raw.length < 3 || EVIDENCE_SCAN_STOPWORDS.has(raw) || seen.has(raw)) continue;
+    seen.add(raw);
+    tokens.push(evidenceTokenVariants(raw));
+    if (tokens.length >= 24) break;
+  }
+  return tokens;
+}
+
+const EVIDENCE_EXCERPT_MAX_SENTENCES = 3;
+const EVIDENCE_EXCERPT_MAX_CHARS = 500;
+
+interface FieldEvidenceScan {
+  /** Distinct question tokens present in the full text but NOT in the brief slice. */
+  missedTokens: number;
+  /** Sentences (verbatim, whitespace-normalized) containing a matched token. */
+  excerpts: string[];
+  /** Full normalized text length — the cost of rendering this field in full mode. */
+  fullLen: number;
+}
+
+function scanFieldForEvidence(
+  text: string | null | undefined,
+  tokens: string[][],
+  briefMaxChars: number,
+): FieldEvidenceScan | null {
+  const trimmed = text?.trim();
+  if (!trimmed || tokens.length === 0) return null;
+  const normalized = normalizeCatalogWhitespace(trimmed);
+  const foldedFull = foldForEvidenceScan(normalized);
+  if (!foldedFull) return null;
+  const foldedBrief = foldForEvidenceScan(summarizeTextForCatalogPrompt(normalized, briefMaxChars));
+
+  const matchedVariantSets: string[][] = [];
+  let missedTokens = 0;
+  for (const variants of tokens) {
+    const inFull = variants.some((v) => foldedFull.includes(v));
+    if (!inFull) continue;
+    matchedVariantSets.push(variants);
+    const inBrief = variants.some((v) => foldedBrief.includes(v));
+    if (!inBrief) missedTokens += 1;
+  }
+  if (missedTokens === 0) return null;
+
+  const excerpts: string[] = [];
+  let excerptChars = 0;
+  for (const sentence of normalized.split(/(?<=[.!?])\s+/)) {
+    const foldedSentence = foldForEvidenceScan(sentence);
+    if (!foldedSentence) continue;
+    if (!matchedVariantSets.some((variants) => variants.some((v) => foldedSentence.includes(v)))) continue;
+    if (excerpts.length >= EVIDENCE_EXCERPT_MAX_SENTENCES) break;
+    if (excerptChars + sentence.length > EVIDENCE_EXCERPT_MAX_CHARS && excerpts.length > 0) break;
+    excerpts.push(sentence.trim());
+    excerptChars += sentence.length;
+  }
+
+  return { missedTokens, excerpts, fullLen: normalized.length };
+}
+
+/**
+ * Decide, per product, whether its description/usage text should render 'full',
+ * 'extract' (brief + overlapping sentences) or stay 'brief' for this question.
+ * Pure and deterministic — safe to call on every turn.
+ */
+export function computeCatalogTextEvidence(
+  searchText: string,
+  products: Array<{ id: string; description: string | null; usage_description: string | null }>,
+  options?: CatalogTextEvidenceOptions,
+): CatalogTextEvidenceResult {
+  const maxFullProducts = options?.maxFullProducts ?? knobNumber('CATALOG_FULL_TEXT_MAX_PRODUCTS');
+  const fullTextBudgetChars =
+    options?.fullTextBudgetChars ?? knobNumber('CATALOG_FULL_TEXT_TURN_BUDGET_CHARS');
+
+  const result: CatalogTextEvidenceResult = {
+    decisions: new Map(),
+    fullCount: 0,
+    extractCount: 0,
+    briefOnlyMiss: false,
+  };
+  const tokens = evidenceScanTokens(searchText);
+  if (tokens.length === 0 || products.length === 0) return result;
+
+  const candidates: Array<{
+    id: string;
+    description: FieldEvidenceScan | null;
+    usage: FieldEvidenceScan | null;
+    score: number;
+    fullLen: number;
+  }> = [];
+  for (const p of products) {
+    const description = scanFieldForEvidence(p.description, tokens, CATALOG_DESCRIPTION_BRIEF_MAX_CHARS);
+    const usage = scanFieldForEvidence(p.usage_description, tokens, CATALOG_USAGE_BRIEF_MAX_CHARS);
+    if (!description && !usage) continue;
+    candidates.push({
+      id: p.id,
+      description,
+      usage,
+      score: (description?.missedTokens ?? 0) + (usage?.missedTokens ?? 0),
+      fullLen: (description?.fullLen ?? 0) + (usage?.fullLen ?? 0),
+    });
+  }
+  if (candidates.length === 0) return result;
+
+  result.briefOnlyMiss = true;
+  candidates.sort((a, b) => b.score - a.score || a.fullLen - b.fullLen);
+
+  let budgetUsed = 0;
+  for (const candidate of candidates) {
+    const fits =
+      result.fullCount < maxFullProducts && budgetUsed + candidate.fullLen <= fullTextBudgetChars;
+    if (fits) {
+      result.decisions.set(candidate.id, {
+        descriptionMode: candidate.description ? 'full' : 'brief',
+        usageMode: candidate.usage ? 'full' : 'brief',
+      });
+      result.fullCount += 1;
+      budgetUsed += candidate.fullLen;
+    } else {
+      result.decisions.set(candidate.id, {
+        descriptionMode: candidate.description ? 'extract' : 'brief',
+        usageMode: candidate.usage ? 'extract' : 'brief',
+        descriptionExcerpts: candidate.description?.excerpts,
+        usageExcerpts: candidate.usage?.excerpts,
+      });
+      result.extractCount += 1;
+    }
+  }
+  return result;
 }
 
 const DESCRIPTION_QUESTION_PATTERNS: RegExp[] = [
