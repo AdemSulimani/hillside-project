@@ -114,6 +114,7 @@ import {
   expandProductsForAttributeQuery,
   extractConversationProductAnchor,
   isCategoryAttributeFollowUp,
+  isStockOnlyFollowUp,
   resolveProductsForContextualQuery,
   type AttributeQueryIntentHint,
 } from './productRetrievalService';
@@ -925,7 +926,11 @@ export function needsConversationProductContext(message: string): boolean {
     isVagueProductReferenceFollowUp(message) ||
     isCategoryAttributeFollowUp(message) ||
     isAttributeQuestionMessage(message) ||
-    isPhotoProductReferenceFollowUp(message)
+    isPhotoProductReferenceFollowUp(message) ||
+    // Stock/availability follow-ups ("A e keni ne gjendje?") — same routing class as
+    // price/usage/description: no product identity in the wording, and its tokens hit
+    // real catalog text, so a fresh search answers the wrong products' stock status.
+    isStockOnlyFollowUp(message)
   );
 }
 

@@ -569,6 +569,38 @@ export function filterProductsByInboundFamilyMention(
   return matched.length > 0 ? matched : products;
 }
 
+/**
+ * Short stock/availability follow-up naming no product ("A e keni ne stok?", "A eshte ne
+ * gjendje?", "Sa cope keni?"). Routed through the discussed products for the same reason as
+ * price/usage/description follow-ups: the wording carries no product identity, and its tokens
+ * hit real catalog text ("gjendje" appears in 9 dev descriptions, "sasi" in 7), so a fresh
+ * fusion search returns unrelated products and the model answers THEIR stock status. The
+ * literal "stok" phrasing only survived by luck (zero catalog matches → the empty-retrieval
+ * rescue). Deterministic; named products are unaffected (inbound-name pins win).
+ */
+export function isStockOnlyFollowUp(message: string): boolean {
+  const t = (message ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^\p{L}\p{N}\s?!.']/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length > 80) return false;
+  const words = t.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length > 8) return false;
+
+  const hasStockCue =
+    /\bstok(u|un|ut)?\b/.test(t) ||
+    /\bn['e]? ?gjendje\b/.test(t) ||
+    /\bn['e]? ?dispozicion\b/.test(t) ||
+    /\b(in stock|out of stock|availab)/.test(t) ||
+    /\bsa (cope|sasi|njesi)\b/.test(t) ||
+    /\bsasi\b.*\bkeni\b|\bkeni\b.*\bsasi\b/.test(t);
+  return hasStockCue;
+}
+
 export function detectRequestedAttributes(
   message: string,
   intentAttributes?: StructuredAttributeKey[],

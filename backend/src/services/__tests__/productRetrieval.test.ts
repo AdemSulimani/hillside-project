@@ -13,6 +13,7 @@ import {
   getProductStructuredAttributes,
   isCategoryAttributeFollowUp,
   isOtherOptionsFollowUp,
+  isStockOnlyFollowUp,
   resolveProductsForContextualQuery,
   sanitizeExtractedText,
 } from '../productRetrievalService';
@@ -746,5 +747,42 @@ describe('extractConversationProductAnchor — skipMostRecentCustomerMessage (LL
     // Both should resolve to the same original query
     assert.equal(anchorNoFlag, 'Keni proteina?');
     assert.equal(anchorWithFlag, 'Keni proteina?');
+  });
+});
+
+describe('isStockOnlyFollowUp (stock/availability follow-up routing)', () => {
+  it('matches stock follow-ups in the phrasings live traffic uses', () => {
+    for (const message of [
+      'A e keni ne stok?',
+      'A ka stok?',
+      'A osht n\'stok?',
+      'A e keni ne gjendje?',
+      'A eshte ne dispozicion?',
+      'Is it in stock?',
+      'Sa cope keni?',
+      'Sa sasi keni ne stok?',
+    ]) {
+      assert.equal(isStockOnlyFollowUp(message), true, message);
+    }
+  });
+
+  it('does not match product-naming or unrelated questions', () => {
+    for (const message of [
+      'A keni nitro tech ripped',            // availability WITH a name — fresh search + pins
+      'Sa kushton Carbo one 1kg Limon?',
+      'Qfar shije e ka?',
+      'Sa her ndite muna me perdor?',
+    ]) {
+      assert.equal(isStockOnlyFollowUp(message), false, message);
+    }
+  });
+
+  it('rejects long messages (the cue must not hijack substantive queries)', () => {
+    assert.equal(
+      isStockOnlyFollowUp(
+        'Pershendetje, doja te di nese keni ne gjendje te me tregoni per te gjitha produktet e kreatines qe i shisni ne dyqan',
+      ),
+      false,
+    );
   });
 });
