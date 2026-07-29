@@ -1,9 +1,11 @@
 import type { Message } from '../db/models/message';
 import {
+  extractProductFamilyBaseName,
   findVariantSiblingProducts,
   type Product,
 } from '../db/models/product';
-import { DIALECT_NORMALIZATION, extractDialectKeywords } from './dialectNormalization';
+import { containsPhrase } from './attributeClaimLexicon';
+import { DIALECT_NORMALIZATION, extractDialectKeywords, foldDialect } from './dialectNormalization';
 import {
   GHEG_ATTRIBUTE_FOLLOW_UP_EXTRA_PATTERNS,
   GHEG_OTHER_OPTIONS_EXTRA_PATTERNS,
@@ -533,6 +535,38 @@ function attributeLabel(key: StructuredAttributeKey): string {
     category: 'Categories / product types',
   };
   return labels[key];
+}
+
+/**
+ * Tighten a pinned product set to the products whose FAMILY the customer actually named.
+ *
+ * The pinning ladder's looser rungs (substring/trigram) can match sibling-ish families on
+ * generic tokens: live turn "Me qfar shije e keni X-Mass 3kg?" pinned [Pro Mass 3kg,
+ * X-Mass 3kg Qokolad, Mega mass 3kg Vanil] — the gram "mass 3kg" matched three families and
+ * the 3-pin cap then pushed the real sibling (X-Mass 3kg shije Keksi) out entirely. Feeding
+ * that set to the gap machinery makes an attribute-less UNRELATED family ("Pro Mass 3kg",
+ * no flavor) force a "shija" escalation onto an answered question.
+ *
+ * A product survives when the folded inbound text contains the LEADING TOKENS of its folded
+ * family base name (up to 2 tokens — "x mass", "carbo one", "nitro tech") as a whole-token
+ * phrase. The prefix, not the full base, is the family identity: extractBaseName strips only
+ * the ENGLISH flavor vocabulary, so Albanian flavor tokens survive in the base ("X Mass
+ * Qokolad") and full-base containment would reject nearly every correctly-named family.
+ * FAIL-OPEN: when nothing survives (misspellings — the fuzzy rungs exist for a reason), the
+ * original set is returned unchanged.
+ */
+export function filterProductsByInboundFamilyMention(
+  products: Product[],
+  inboundText: string,
+): Product[] {
+  const inboundFolded = foldDialect(inboundText ?? '');
+  if (!inboundFolded || products.length === 0) return products;
+  const matched = products.filter((p) => {
+    const baseTokens = foldDialect(extractProductFamilyBaseName(p.name)).split(' ').filter(Boolean);
+    const prefix = baseTokens.slice(0, Math.min(2, baseTokens.length)).join(' ');
+    return prefix.length >= 3 && containsPhrase(inboundFolded, prefix);
+  });
+  return matched.length > 0 ? matched : products;
 }
 
 export function detectRequestedAttributes(

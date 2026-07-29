@@ -137,6 +137,7 @@ import {
   buildProductKnowledgeContext,
   detectRequestedAttributes,
   expandProductsForAttributeQuery,
+  filterProductsByInboundFamilyMention,
   getProductInferredAttributes,
   isOtherOptionsFollowUp,
 } from '../services/productRetrievalService';
@@ -3916,9 +3917,14 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       let gapProducts = matchedProducts;
       let gapScopedToFocal = false;
       if (GAP_FOCAL_PRODUCT_SCOPE_MODE !== 'off' && inboundNamedProducts.length > 0) {
-        let focal = inboundNamedProducts;
+        // Tighten the pinned set to the families the message actually names before sibling
+        // expansion: the ladder's fuzzy rungs can pin sibling-ish families on generic tokens
+        // ("mass 3kg" → Pro Mass / Mega mass for an X-Mass question), and one attribute-less
+        // unrelated family then forces a per-product escalation. Fail-open on no survivor.
+        const familyScoped = filterProductsByInboundFamilyMention(inboundNamedProducts, inboundText);
+        let focal = familyScoped;
         try {
-          focal = await expandProductsForAttributeQuery(tenantId, inboundNamedProducts, attributeIntent);
+          focal = await expandProductsForAttributeQuery(tenantId, familyScoped, attributeIntent);
         } catch (err) {
           console.warn('[ai.reply] focal-scope sibling expansion failed — using pinned products only', {
             conversationId,

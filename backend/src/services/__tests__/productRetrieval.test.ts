@@ -8,6 +8,7 @@ import {
   detectRequestedAttributes,
   detectProductQueryScope,
   extractConversationProductAnchor,
+  filterProductsByInboundFamilyMention,
   getProductInferredAttributes,
   getProductStructuredAttributes,
   isCategoryAttributeFollowUp,
@@ -121,6 +122,33 @@ describe('productRetrievalService', () => {
     it('recognizes "pa shije" in the product name as a stated flavor', () => {
       const product = mockProduct({ id: 'c7', name: 'Dedicated Creatine 500gr pa shije', flavor: null });
       assert.equal(getProductInferredAttributes(product).flavor, 'pa shije');
+    });
+
+    it('filterProductsByInboundFamilyMention keeps only families the message names (fail-open)', () => {
+      const xmass = mockProduct({ id: 'f1', name: 'X-Mass 3kg Qokolad' });
+      const proMass = mockProduct({ id: 'f2', name: 'Pro Mass 3kg' });
+      const megaMass = mockProduct({ id: 'f3', name: 'Mega mass 3kg Vanil' });
+      // Live turn 2026-07-29: the "mass 3kg" gram pinned all three families for an X-Mass
+      // question; the attribute-less Pro Mass row then forced a spurious "shija" escalation.
+      const kept = filterProductsByInboundFamilyMention(
+        [proMass, xmass, megaMass],
+        'Me qfar shije e keni X-Mass 3kg?',
+      );
+      assert.deepEqual(kept.map((p) => p.id), ['f1']);
+      // Fail-open: a misspelled family matches nothing → original set unchanged.
+      const failOpen = filterProductsByInboundFamilyMention(
+        [proMass, xmass],
+        'Sa kushton Iks Masi?',
+      );
+      assert.equal(failOpen.length, 2);
+      // Multi-family questions keep every named family.
+      const nitro = mockProduct({ id: 'f4', name: 'Nitro Tech Ripped Qokollad' });
+      const carbo = mockProduct({ id: 'f5', name: 'Carbo one 1kg Limon' });
+      const both = filterProductsByInboundFamilyMention(
+        [nitro, carbo, proMass],
+        'A keni nitro tech ripped edhe carbo one me limon?',
+      );
+      assert.deepEqual(both.map((p) => p.id), ['f4', 'f5']);
     });
 
     it('recognizes the Gheg "Qokollad" chocolate spelling family in product names', () => {
