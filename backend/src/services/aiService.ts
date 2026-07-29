@@ -3,7 +3,7 @@ import { upsertPromptBlob } from '../db/models/promptBlob';
 import { openai, OPENAI_CHAT_MODEL, OPENAI_CLASSIFIER_MODEL, OPENAI_VISION_MODEL } from './openaiClient';
 import { withModelRole } from './openaiCallTracker';
 import type { ProductImageRef } from './productImageRequestService';
-import { productNameTokenMatch } from './productImageRequestService';
+import { filterProductsMentionedInTexts, productNameTokenMatch } from './productImageRequestService';
 import {
   resolveInboundNamedProducts,
   resolveGramsToProducts,
@@ -17,6 +17,7 @@ import {
 export type { ProductImageRef };
 import { findTenantById } from '../db/models/tenant';
 import {
+  collectRecentlyDiscussedProductContext,
   collectRecentlyDiscussedProductIds,
   findMessagesByConversation,
   type Message,
@@ -198,6 +199,17 @@ const PRICE_INTENT_LEXICAL_UNION = knobBool('PRICE_INTENT_LEXICAL_UNION');
  * comparable, which is exactly the drift the fingerprint exists to make visible.
  */
 const PROMPT_SECTION_BUDGET_MODE = knobString('PROMPT_SECTION_BUDGET');
+/**
+ * P0-B follow-up scope (shares the GAP_FOCAL_PRODUCT_SCOPE knob with processAIReply's gap
+ * machinery): at `on`, the persisted-context resolver narrows the discussed set to the products
+ * the source AI reply actually WROTE OUT — `message.product_ids` persists the whole fused pool
+ * (10–25 rows), and feeding the pool to a follow-up turn is what listed 4 unrelated creatines'
+ * flavors and escalated "shija" after "Po, kemi BSN Creatine 216gr…".
+ */
+const GAP_FOCAL_PRODUCT_SCOPE_MODE = ((): 'off' | 'shadow' | 'on' => {
+  const v = knobString('GAP_FOCAL_PRODUCT_SCOPE').trim().toLowerCase();
+  return v === 'on' || v === 'shadow' ? v : 'off';
+})();
 // Log the live value once at startup so operators always know which threshold is active
 // (the .env.example default of 0.65 and an overriding SIMILARITY_THRESHOLD=0.75 both
 // used to be in circulation, causing silent config drift in deployed environments).
@@ -1171,9 +1183,28 @@ export async function resolveProductsFromPersistedContext(
   messages: Message[],
   limit: number,
 ): Promise<Product[]> {
-  const ids = collectRecentlyDiscussedProductIds(messages);
+  const { ids, sourceText } = collectRecentlyDiscussedProductContext(messages);
   if (ids.length === 0) return [];
   const products = await findActiveProductsByIds(tenantId, ids);
+
+  // GAP_FOCAL_PRODUCT_SCOPE=on: the customer has only SEEN the products the source reply wrote
+  // out — narrow the pool to those (Tier A full-name / Tier B lead-tokens, the same principle the
+  // photo path uses). FAIL-OPEN: an image-only or paraphrased reply that names nothing keeps the
+  // full pool, so a follow-up can never lose every product.
+  if (GAP_FOCAL_PRODUCT_SCOPE_MODE !== 'off' && sourceText) {
+    const mentioned = filterProductsMentionedInTexts(products, [sourceText]);
+    if (mentioned.length > 0) {
+      if (GAP_FOCAL_PRODUCT_SCOPE_MODE === 'shadow') {
+        console.info('[aiService] follow-up scope (shadow): would narrow persisted context', {
+          pool: products.length,
+          mentioned: mentioned.length,
+        });
+      } else {
+        return mentioned.slice(0, limit);
+      }
+    }
+  }
+
   return products.slice(0, limit);
 }
 
