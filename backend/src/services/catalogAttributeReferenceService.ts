@@ -79,11 +79,16 @@ export function buildAttributeIndexFromRows(
     const source = [row.name ?? '', row.category ?? '', freeText, ...structuredValues]
       .filter(Boolean)
       .join('\n');
+    // Packaging-image fingerprint text becomes SUPPORT-ONLY clauses (auxClauses): the
+    // generator is told packaging reads are reliable catalog knowledge, so a claim taken
+    // from them must never flag as absent — but vision noise must never contradict either.
+    const fingerprintText = (row.fingerprint_text ?? '').trim();
     return {
       id: row.id,
       name: row.name,
       normName: normalizeText(row.name ?? ''),
       clauses: segmentClauses(source),
+      ...(fingerprintText ? { auxClauses: segmentClauses(fingerprintText) } : {}),
       populated: freeText.length > 0,
     };
   });

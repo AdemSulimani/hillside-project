@@ -321,6 +321,12 @@ const DESCRIPTION_QUESTION_PATTERNS: RegExp[] = [
   /\b(what('s| is) (it|this) (made of|for)|made of|materials?)\b/i,
   /\b(benefits?|advantages?|features?|ingredients?|composition|perberes|përfitimet?|karakteristika)\b/i,
   /\b(pershkrim|përshkrim|detaje|details about)\b/i,
+  // Albanian/Gheg composition-and-purpose verbs the live traffic actually uses:
+  // "Qfar permban?" (what does it contain), "Per qfare sherben?" (what is it for),
+  // "Nga cfare perbehet?" (what is it made of), "Cka ka brenda?" (what's inside).
+  // Patterns run on the diacritic-stripped lowercased form.
+  /\b(permban|perbehet|sherben)\b/i,
+  /\b(cka|qka|cfare?|qfare?)\s+ka\s+brenda\b/i,
 ];
 
 const RECOMMENDATION_CUE_PATTERNS: RegExp[] = [

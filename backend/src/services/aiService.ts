@@ -4174,7 +4174,12 @@ export async function generateReply(
       // (the product's own usage_description never enters the evidence). A usage question
       // that DOES name a product is unaffected — inbound-name pins are prepended to the
       // contextual set and always win.
-      matchesUsageQuestionKeyword(searchText));
+      matchesUsageQuestionKeyword(searchText) ||
+      // Description/ingredient follow-ups ("Qfar permban?", "Per qfare sherben?") are the
+      // same failure class: no product identity in the wording, so without this signal
+      // they fresh-search stopwords and the description gap-check judges the wrong
+      // products. Deterministic and recommendation-safe; named products win via pins.
+      isProductDescriptionQuestion(searchText));
 
   if (isOtherOptionsRequest) {
     // Use the category_hint from the classifier when available (most specific), otherwise

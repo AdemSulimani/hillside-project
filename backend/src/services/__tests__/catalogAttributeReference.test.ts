@@ -26,7 +26,7 @@ const row = (
   description: string | null = null,
   usage_description: string | null = null,
   category: string | null = 'Proteina',
-  structured: Partial<Pick<CatalogAttributeSourceRow, 'brand' | 'flavor' | 'size' | 'color' | 'variant' | 'weight'>> = {},
+  structured: Partial<Pick<CatalogAttributeSourceRow, 'brand' | 'flavor' | 'size' | 'color' | 'variant' | 'weight' | 'fingerprint_text'>> = {},
 ): CatalogAttributeSourceRow => ({
   id,
   name,
@@ -39,6 +39,7 @@ const row = (
   color: null,
   variant: null,
   weight: null,
+  fingerprint_text: null,
   ...structured,
 });
 
@@ -124,6 +125,29 @@ describe('buildAttributeIndexFromRows', () => {
       100,
     );
     assert.equal(index.rows[0].populated, false);
+  });
+
+  // P1-B FP fix (live, 2026-07-29): packaging-image fingerprint text becomes SUPPORT-ONLY
+  // clauses — visible to the membership/support passes, invisible to contradiction, and
+  // never counted toward `populated`.
+  it('fingerprint text becomes auxClauses, separate from the primary clauses', () => {
+    const index = buildAttributeIndexFromRows(
+      [
+        row('9', 'Nitro Tech Ripped', null, null, 'Proteina', {
+          fingerprint_text: 'Brand: Muscletech. Size: 1.81 kg. Flavor: Chocolate Fudge Brownie.',
+        }),
+      ],
+      100,
+    );
+    const built = index.rows[0];
+    assert.ok(built.auxClauses?.some((c) => c.includes('1 81 kg')));
+    assert.ok(!built.clauses.some((c) => c.includes('1 81 kg')));
+    assert.equal(built.populated, false);
+  });
+
+  it('rows without fingerprint text omit auxClauses entirely', () => {
+    const index = buildAttributeIndexFromRows([row('9', 'X', 'desc')], 100);
+    assert.equal('auxClauses' in index.rows[0], false);
   });
 });
 

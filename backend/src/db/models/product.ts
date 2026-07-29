@@ -902,6 +902,13 @@ export interface CatalogAttributeSourceRow {
   color: string | null;
   variant: string | null;
   weight: string | null;
+  /**
+   * Aggregated packaging-image fingerprint text — SUPPORT-ONLY evidence downstream. The
+   * generator's prompt treats verified packaging reads as reliable catalog knowledge, so the
+   * membership lane must be able to see them too; vision noise keeps them out of the
+   * contradiction pass.
+   */
+  fingerprint_text: string | null;
 }
 
 /**
@@ -924,11 +931,14 @@ export async function listActiveCatalogAttributeRowsForTenant(
   rowLimit: number,
 ): Promise<CatalogAttributeSourceRow[]> {
   const { rows } = await pool.query<CatalogAttributeSourceRow>(
-    `SELECT id, name, category, description, usage_description,
-            brand, flavor, size, color, variant, weight
-     FROM products
-     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
-     ORDER BY name ASC
+    `SELECT p.id, p.name, p.category, p.description, p.usage_description,
+            p.brand, p.flavor, p.size, p.color, p.variant, p.weight,
+            (SELECT string_agg(f.fingerprint_text, E'\n')
+               FROM product_image_fingerprints f
+              WHERE f.product_id = p.id AND f.fingerprint_text IS NOT NULL) AS fingerprint_text
+     FROM products p
+     WHERE p.tenant_id = $1 AND p.deleted_at IS NULL AND p.is_active = true
+     ORDER BY p.name ASC
      LIMIT $2::int`,
     [tenantId, rowLimit],
   );

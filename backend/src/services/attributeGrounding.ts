@@ -64,6 +64,15 @@ export type AttributeScope = 'product' | 'tenant';
 export interface AttributeEvidence {
   /** Folded clauses of name + category + description + usage_description, in document order. */
   clauses: string[];
+  /**
+   * SUPPORT-ONLY clauses: folded packaging-image fingerprint text. The generator's prompt
+   * injects verified packaging reads as "available, reliable catalog knowledge", so a claim the
+   * model took from them is grounded and must never flag as absent (live FP: "1.81 kg" for
+   * Nitro Tech Ripped — description NULL, value on the packaging). Vision reads are too noisy
+   * to CONTRADICT with, so these clauses may rescue a claim but never create a flag.
+   * Optional: absent means "no packaging evidence" (identical to []).
+   */
+  supportOnlyClauses?: string[];
   /** False when the row carries no usable free text — 37/257 real rows are in this class. */
   populated: boolean;
   /** True when the index hit its row cap. Makes every claim contradiction-INELIGIBLE. */
@@ -83,6 +92,8 @@ export interface CatalogAttributeRow {
   normName: string;
   /** Folded clauses of name + category + description + usage_description, in document order. */
   clauses: string[];
+  /** Folded packaging-image fingerprint clauses — support-only evidence (see AttributeEvidence). */
+  auxClauses?: string[];
   /** False when the row carries no free text beyond its own name/category. */
   populated: boolean;
 }
@@ -103,8 +114,13 @@ export function evidenceForRow(
   row: CatalogAttributeRow | null,
   index: CatalogAttributeIndex,
 ): AttributeEvidence {
-  if (!row) return { clauses: [], populated: false, truncated: index.truncated };
-  return { clauses: row.clauses, populated: row.populated, truncated: index.truncated };
+  if (!row) return { clauses: [], supportOnlyClauses: [], populated: false, truncated: index.truncated };
+  return {
+    clauses: row.clauses,
+    supportOnlyClauses: row.auxClauses ?? [],
+    populated: row.populated,
+    truncated: index.truncated,
+  };
 }
 
 /**
@@ -114,8 +130,12 @@ export function evidenceForRow(
  */
 export function tenantWideEvidence(index: CatalogAttributeIndex): AttributeEvidence {
   const clauses: string[] = [];
-  for (const row of index.rows) clauses.push(...row.clauses);
-  return { clauses, populated: clauses.length > 0, truncated: index.truncated };
+  const supportOnlyClauses: string[] = [];
+  for (const row of index.rows) {
+    clauses.push(...row.clauses);
+    if (row.auxClauses) supportOnlyClauses.push(...row.auxClauses);
+  }
+  return { clauses, supportOnlyClauses, populated: clauses.length > 0, truncated: index.truncated };
 }
 
 export interface UngroundedAttribute {
@@ -187,8 +207,10 @@ export function evaluateAttributeClaim(
   if (!claim.eligible || claim.substances.length === 0) return 'silent';
 
   // ---- Pass 1: SUPPORT, across the whole evidence set, at any scope. ---------------------
+  // Support-only packaging clauses participate here (a "Sugar Free" label read rescues a
+  // "pa sheqer" claim) but are excluded from the contradiction pass below — the safe direction.
   for (const substance of claim.substances) {
-    for (const clause of evidence.clauses) {
+    for (const clause of [...evidence.clauses, ...(evidence.supportOnlyClauses ?? [])]) {
       if (clauseSupportsExclusion(clause, substance)) return 'supported';
     }
   }
@@ -252,7 +274,7 @@ export function evaluateValueClaimMembership(
   if (claim.kind !== 'value' || !claim.membershipEligible) return 'silent';
 
   const variants = valueClaimVariants(claim.folded);
-  for (const clause of evidence.clauses) {
+  for (const clause of [...evidence.clauses, ...(evidence.supportOnlyClauses ?? [])]) {
     for (const variant of variants) {
       if (variant && containsPhrase(clause, variant)) return 'supported';
     }
