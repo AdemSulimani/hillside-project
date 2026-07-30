@@ -70,23 +70,52 @@ These map to the workflow jobs in `.github/workflows/deploy.yml`.
 - `PROD_SSH_PASSPHRASE` (required if the private key is passphrase-protected)
 - `PROD_APP_DIR` (example: `/opt/hillside-prod`)
 - `PROD_REPO_ACCESS_TOKEN` (GitHub token with repository read access for clone/pull on droplet)
-- `PROD_BACKEND_ENV_B64` (base64-encoded backend `.env`)
-- `PROD_FRONTEND_ENV_B64` (base64-encoded frontend `.env`)
+- `PROD_BACKEND_ENV_B64` (base64 of **`backend/.env.production.private`**)
+- `PROD_FRONTEND_ENV_B64` (base64 of **`frontend/.env.production.private`**)
 - `PROD_HEALTHCHECK_URL` (example: `https://api.yourdomain.com/api/health`)
 
-You can generate base64 values locally (Linux/macOS) for production:
+> ⚠️ **Encode the `.env.production.private` files, NOT `backend/.env`.** `backend/.env` is the
+> local **development** env — encoding it ships `DATABASE_URL=…@localhost:5432`, the ngrok OAuth
+> redirect URIs and `NODE_ENV=development` straight into production. (These commands named
+> `backend/.env` until 2026-07-30; that was a bug in this doc.)
+
+Generate the base64 locally (Linux/macOS):
 
 ```bash
-base64 -w 0 backend/.env
-base64 -w 0 frontend/.env
+base64 -w 0 backend/.env.production.private
+base64 -w 0 frontend/.env.production.private
 ```
 
-PowerShell (Windows):
+PowerShell (Windows) — `Set-Clipboard` matters here: the backend blob is ~19k characters and
+copying it out of terminal output invites a truncated paste, which the deploy will accept as a
+valid-looking env file:
 
 ```powershell
-[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content backend/.env -Raw)))
-[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content frontend/.env -Raw)))
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content backend/.env.production.private -Raw))) | Set-Clipboard
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content frontend/.env.production.private -Raw))) | Set-Clipboard
 ```
+
+Use `Get-Content -Raw` + `UTF8.GetBytes` rather than `[IO.File]::ReadAllBytes` — the latter
+preserves a UTF-8 BOM, which would prefix the first variable name and break its parse.
+
+Verify before pasting (prints a count and two safe lines, no secrets):
+
+```powershell
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content backend/.env.production.private -Raw)))
+$dec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
+"chars: $($dec.Length)"; ($dec -split "`n" | Select-String '^NODE_ENV=')
+```
+
+`NODE_ENV=production` confirms you encoded the right file. After pasting, check the value ends in
+`=` or `==` (base64 padding) — a tail that looks cut off mid-string is a truncated paste.
+
+Two things to know about these secrets:
+
+- **They are read at workflow run time.** Updating a secret changes nothing until a new deploy
+  runs. Production deploys only on a `v*` tag push or a manual `workflow_dispatch`, so a push to
+  `main` will not pick up a new env.
+- **GitHub secrets are write-only** — you cannot read the previous value back. Keep a copy of the
+  outgoing env somewhere durable before overwriting, or a rollback means reconstructing it by hand.
 
 ## 6) Branch and release strategy
 
