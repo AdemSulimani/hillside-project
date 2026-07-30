@@ -276,6 +276,11 @@ export function locateValueClaimInProse(claim: AttributeClaim, proseFolded: stri
  */
 export function segmentClauses(rawText: string): string[] {
   return (rawText ?? '')
+    // A decimal point is NOT a clause terminator: "Size: 1.81 kg" must stay one clause, or the
+    // membership check can never match a packaging/description decimal ("1 81 kg" severed across
+    // two clauses — the live 2026-07-29 FP). The comma survives the split and folds to a space,
+    // so the tokens stay adjacent exactly as `foldDialect` renders the claim itself.
+    .replace(/(\d)\.(\d)/g, '$1,$2')
     .split(/[.;:!?\n\r]+/u)
     .map((part) => foldDialect(part))
     .filter((part) => part.length > 0);

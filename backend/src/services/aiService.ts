@@ -114,6 +114,7 @@ import {
   expandProductsForAttributeQuery,
   extractConversationProductAnchor,
   isCategoryAttributeFollowUp,
+  isStockOnlyFollowUp,
   resolveProductsForContextualQuery,
   type AttributeQueryIntentHint,
 } from './productRetrievalService';
@@ -925,7 +926,11 @@ export function needsConversationProductContext(message: string): boolean {
     isVagueProductReferenceFollowUp(message) ||
     isCategoryAttributeFollowUp(message) ||
     isAttributeQuestionMessage(message) ||
-    isPhotoProductReferenceFollowUp(message)
+    isPhotoProductReferenceFollowUp(message) ||
+    // Stock/availability follow-ups ("A e keni ne gjendje?") — same routing class as
+    // price/usage/description: no product identity in the wording, and its tokens hit
+    // real catalog text, so a fresh search answers the wrong products' stock status.
+    isStockOnlyFollowUp(message)
   );
 }
 
@@ -1270,7 +1275,12 @@ function isProductFollowUpReference(
     attributeIntent.is_attribute_question ||
     attributeIntent.is_product_knowledge_question ||
     needsConversationProductContext(message) ||
-    isProductDescriptionQuestion(message)
+    isProductDescriptionQuestion(message) ||
+    // Usage/dosage follow-ups ("Sa her ndite muna me perdor?") name no product and are
+    // built from stopword-heavy tokens — a fresh search matches unrelated products, the
+    // usage guards then judge THOSE products' (missing) usage text, and a perfectly
+    // answerable question escalates (live bug: Nitro Tech Ripped, usage text present).
+    matchesUsageQuestionKeyword(message)
   ) {
     return true;
   }
@@ -4162,7 +4172,19 @@ export async function generateReply(
     !isOtherOptionsRequest &&
     (needsConversationProductContext(searchText) ||
       attributeIntent.is_attribute_question ||
-      isComparisonOrRecommendation);
+      isComparisonOrRecommendation ||
+      // Usage/dosage questions route through the discussed products: their wording carries
+      // no product identity ("Sa her ndite muna me perdor?"), so a fresh fusion search
+      // returns stopword matches and the usage guards then escalate an answerable question
+      // (the product's own usage_description never enters the evidence). A usage question
+      // that DOES name a product is unaffected — inbound-name pins are prepended to the
+      // contextual set and always win.
+      matchesUsageQuestionKeyword(searchText) ||
+      // Description/ingredient follow-ups ("Qfar permban?", "Per qfare sherben?") are the
+      // same failure class: no product identity in the wording, so without this signal
+      // they fresh-search stopwords and the description gap-check judges the wrong
+      // products. Deterministic and recommendation-safe; named products win via pins.
+      isProductDescriptionQuestion(searchText));
 
   if (isOtherOptionsRequest) {
     // Use the category_hint from the classifier when available (most specific), otherwise

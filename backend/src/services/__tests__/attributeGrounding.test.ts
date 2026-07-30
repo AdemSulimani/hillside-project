@@ -560,3 +560,62 @@ describe('decideAttributeVerdicts — membership routing (P1-B)', () => {
     assert.equal(observed.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// P1-B FP fix (live, 2026-07-29): support-only packaging-fingerprint evidence.
+// "Qfar permban ky produkt?" → the model answered from the verified packaging block
+// ("1.81 kg, 104 servings, Chocolate Fudge Brownie") for a row with a NULL description;
+// the membership lane flagged "1.81 kg" absent because the index had no image evidence.
+// Fingerprint clauses may RESCUE a claim, never create a flag.
+// ---------------------------------------------------------------------------
+
+describe('support-only packaging evidence (auxClauses / supportOnlyClauses)', () => {
+  const NTR_FP_CLAUSES = segmentClauses(
+    'Brand: Muscletech. Size: 1.81 kg. protein per serving: 20g; servings: 104. Flavor: Chocolate Fudge Brownie.',
+  );
+  const ntrEvidence: AttributeEvidence = {
+    clauses: segmentClauses('Nitro Tech Ripped\nProteina'),
+    supportOnlyClauses: NTR_FP_CLAUSES,
+    populated: false,
+    truncated: false,
+  };
+
+  it('membership: a packaging-read value is SUPPORTED, not absent (the 1.81 kg live FP)', () => {
+    assert.equal(
+      evaluateValueClaimMembership(parseAttributeClaim('1.81 kg'), ntrEvidence, 'product'),
+      'supported',
+    );
+  });
+
+  it('membership: without the packaging evidence the same claim is absent (guards the fix)', () => {
+    assert.equal(
+      evaluateValueClaimMembership(
+        parseAttributeClaim('1.81 kg'),
+        { ...ntrEvidence, supportOnlyClauses: [] },
+        'product',
+      ),
+      'absent',
+    );
+  });
+
+  it('exclusion support: a "Sugar Free" packaging label rescues a "pa sheqer" claim', () => {
+    const evidence: AttributeEvidence = {
+      clauses: [],
+      supportOnlyClauses: segmentClauses('Visible text: Sugar Free, 20g Protein.'),
+      populated: false,
+      truncated: false,
+    };
+    assert.equal(evaluateAttributeClaim(parseAttributeClaim('pa sheqer'), evidence, 'product'), 'supported');
+  });
+
+  it('contradiction: packaging clauses can NEVER contradict — vision noise must not flag', () => {
+    // This clause would refute "pa sheqer" if it were primary evidence ("permban sheqer").
+    const evidence: AttributeEvidence = {
+      clauses: [],
+      supportOnlyClauses: segmentClauses('permban sheqer te shtuar'),
+      populated: true,
+      truncated: false,
+    };
+    assert.equal(evaluateAttributeClaim(parseAttributeClaim('pa sheqer'), evidence, 'product'), 'silent');
+  });
+});
