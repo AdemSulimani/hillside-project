@@ -3511,6 +3511,8 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
     inboundNamedProducts = [],
     telemetry: replyTelemetry,
     factsUsed,
+    brandMembership = null,
+    visionMatch = null,
   } = await generateReply(
       conversationId,
       tenantId,
@@ -3520,6 +3522,36 @@ async function processAIReplyInner(data: AIReplyJobData, attempt?: AIReplyAttemp
       replyLanguage,
       traceId, // P1-5: thread the correlation id into aiService (closes C-109).
     );
+
+  // Audit H3: the vision-match and brand-membership verdicts become queryable ledger
+  // events. Before this, "how often did we deny a brand we carry?" and "why did this
+  // image turn clarify?" had no answer outside the 12K prompt preview blob.
+  if (visionMatch) {
+    recordDecision({
+      classifier: 'vision_match',
+      raw_score: visionMatch.confidence,
+      threshold: null,
+      boost_applied: false,
+      passed: !visionMatch.notInCatalog && !visionMatch.clarify,
+      branch: visionMatch.notInCatalog
+        ? `not_in_catalog:brand_absent=${visionMatch.brandLikelyAbsent}`
+        : visionMatch.clarify
+          ? `clarify:${visionMatch.clarificationReason ?? 'unspecified'}`
+          : visionMatch.productCount > 0
+            ? 'match'
+            : 'no_products',
+    });
+  }
+  if (brandMembership) {
+    recordDecision({
+      classifier: 'brand_membership',
+      raw_score: null,
+      threshold: null,
+      boost_applied: false,
+      passed: brandMembership.status !== 'not_found',
+      branch: `${brandMembership.status}:products=${brandMembership.products.length}`,
+    });
+  }
 
   // Await the image classification result — it should already be resolved since
   // generateReply took much longer than a single fast JSON classifier call.
