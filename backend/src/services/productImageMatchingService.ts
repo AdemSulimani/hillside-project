@@ -27,6 +27,7 @@ import {
   rankProductsByAttributeOverlap,
 } from './productTitleNormalization';
 import { permanentUrlToFilePath, fileToBase64DataUrl } from './attachmentStorageService';
+import { isBrandCarriedInCatalog } from './brandMembershipService';
 import { redisConnection } from '../jobs/redisConnection';
 import { logEvent } from './analyticsService';
 import {
@@ -276,32 +277,55 @@ async function extractCustomerProductFromImages(
   // P3-6: vision calls are the most expensive per-call item in the fan-out (image tokens), and in
   // the default config OPENAI_VISION_MODEL resolves to the same id as every other role — so
   // without this label an image turn's cost is indistinguishable from a text turn's.
-  const completion = await withModelRole('vision', () =>
-    openai.chat.completions.create({
-    model: OPENAI_VISION_MODEL,
-    response_format: { type: 'json_object' },
-    temperature: 0,
-    max_tokens: 750,
-    messages: [
-      { role: 'system', content: CUSTOMER_VISION_SYSTEM },
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: `Analyze the customer's product image(s). Message context: "${inboundMessage.trim() || 'No text.'}"`,
-          },
-          ...resolvedImageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
-        ],
-      },
-    ],
-    }),
-  );
-
-  const raw = completion.choices[0]?.message?.content;
+  //
+  // Extraction failure must degrade, not abort: every downstream step (decideVisionMatch's
+  // `!extraction` branch, the tiered text resolver) already handles a null extraction, and an
+  // unhandled throw here fails the whole reply job and re-pays the vision call on the BullMQ
+  // retry. Provider-caused failures are still counted by the resilience seam on the client, so
+  // the P2-6 degradation gate sees them without the throw propagating.
+  let raw: string | null | undefined;
+  try {
+    const completion = await withModelRole('vision', () =>
+      openai.chat.completions.create({
+      model: OPENAI_VISION_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 750,
+      messages: [
+        { role: 'system', content: CUSTOMER_VISION_SYSTEM },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Analyze the customer's product image(s). Message context: "${inboundMessage.trim() || 'No text.'}"`,
+            },
+            ...resolvedImageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+          ],
+        },
+      ],
+      }),
+    );
+    raw = completion.choices[0]?.message?.content;
+  } catch (err) {
+    console.warn('[imageMatch] Vision extraction call failed, degrading to text matching', {
+      tenantId,
+      err: err instanceof Error ? err.message : err,
+    });
+    return null;
+  }
   if (!raw?.trim()) return null;
 
-  const parsed = normalizeCustomerExtraction(JSON.parse(raw) as Partial<CustomerVisionExtraction>);
+  let parsed: CustomerVisionExtraction;
+  try {
+    parsed = normalizeCustomerExtraction(JSON.parse(raw) as Partial<CustomerVisionExtraction>);
+  } catch (err) {
+    console.warn('[imageMatch] Vision extraction returned unparseable JSON, degrading to text matching', {
+      tenantId,
+      err: err instanceof Error ? err.message : err,
+    });
+    return null;
+  }
   await redisConnection.set(cacheKey, JSON.stringify(parsed), 'EX', 3600);
   return parsed;
 }
@@ -657,9 +681,24 @@ export async function matchProductsFromCustomerImages(input: {
 
   const textPool = [...(input.textMatchedProducts ?? []), ...textSearchMatches];
   const brandCheckPool = visualMatches.length > 0 ? visualMatches : textPool;
-  const brandLikelyAbsent = extraction?.brand_name
+  let brandLikelyAbsent = extraction?.brand_name
     ? !isBrandLikelyInCatalog(extraction.brand_name, brandCheckPool)
     : false;
+  // Audit H2: the pool above is only this turn's retrieval window. Before declaring the
+  // brand absent (which drives a customer-facing "we don't carry this"), verify against
+  // the FULL tenant catalog — retrieval missing a product must not become a false denial.
+  if (brandLikelyAbsent && extraction?.brand_name) {
+    try {
+      if (await isBrandCarriedInCatalog(input.tenantId, extraction.brand_name)) {
+        brandLikelyAbsent = false;
+      }
+    } catch (err) {
+      console.warn('[imageMatch] Catalog-wide brand check failed, keeping pool verdict', {
+        tenantId: input.tenantId,
+        err,
+      });
+    }
+  }
 
   const normalizedBrand = extraction?.brand_name?.trim().toLowerCase() ?? null;
   const exactBrandMatches = normalizedBrand
