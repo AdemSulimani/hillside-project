@@ -155,6 +155,7 @@ import {
   DIALECT_NORMALIZATION,
   extractDialectKeywords,
   foldDialect,
+  isAlphanumericCodeToken,
 } from './dialectNormalization';
 import { GHEG_ALBANIAN_MARKERS, GHEG_LEXICONS, withGhegMarkers } from './ghegLexicons';
 import { lexicallyAsksAboutPrice } from './priceIntentLexicon';
@@ -702,7 +703,7 @@ export function extractKeywords(text: string): string[] {
     // like "biobalancn" instead of "biobalancë" which then matched nothing.
     .replace(/[^\p{L}\p{N}\s]/gu, '')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !stopWords.has(w));
+    .filter((w) => (w.length > 2 || isAlphanumericCodeToken(w)) && !stopWords.has(w));
 }
 
 /** Multi-word phrases and known category/tag labels extracted for catalog lookup. */

@@ -5,6 +5,7 @@ import {
 } from '../db/models/product';
 import { knobNumber } from '../config/knobs';
 import { normalizeText } from './productTitleNormalization';
+import { isAlphanumericCodeToken } from './dialectNormalization';
 import { IMAGE_REPLY_TEMPLATES } from './cannedReplyText';
 import type { ReplyLocale } from './aiService';
 
@@ -114,6 +115,10 @@ export function productNameTokenMatch(refValue: string, productName: string): bo
  * Tier A: the full folded catalog name appears in a text ("nitro tech ripped").
  * Tier B: the name's leading two folded tokens appear ("carbo one" when the reply said
  *         "Carbo One në shije limon" without the size suffix). Tier A hits rank first.
+ * Tier C: the name's single leading token, only when it is a letter+digit product code
+ *         ("c4") — a reply saying bare "C4" names the whole C4 family. Skipped for any
+ *         family a fuller Tier A/B mention already resolved, so a reply that wrote
+ *         "C4 Ripped" out does not drag in every other C4 line via its embedded "c4".
  */
 export function filterProductsMentionedInTexts(products: Product[], texts: string[]): Product[] {
   const foldedTexts = texts.map(foldForMatch).filter((t) => t.length > 0);
@@ -142,7 +147,25 @@ export function filterProductsMentionedInTexts(products: Product[], texts: strin
   // "Nitro Tech Ripped" in full, its "nitro tech" lead must not drag in every sibling
   // variant — but a bare "Carbo One" mention (no variant matched in full) legitimately
   // covers the Carbo One variants.
-  return [...tierA, ...tierB.filter((e) => !tierACandidatesByLead.has(e.lead)).map((e) => e.product)];
+  const resolved = [
+    ...tierA,
+    ...tierB.filter((e) => !tierACandidatesByLead.has(e.lead)).map((e) => e.product),
+  ];
+
+  const resolvedIds = new Set(resolved.map((p) => p.id));
+  const resolvedFirstTokens = new Set(
+    [...tierA, ...tierB.map((e) => e.product)].map(
+      (p) => foldForMatch(p.name).split(' ').filter(Boolean)[0] ?? '',
+    ),
+  );
+  const tierC: Product[] = [];
+  for (const product of products) {
+    if (resolvedIds.has(product.id)) continue;
+    const first = foldForMatch(product.name).split(' ').filter(Boolean)[0] ?? '';
+    if (!isAlphanumericCodeToken(first) || resolvedFirstTokens.has(first)) continue;
+    if (foldedTexts.some((t) => containsPhrase(t, first))) tierC.push(product);
+  }
+  return [...resolved, ...tierC];
 }
 
 export type ImageTargetMatchMethod =

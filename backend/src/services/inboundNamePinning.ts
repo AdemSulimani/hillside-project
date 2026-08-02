@@ -30,7 +30,11 @@ import {
 } from '../db/models/product';
 import { knobNumber } from '../config/knobs';
 import { normalizeText } from './productTitleNormalization';
-import { RETRIEVAL_STOPWORDS, expandDialectVariants } from './dialectNormalization';
+import {
+  RETRIEVAL_STOPWORDS,
+  expandDialectVariants,
+  isAlphanumericCodeToken,
+} from './dialectNormalization';
 import {
   albanianTokenStems,
   productNameTokenMatch,
@@ -78,7 +82,7 @@ function isStopToken(token: string): boolean {
  * stopword edges trimmed (question filler never anchors a gram) and interior-stopword
  * grams dropped ("kreatinen edhe nitro" can never token-match a catalog name — every
  * gram token must appear in the name — so it would only burn lookup budget), plus
- * GUARDED uni-grams (length ≥5, non-stopword) for tokens no surviving multi-gram
+ * GUARDED uni-grams (length ≥5 or a letter+digit code like "c4", non-stopword) for tokens no surviving multi-gram
  * covers — this is what lets a lone Albanianized name ("kreatinen") reach the ladder.
  *
  * Two-tier order: multi-grams (highest precision) longest-first, then uni-grams.
@@ -122,7 +126,9 @@ export function extractCandidateNameGrams(inbound: string): string[] {
   const uniGrams: string[] = [];
   for (const token of tokens) {
     if (
-      token.length >= 5 &&
+      // ≥5 chars, or a short letter+digit product code ("c4", "b12") — the one class of
+      // short token that names a product family and would otherwise never reach the ladder.
+      (token.length >= 5 || isAlphanumericCodeToken(token)) &&
       !isStopToken(token) &&
       !coveredTokens.has(token) &&
       !seen.has(token)

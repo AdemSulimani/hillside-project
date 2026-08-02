@@ -139,7 +139,8 @@ export const ALBANIAN_CONTENT_VARIANTS: ReadonlyMap<string, readonly string[]> =
  *
  * Entries are stored FOLDED (no diacritics): callers fold before lookup, so 'një' and 'nje'
  * collapse to one entry — the hand-maintained double-spelling burden disappears. Tokens of
- * length <= 2 are dropped by the caller's length filter, so short entries are informational.
+ * length <= 2 are dropped by the caller's length filter (except letter+digit product codes
+ * like "c4" — see `isAlphanumericCodeToken`), so short entries are informational.
  *
  * Gheg function words are included: EV-030 shows they dominate real traffic and today they pass
  * the filter and become garbage ILIKE terms.
@@ -210,6 +211,15 @@ export function expandDialectVariants(tokens: string[]): string[] {
 }
 
 /**
+ * A short token that mixes letters and digits ("c4", "b12") is a product/model code, not noise —
+ * exempt from the ≥3-char keyword floor. Pure-digit tokens ("30", "60") must NOT qualify: they
+ * would ILIKE-match every "30servime" catalog name.
+ */
+export function isAlphanumericCodeToken(t: string): boolean {
+  return t.length >= 2 && /\p{L}/u.test(t) && /\p{N}/u.test(t);
+}
+
+/**
  * The lexical keyword pipeline: fold → tokenize → drop stopwords/short tokens → expand variants.
  * This is what `extractKeywords` becomes when DIALECT_NORMALIZATION is on.
  */
@@ -218,6 +228,6 @@ export function extractDialectKeywords(text: string): string[] {
   if (!folded) return [];
   const tokens = folded
     .split(' ')
-    .filter((w) => w.length > 2 && !RETRIEVAL_STOPWORDS.has(w));
+    .filter((w) => (w.length > 2 || isAlphanumericCodeToken(w)) && !RETRIEVAL_STOPWORDS.has(w));
   return expandDialectVariants(tokens);
 }

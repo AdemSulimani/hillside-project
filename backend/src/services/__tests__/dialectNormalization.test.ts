@@ -20,6 +20,7 @@ import {
   expandDialectVariants,
   extractDialectKeywords,
   foldDialect,
+  isAlphanumericCodeToken,
 } from '../dialectNormalization';
 import { normalizeText } from '../productTitleNormalization';
 
@@ -220,11 +221,41 @@ describe('extractDialectKeywords — the unified lexical pipeline', () => {
     assert.deepEqual(extractDialectKeywords('O shef'), []);
   });
 
-  it('never emits a token of length <= 2', () => {
+  it('never emits a token of length <= 2, except letter+digit product codes', () => {
     for (const utterance of EV_030_CORPUS) {
       for (const token of extractDialectKeywords(utterance)) {
-        assert.ok(token.length > 2, `short token "${token}" from: ${utterance}`);
+        assert.ok(
+          token.length > 2 || isAlphanumericCodeToken(token),
+          `short token "${token}" from: ${utterance}`,
+        );
       }
+    }
+  });
+
+  it('keeps short letter+digit product codes like "c4" (the C4 false-denial trap)', () => {
+    // "A keni naj C4" used to yield [] — 'a' short, 'keni'/'naj' stopwords, 'c4' killed by
+    // the >2 floor — which skipped the whole keyword ILIKE lane and produced a false
+    // "nuk e kemi C4" against a catalog with 6 C4 rows.
+    assert.deepEqual(extractDialectKeywords('A keni naj C4'), ['c4']);
+    // "Pershendejte" is a live typo of "pershendetje" — not stopworded, and that's fine.
+    assert.ok(extractDialectKeywords('Pershendejte a keni c4').includes('c4'));
+    assert.ok(extractDialectKeywords('a keni b12 vitamina').includes('b12'));
+  });
+
+  it('still drops pure-digit and pure-letter short tokens', () => {
+    // "30"/"60" must never become ILIKE terms — they substring-match every "30servime" name.
+    const out = extractDialectKeywords('a keni 30 ose 60 xl');
+    assert.equal(out.includes('30'), false);
+    assert.equal(out.includes('60'), false);
+    assert.equal(out.includes('xl'), false, 'pure-letter 2-char token survived');
+  });
+});
+
+describe('isAlphanumericCodeToken', () => {
+  it('accepts letter+digit codes and rejects everything else short', () => {
+    for (const yes of ['c4', 'b12', 'q10', 'w3']) assert.ok(isAlphanumericCodeToken(yes), yes);
+    for (const no of ['30', '60', 'xl', 'a', '4', 'ok']) {
+      assert.equal(isAlphanumericCodeToken(no), false, no);
     }
   });
 });

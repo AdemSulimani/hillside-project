@@ -88,6 +88,16 @@ describe('extractCandidateNameGrams', () => {
     assert.deepEqual(extractCandidateNameGrams('a keni tjera?'), []); // option-word stoplisted
   });
 
+  it('emits a uni-gram for a short letter+digit product code (the C4 false-denial trap)', () => {
+    // "A keni naj C4" used to extract [] — 'keni'/'naj' stopworded, 'c4' under the ≥5 floor —
+    // so pinning never ran and the false-denial backstop stayed disarmed.
+    assert.deepEqual(extractCandidateNameGrams('A keni naj C4'), ['c4']);
+    // "Pershendejte" (typo, not stopworded) also survives as a uni-gram — 'c4' must still be there.
+    assert.ok(extractCandidateNameGrams('Pershendejte a keni c4').includes('c4'));
+    // Pure digits stay excluded.
+    assert.deepEqual(extractCandidateNameGrams('a keni 30?'), []);
+  });
+
   it('drops grams with an interior stopword but keeps their content tokens via uni-grams', () => {
     const grams = extractCandidateNameGrams('a keni kreatinen edhe nitro tech?');
     assert.ok(!grams.some((g) => /\bedhe\b/.test(g)), `interior stopword leaked: ${grams.join(' | ')}`);
@@ -324,5 +334,18 @@ describe('productsDeniedInReply — clause-scoped denial matching', () => {
     );
     assert.deepEqual(productsDeniedInReply([], 'nuk e kemi'), []);
     assert.deepEqual(productsDeniedInReply([nitroRipped], ''), []);
+  });
+
+  it('catches a bare family-code denial ("nuk e kemi C4") via the code-token tier', () => {
+    const c4Ripped = product('C4 Ripped pre-workout 30servime Ananas');
+    const c4Original = product('C4 Original 30servime shije Mjedre');
+    const denied = productsDeniedInReply(
+      [c4Ripped, c4Original],
+      'Më vjen keq, por nuk e kemi C4 në dispozicion. Mund tju interesojnë produktet tona të tjera.',
+    );
+    assert.deepEqual(
+      denied.map((p) => p.id).sort(),
+      [c4Ripped.id, c4Original.id].sort(),
+    );
   });
 });
