@@ -5,7 +5,12 @@ import {
   type Product,
 } from '../db/models/product';
 import { containsPhrase } from './attributeClaimLexicon';
-import { DIALECT_NORMALIZATION, extractDialectKeywords, foldDialect } from './dialectNormalization';
+import {
+  DIALECT_NORMALIZATION,
+  extractDialectKeywords,
+  foldDialect,
+  isAlphanumericCodeToken,
+} from './dialectNormalization';
 import {
   GHEG_ATTRIBUTE_FOLLOW_UP_EXTRA_PATTERNS,
   GHEG_OTHER_OPTIONS_EXTRA_PATTERNS,
@@ -231,7 +236,7 @@ function extractKeywords(text: string): string[] {
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, '')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !stopWords.has(w));
+    .filter((w) => (w.length > 2 || isAlphanumericCodeToken(w)) && !stopWords.has(w));
 }
 
 /**

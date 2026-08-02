@@ -142,6 +142,29 @@ describe('filterProductsMentionedInTexts', () => {
     assert.deepEqual(filterProductsMentionedInTexts(pool, []), []);
     assert.deepEqual(filterProductsMentionedInTexts(pool, ['']), []);
   });
+
+  it('catches a bare code-token family mention ("C4") via Tier C', () => {
+    const c4Pool = [
+      product('C4 Ripped pre-workout 30servime Ananas'),
+      product('C4 Original 30servime shije Mjedre'),
+      product('Nitro Tech Ripped', 1),
+    ];
+    const mentioned = filterProductsMentionedInTexts(c4Pool, ['Nuk e kemi C4 në dispozicion.']);
+    assert.deepEqual(
+      mentioned.map((p) => p.name).sort(),
+      ['C4 Original 30servime shije Mjedre', 'C4 Ripped pre-workout 30servime Ananas'],
+    );
+  });
+
+  it('Tier C stays silent when a fuller mention resolved the code-token family', () => {
+    const c4Pool = [
+      product('C4 Ripped pre-workout 30servime Ananas'),
+      product('C4 Original 30servime shije Mjedre'),
+    ];
+    // "C4 Ripped" (Tier B lead) is written out — the embedded "c4" must not drag in C4 Original.
+    const mentioned = filterProductsMentionedInTexts(c4Pool, ['Po, kemi C4 Ripped me çmim €38.']);
+    assert.deepEqual(mentioned.map((p) => p.name), ['C4 Ripped pre-workout 30servime Ananas']);
+  });
 });
 
 describe('resolveProductsForImageRequest', () => {
