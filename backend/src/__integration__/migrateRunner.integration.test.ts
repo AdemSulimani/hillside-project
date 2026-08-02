@@ -48,20 +48,22 @@ function fixtureDir(files: Record<string, string>): string {
 /** A fresh throwaway DB + a pool on it; caller ends the pool. */
 async function freshDb(): Promise<{ pool: Pool; name: string }> {
   const name = `${TEST_DB}_${dbCounter++}`;
-  await adminPool.query(`DROP DATABASE IF EXISTS ${name}`);
+  await adminPool.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
   await adminPool.query(`CREATE DATABASE ${name}`);
-  return { pool: new Pool({ connectionString: urlWithDb(name) }), name };
+  const pool = new Pool({ connectionString: urlWithDb(name) });
+  // A terminated idle client re-emits 'error' on the pool; without a listener that is a
+  // process-killing uncaughtException attributed to whatever test happens to be running.
+  pool.on('error', () => undefined);
+  return { pool, name };
 }
 
 async function dropDb(pool: Pool, name: string): Promise<void> {
   await pool.end().catch(() => undefined);
-  await adminPool
-    .query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [name],
-    )
-    .catch(() => undefined);
-  await adminPool.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => undefined);
+  // WITH (FORCE) terminates lingering backends server-side, atomically with the drop —
+  // the old separate pg_terminate_backend pass could race a pool.end() still closing
+  // gracefully on a slow CI runner and crash the suite with
+  // 'terminating connection due to administrator command'.
+  await adminPool.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`).catch(() => undefined);
 }
 
 async function ledger(pool: Pool): Promise<{ name: string; checksum: string | null; applied_seq: number | null }[]> {
@@ -88,6 +90,7 @@ async function schemaSnapshot(pool: Pool): Promise<string> {
 
 before(async () => {
   adminPool = new Pool({ connectionString: urlWithDb('postgres') });
+  adminPool.on('error', () => undefined);
 });
 
 after(async () => {
