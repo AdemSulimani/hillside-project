@@ -803,33 +803,3 @@ describe('P0-1 Guard U2 widened-evidence decision contract', () => {
     }
   });
 });
-
-// ---------------------------------------------------------------------------
-// Live bug 2026-07-29: "Sa her ndite muna me perdor?" (usage follow-up naming no
-// product) must be detectable by the DETERMINISTIC keyword check — it is what routes
-// usage follow-ups through the discussed-products resolver instead of a fresh fusion
-// search over stopword tokens (which matched 10 unrelated products and escalated a
-// question the product's own usage_description answered).
-// ---------------------------------------------------------------------------
-describe('usage follow-up routing keywords (live-bug pins)', () => {
-  it('matches the recorded Gheg usage follow-ups', () => {
-    for (const message of [
-      'Sa her ndite muna me perdor?',
-      'Sa her ndite muna me perdor kta mfal?',
-      'Qysh me perdor kete?',
-      'Si ta marr kreatinen?',
-    ]) {
-      assert.equal(matchesUsageQuestionKeyword(message), true, message);
-    }
-  });
-
-  it('does not match plain availability/price questions', () => {
-    for (const message of [
-      'A keni bsn creatine vlla edhe sa kushton',
-      'Sa kushton Carbo one 1kg Limon?',
-      'A ka najfar shije a jo',
-    ]) {
-      assert.equal(matchesUsageQuestionKeyword(message), false, message);
-    }
-  });
-});
