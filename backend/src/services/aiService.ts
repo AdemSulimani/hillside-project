@@ -103,11 +103,6 @@ import {
   SIMILARITY_HYSTERESIS_BAND,
 } from './retrievalReliability';
 import { matchProductsFromCustomerImages } from './productImageMatchingService';
-import {
-  buildBrandMembershipContext,
-  resolveBrandMembershipForMessage,
-  type BrandMembershipOutcome,
-} from './brandMembershipService';
 import { getProductImageDerivedContext } from './productImageAttributeService';
 import { redisConnection } from '../jobs/redisConnection';
 import { enqueueMissingEmbeddingsForTenant } from '../jobs/reconcileProductEmbeddings';
@@ -119,7 +114,6 @@ import {
   expandProductsForAttributeQuery,
   extractConversationProductAnchor,
   isCategoryAttributeFollowUp,
-  isStockOnlyFollowUp,
   resolveProductsForContextualQuery,
   type AttributeQueryIntentHint,
 } from './productRetrievalService';
@@ -932,11 +926,7 @@ export function needsConversationProductContext(message: string): boolean {
     isVagueProductReferenceFollowUp(message) ||
     isCategoryAttributeFollowUp(message) ||
     isAttributeQuestionMessage(message) ||
-    isPhotoProductReferenceFollowUp(message) ||
-    // Stock/availability follow-ups ("A e keni ne gjendje?") — same routing class as
-    // price/usage/description: no product identity in the wording, and its tokens hit
-    // real catalog text, so a fresh search answers the wrong products' stock status.
-    isStockOnlyFollowUp(message)
+    isPhotoProductReferenceFollowUp(message)
   );
 }
 
@@ -1281,12 +1271,7 @@ function isProductFollowUpReference(
     attributeIntent.is_attribute_question ||
     attributeIntent.is_product_knowledge_question ||
     needsConversationProductContext(message) ||
-    isProductDescriptionQuestion(message) ||
-    // Usage/dosage follow-ups ("Sa her ndite muna me perdor?") name no product and are
-    // built from stopword-heavy tokens — a fresh search matches unrelated products, the
-    // usage guards then judge THOSE products' (missing) usage text, and a perfectly
-    // answerable question escalates (live bug: Nitro Tech Ripped, usage text present).
-    matchesUsageQuestionKeyword(message)
+    isProductDescriptionQuestion(message)
   ) {
     return true;
   }
@@ -2613,7 +2598,6 @@ function extractCatalogBrandProductPairs(
 function normalizeProductMentionsForReply(
   reply: string,
   productCatalogContext: string,
-  opts: { preserveBrandNames?: boolean } = {},
 ): string {
   let normalized = reply;
   const quoteChars = `"'“”‘’`;
@@ -2623,12 +2607,8 @@ function normalizeProductMentionsForReply(
   for (const { brand, product } of pairs) {
     const escapedBrand = escapeRegExp(brand);
     const escapedProduct = escapeRegExp(product);
-    // Audit C3: on brand-question turns the brand name IS the answer — the
-    // "product name only" style rule must not delete it from the reply.
-    if (!opts.preserveBrandNames) {
-      const brandPlusProduct = new RegExp(`\\b${escapedBrand}\\s+${escapedProduct}\\b`, 'giu');
-      normalized = normalized.replace(brandPlusProduct, product);
-    }
+    const brandPlusProduct = new RegExp(`\\b${escapedBrand}\\s+${escapedProduct}\\b`, 'giu');
+    normalized = normalized.replace(brandPlusProduct, product);
 
     const wrappedProduct = new RegExp(
       `[\"'“”‘’]\\s*(${escapedProduct})\\s*[\"'“”‘’]`,
@@ -4037,20 +4017,6 @@ export async function generateReply(
   /** P2-1 (RC-03): the reply's declared facts_used. Present only when the facts_used contract is
    * active (non-vision text path, non-custom model); undefined otherwise. */
   factsUsed?: DeclaredFact[];
-  /** Audit C2/H3: the deterministic brand-membership verdict for this turn (text lane only).
-   * Null when the turn carried no brand signal; undefined on canned early-return paths. */
-  brandMembership?: BrandMembershipOutcome | null;
-  /** Audit H3: compact vision-match verdict for the decision ledger. Before this, the vision
-   * decision (confidence, clarify reason, brand absence) survived only inside the prompt
-   * preview blob — a wrong image answer was undiagnosable without raw SQL. Null on text turns. */
-  visionMatch?: {
-    confidence: number;
-    clarify: boolean;
-    clarificationReason: string | null;
-    notInCatalog: boolean;
-    brandLikelyAbsent: boolean;
-    productCount: number;
-  } | null;
 }> {
   // P1-5: retrieval-telemetry sink, populated by the fresh matchProducts calls below. Stays
   // undefined when the reply reuses persisted/contextual products (no fresh retrieval this turn).
@@ -4197,19 +4163,7 @@ export async function generateReply(
     !isOtherOptionsRequest &&
     (needsConversationProductContext(searchText) ||
       attributeIntent.is_attribute_question ||
-      isComparisonOrRecommendation ||
-      // Usage/dosage questions route through the discussed products: their wording carries
-      // no product identity ("Sa her ndite muna me perdor?"), so a fresh fusion search
-      // returns stopword matches and the usage guards then escalate an answerable question
-      // (the product's own usage_description never enters the evidence). A usage question
-      // that DOES name a product is unaffected — inbound-name pins are prepended to the
-      // contextual set and always win.
-      matchesUsageQuestionKeyword(searchText) ||
-      // Description/ingredient follow-ups ("Qfar permban?", "Per qfare sherben?") are the
-      // same failure class: no product identity in the wording, so without this signal
-      // they fresh-search stopwords and the description gap-check judges the wrong
-      // products. Deterministic and recommendation-safe; named products win via pins.
-      isProductDescriptionQuestion(searchText));
+      isComparisonOrRecommendation);
 
   if (isOtherOptionsRequest) {
     // Use the category_hint from the classifier when available (most specific), otherwise
@@ -4455,14 +4409,6 @@ export async function generateReply(
   let imageMatchConfidence = 1;
   let shouldAskImageClarification = false;
   let productNotInCatalog = false;
-  let visionMatch: {
-    confidence: number;
-    clarify: boolean;
-    clarificationReason: string | null;
-    notInCatalog: boolean;
-    brandLikelyAbsent: boolean;
-    productCount: number;
-  } | null = null;
 
   if (hasImages) {
     const imageMatchOutcome = await matchProductsFromCustomerImages({
@@ -4477,15 +4423,6 @@ export async function generateReply(
     shouldAskImageClarification = imageMatchOutcome.shouldAskClarification;
     productNotInCatalog = imageMatchOutcome.productNotInCatalog;
     visionContext = imageMatchOutcome.visionContext;
-    // Audit H3: surface the vision verdict to the caller for the decision ledger.
-    visionMatch = {
-      confidence: imageMatchOutcome.matchConfidence,
-      clarify: imageMatchOutcome.shouldAskClarification,
-      clarificationReason: imageMatchOutcome.clarificationReason ?? null,
-      notInCatalog: imageMatchOutcome.productNotInCatalog,
-      brandLikelyAbsent: imageMatchOutcome.brandLikelyAbsent,
-      productCount: imageMatchOutcome.products.length,
-    };
 
     if (productNotInCatalog) {
       products = [];
@@ -4493,33 +4430,6 @@ export async function generateReply(
     } else if (imageMatchOutcome.products.length > 0) {
       products = imageMatchOutcome.products;
       usedFullCatalogFallback = false;
-    }
-  }
-
-  // Brand membership lane (audit C2): deterministic brand verdict for text turns.
-  // Image turns are excluded — the vision pipeline carries its own brand handling
-  // (extraction + brandLikelyAbsent) and injects it via visionContext. Ordinary text
-  // turns pay only a cached distinct-brand scan; the deeper probes run only when a
-  // known brand is mentioned or the message carries an explicit brand cue.
-  let brandMembership: BrandMembershipOutcome | null = null;
-  if (!hasImages && searchText) {
-    try {
-      brandMembership = await resolveBrandMembershipForMessage(tenantId, searchText, {
-        attributeIntentBrand: attributeIntent.attributes.includes('brand'),
-      });
-      if (brandMembership && brandMembership.products.length > 0) {
-        // Pin the brand-scoped products ahead of the fused pool (same shape as
-        // inbound-name pinning) so the reply's catalog context actually contains
-        // the brand's products instead of whatever keyword fusion happened to rank.
-        const brandIds = new Set(brandMembership.products.map((p) => p.id));
-        products = [
-          ...brandMembership.products,
-          ...products.filter((p) => !brandIds.has(p.id)),
-        ].slice(0, Math.max(contextualMatchLimit, brandMembership.products.length));
-        usedFullCatalogFallback = false;
-      }
-    } catch (err) {
-      console.warn('[aiService] Brand membership probe failed', { conversationId, tenantId, err });
     }
   }
 
@@ -4772,14 +4682,6 @@ Product-image match uncertainty (IMPORTANT):
 - Ask a brief clarifying question (clearer photo showing the label, product name, or which item if multiple visible).
 - You may mention similar catalog items only if listed in the product catalog context, with honest uncertainty.
 - Never invent product names, prices, or availability.`, 'high');
-  }
-
-  // Audit C2/C3: the deterministic brand verdict + the text-lane brand-accuracy rules.
-  // `high` like the image sections — losing it makes a brand answer WRONG, not wordier
-  // (before this section, every brand-accuracy rule lived in the image-gated vision
-  // block and text turns had none).
-  if (brandMembership) {
-    section('brand_availability', buildBrandMembershipContext(brandMembership), 'high');
   }
 
   const aggregationInstructions = buildCategoryAggregationInstructions(queryScope, products.length);
@@ -5244,11 +5146,7 @@ Using packaging-derived details (IMPORTANT — source precedence):
   });
 
   return {
-    reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext, {
-      // Audit C3: keep brand names in the reply when the turn is about a brand —
-      // stripping them would delete the very fact the customer asked for.
-      preserveBrandNames: brandMembership != null || attributeIntent.attributes.includes('brand'),
-    }),
+    reply: normalizeProductMentionsForReply(reply.trim(), resolvedProductCatalogContext),
     productCatalogContext: resolvedProductCatalogContext,
     language,
     // When the alphabetical catalog sample was injected as generic context (e.g. a
@@ -5265,8 +5163,6 @@ Using packaging-derived details (IMPORTANT — source precedence):
     // P2-1 (RC-03): the reply's declared facts (present only when the facts_used contract is on).
     // Fed to the consolidated grounding gate and persisted in the decision ledger.
     factsUsed,
-    brandMembership,
-    visionMatch,
   };
 }
 

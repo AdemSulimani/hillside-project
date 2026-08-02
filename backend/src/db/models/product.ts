@@ -540,74 +540,6 @@ export async function searchProducts(
 }
 
 /**
- * Brand-scoped enumeration: every active product whose `brand` column contains the
- * given value (case-insensitive). This is the query behind "do you have products
- * from brand X" — brand participates here as a first-class filter, not as one
- * OR-term of a generic keyword search. Backed by idx_products_tenant_brand and,
- * for unanchored patterns, idx_products_brand_trgm (migration 044).
- */
-export async function findActiveProductsByBrandValue(
-  tenantId: string,
-  brand: string,
-  limit = 25,
-): Promise<Product[]> {
-  const trimmed = brand.trim();
-  if (!trimmed) return [];
-  const { rows } = await pool.query<Product>(
-    `SELECT * FROM products
-     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
-       AND brand IS NOT NULL
-       AND brand ILIKE $2
-     ORDER BY name ASC
-     LIMIT $3`,
-    [tenantId, `%${trimmed}%`, limit],
-  );
-  return rows;
-}
-
-/**
- * Distinct non-empty brand values across the tenant's active catalog, with row
- * counts. Powers the deterministic brand-membership probe ("is brand X carried?")
- * and "what brands do you carry?" aggregation. The result is small (distinct
- * brands, not products) and callers cache it.
- */
-export async function listDistinctActiveBrands(
-  tenantId: string,
-): Promise<Array<{ brand: string; product_count: number }>> {
-  const { rows } = await pool.query<{ brand: string; product_count: string }>(
-    `SELECT TRIM(brand) AS brand, COUNT(*)::int AS product_count
-     FROM products
-     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
-       AND brand IS NOT NULL AND TRIM(brand) <> ''
-     GROUP BY TRIM(brand)
-     ORDER BY COUNT(*) DESC, TRIM(brand) ASC`,
-    [tenantId],
-  );
-  return rows.map((r) => ({ brand: r.brand, product_count: Number(r.product_count) }));
-}
-
-/**
- * Brand-column coverage for the tenant's active catalog. A membership verdict of
- * "absent" is only trustworthy when the column is actually populated — on a
- * catalog where brand is NULL almost everywhere (the shipped reality: 1/258 rows),
- * "no brand-column match" must not be read as "brand not carried".
- */
-export async function countActiveBrandCoverage(
-  tenantId: string,
-): Promise<{ with_brand: number; total: number }> {
-  const { rows } = await pool.query<{ with_brand: string; total: string }>(
-    `SELECT
-       COUNT(*) FILTER (WHERE brand IS NOT NULL AND TRIM(brand) <> '')::int AS with_brand,
-       COUNT(*)::int AS total
-     FROM products
-     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true`,
-    [tenantId],
-  );
-  const row = rows[0];
-  return { with_brand: Number(row?.with_brand ?? 0), total: Number(row?.total ?? 0) };
-}
-
-/**
  * Token-aware product search: every supplied token must appear in at least one
  * searchable field (logical AND across tokens, OR across fields per token).
  *
@@ -970,13 +902,6 @@ export interface CatalogAttributeSourceRow {
   color: string | null;
   variant: string | null;
   weight: string | null;
-  /**
-   * Aggregated packaging-image fingerprint text — SUPPORT-ONLY evidence downstream. The
-   * generator's prompt treats verified packaging reads as reliable catalog knowledge, so the
-   * membership lane must be able to see them too; vision noise keeps them out of the
-   * contradiction pass.
-   */
-  fingerprint_text: string | null;
 }
 
 /**
@@ -999,14 +924,11 @@ export async function listActiveCatalogAttributeRowsForTenant(
   rowLimit: number,
 ): Promise<CatalogAttributeSourceRow[]> {
   const { rows } = await pool.query<CatalogAttributeSourceRow>(
-    `SELECT p.id, p.name, p.category, p.description, p.usage_description,
-            p.brand, p.flavor, p.size, p.color, p.variant, p.weight,
-            (SELECT string_agg(f.fingerprint_text, E'\n')
-               FROM product_image_fingerprints f
-              WHERE f.product_id = p.id AND f.fingerprint_text IS NOT NULL) AS fingerprint_text
-     FROM products p
-     WHERE p.tenant_id = $1 AND p.deleted_at IS NULL AND p.is_active = true
-     ORDER BY p.name ASC
+    `SELECT id, name, category, description, usage_description,
+            brand, flavor, size, color, variant, weight
+     FROM products
+     WHERE tenant_id = $1 AND deleted_at IS NULL AND is_active = true
+     ORDER BY name ASC
      LIMIT $2::int`,
     [tenantId, rowLimit],
   );

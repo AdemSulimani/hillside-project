@@ -27,9 +27,7 @@ import type { Product } from '../db/models/product';
 import {
   findActiveProductsByNameSubstring,
   findActiveProductsByNameSimilarity,
-  findActiveProductsByBrandValue,
 } from '../db/models/product';
-import { foldBrandText, listCarriedBrandsCached } from './brandMembershipService';
 import { knobNumber } from '../config/knobs';
 import { normalizeText } from './productTitleNormalization';
 import {
@@ -194,18 +192,6 @@ export function productsDeniedInReply(products: Product[], replyText: string): P
         denied.push(product);
       }
     }
-    // Audit H1: brand-level denial. "Nuk kemi produkte nga Nike" names no product, so
-    // the name matcher above can never trip — but if a pinned product's BRAND appears
-    // inside the denial clause, the denial covers that product all the same. ≥3-char
-    // folded brands only, so noise folds can't match.
-    for (const product of products) {
-      if (seen.has(product.id)) continue;
-      const brandFold = product.brand ? foldForMatch(product.brand).trim() : '';
-      if (brandFold.length >= 3 && clause.includes(brandFold)) {
-        seen.add(product.id);
-        denied.push(product);
-      }
-    }
   }
   return denied;
 }
@@ -214,8 +200,6 @@ export function productsDeniedInReply(products: Product[], replyText: string): P
 export interface InboundNamePinningDeps {
   bySubstring?: typeof findActiveProductsByNameSubstring;
   bySimilarity?: typeof findActiveProductsByNameSimilarity;
-  byBrand?: typeof findActiveProductsByBrandValue;
-  carriedBrands?: typeof listCarriedBrandsCached;
 }
 
 /**
@@ -310,10 +294,7 @@ export async function resolveGramsToProducts(
       }
 
       // Rung 4: trigram similarity — typo recovery at the calibrated floor. No token
-      // filter, ≥5-char grams only. (Brand mentions are deliberately NOT a ladder rung:
-      // brands are a closed per-tenant set, so they resolve via the separate
-      // resolveBrandTokenPins pass — exact folded match against the carried-brand list —
-      // without burning ladder lookup budget on every non-brand gram.)
+      // filter, ≥5-char grams only.
       if (matches.length === 0 && gram.length >= 5 && lookups < INBOUND_PIN_MAX_LOOKUPS) {
         lookups++;
         matches = await bySimilarity(tenantId, gram, INBOUND_PIN_SIMILARITY_THRESHOLD, 10);
@@ -338,81 +319,13 @@ export async function resolveGramsToProducts(
 }
 
 /**
- * Short-brand pinning pass (audit H1). Gram extraction has a ≥5-char floor (below it,
- * uni-grams are noise), which makes 3-4 char brands ("Nike", "GNC", "BSN") structurally
- * unpinnable through the ladder. Brands are a CLOSED SET per tenant though, so short
- * tokens can be safely resolved by exact folded equality against the carried-brand list
- * (plus containment for ≥4-char partials like "optimum" → "Optimum Nutrition") — no
- * fuzziness, no floor. Never throws; [] on any failure.
- */
-export async function resolveBrandTokenPins(
-  tenantId: string,
-  inbound: string,
-  deps: InboundNamePinningDeps = {},
-): Promise<Product[]> {
-  const byBrand = deps.byBrand ?? findActiveProductsByBrandValue;
-  const carriedBrands = deps.carriedBrands ?? listCarriedBrandsCached;
-
-  try {
-    const tokens = foldForMatch(inbound)
-      .split(' ')
-      .filter((t) => t.length >= 2 && !isStopToken(t));
-    if (tokens.length === 0) return [];
-    const grams = new Set<string>(tokens);
-    for (let i = 0; i + 1 < tokens.length; i++) {
-      grams.add(`${tokens[i]} ${tokens[i + 1]}`);
-    }
-
-    const brands = await carriedBrands(tenantId);
-    const matched: string[] = [];
-    for (const row of brands) {
-      const brandFold = foldBrandText(row.brand);
-      if (!brandFold) continue;
-      const hit = [...grams].some((g) => {
-        const gramFold = foldBrandText(g);
-        if (!gramFold) return false;
-        if (gramFold === brandFold) return true;
-        return gramFold.length >= 4 && brandFold.includes(gramFold);
-      });
-      if (hit) matched.push(row.brand);
-      if (matched.length >= 2) break;
-    }
-
-    const pinned: Product[] = [];
-    const seen = new Set<string>();
-    for (const brand of matched) {
-      const rows = await byBrand(tenantId, brand, INBOUND_PIN_MAX_PRODUCTS);
-      for (const p of rows) {
-        if (pinned.length >= INBOUND_PIN_MAX_PRODUCTS) return pinned;
-        if (!seen.has(p.id)) {
-          seen.add(p.id);
-          pinned.push(p);
-        }
-      }
-    }
-    return pinned;
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Resolves the active catalog products the inbound message explicitly names:
- * gram extraction + the resolution ladder above, then the short-brand pass (H1) for
- * brand mentions the gram floor cannot reach.
+ * gram extraction + the resolution ladder above.
  */
 export async function resolveInboundNamedProducts(
   tenantId: string,
   inbound: string,
   deps: InboundNamePinningDeps = {},
 ): Promise<Product[]> {
-  const pinned = await resolveGramsToProducts(tenantId, extractCandidateNameGrams(inbound), deps);
-  if (pinned.length >= INBOUND_PIN_MAX_PRODUCTS) return pinned;
-  const brandPins = await resolveBrandTokenPins(tenantId, inbound, deps);
-  if (brandPins.length === 0) return pinned;
-  const seen = new Set(pinned.map((p) => p.id));
-  return [...pinned, ...brandPins.filter((p) => !seen.has(p.id))].slice(
-    0,
-    INBOUND_PIN_MAX_PRODUCTS,
-  );
+  return resolveGramsToProducts(tenantId, extractCandidateNameGrams(inbound), deps);
 }

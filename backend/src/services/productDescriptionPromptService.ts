@@ -321,12 +321,6 @@ const DESCRIPTION_QUESTION_PATTERNS: RegExp[] = [
   /\b(what('s| is) (it|this) (made of|for)|made of|materials?)\b/i,
   /\b(benefits?|advantages?|features?|ingredients?|composition|perberes|përfitimet?|karakteristika)\b/i,
   /\b(pershkrim|përshkrim|detaje|details about)\b/i,
-  // Albanian/Gheg composition-and-purpose verbs the live traffic actually uses:
-  // "Qfar permban?" (what does it contain), "Per qfare sherben?" (what is it for),
-  // "Nga cfare perbehet?" (what is it made of), "Cka ka brenda?" (what's inside).
-  // Patterns run on the diacritic-stripped lowercased form.
-  /\b(permban|perbehet|sherben)\b/i,
-  /\b(cka|qka|cfare?|qfare?)\s+ka\s+brenda\b/i,
 ];
 
 const RECOMMENDATION_CUE_PATTERNS: RegExp[] = [
@@ -475,10 +469,10 @@ Answer length (${SHORTEST_ANSWER_PRIORITY_CLAUSE}):
 - Give the SHORTEST reply that fully and correctly answers the customer's current message. Brevity is the default; every extra word must earn its place.
 - A one-word or single-line answer is correct and preferred when it fully answers — it does not need to be a complete sentence. Examples:
   - "Do you have this product?" -> "Yes."
-  - "Do you have this brand?" -> "Yes, we carry [Brand]." — ONLY when the catalog context or the brand-availability verdict confirms it; a brand question must never get a bare unverified "Yes."
+  - "Do you have this brand?" -> "Yes."
   - "Is it in stock?" (when stock was asked) -> "Yes."
   - "What is the price?" -> "€25"
-- Do NOT restate the product name the customer just referenced, and do NOT add filler such as "we have it available in our catalog". Exception: a brand-availability answer names the brand — that is the answer, not filler.
+- Do NOT restate the product or brand name the customer just referenced, and do NOT add filler such as "we have it available in our catalog".
 - Never repeat or rephrase the customer's question, and never restate information the customer already gave you.
 - No opening pleasantries or filler ("Of course!", "Sure", "Thanks for reaching out", "I'd be happy to help") — lead directly with the answer.
 - Stay natural and polite — concise, not cold or robotic. Keep the words needed for the answer to be clear and grammatical; just cut everything that adds no information.
