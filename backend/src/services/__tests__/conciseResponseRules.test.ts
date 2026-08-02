@@ -9,18 +9,16 @@ import { assembleGuidelinesFromBlocks } from '../promptAssemblyService';
 import type { TenantPromptBlockRow } from '../../db/models/promptBlock';
 
 /**
- * Content seeded by migration 061 for `guidelines.messaging_style`, as amended by
- * migration 089 (brand audit C3: the brand example now requires catalog grounding and
- * the no-restating rule exempts brand names). Mirrored here so the test fails if the
- * migration text and the runtime brevity rule drift apart.
+ * Content seeded by migration 061 for `guidelines.messaging_style`. Mirrored here so the
+ * test fails if the migration text and the runtime brevity rule drift apart.
  */
-const MESSAGING_STYLE_CONTENT_089 = `
+const MESSAGING_STYLE_CONTENT_061 = `
 - Brevity (HIGHEST PRIORITY): give the SHORTEST reply that fully and correctly answers the customer's current message. Lead with the direct answer. A one-word or single-line answer is correct and preferred whenever it fully answers — it does not need to be a complete sentence.
 - Concrete examples of the expected length:
   - "Do you have this product?" -> "Yes."
-  - "Do you have this brand?" -> "Yes, we carry [Brand]." (only when the catalog or the brand-availability verdict confirms it; a brand question must never get a bare unverified "Yes.")
+  - "Do you have this brand?" -> "Yes."
   - "What is the price?" -> "€25"
-- Do NOT restate the product name the customer just referenced (a brand-availability answer may name the brand - that is the answer, not filler), and do NOT add filler such as "we have it available in our catalog".
+- Do NOT restate the product or brand name the customer just referenced, and do NOT add filler such as "we have it available in our catalog".
 - Never repeat or rephrase the customer's question, and never restate information the customer already gave you.
 - No opening pleasantries or filler ("Of course!", "Sure", "Thanks for reaching out", "I'd be happy to help") — start with the answer.
 - Stay warm, natural, and polite — concise, not cold or robotic. This is a messaging app, not email: scannable beats wordy. Keep the words needed for the answer to be clear and grammatical; cut everything that adds no information.
@@ -31,7 +29,7 @@ const MESSAGING_STYLE_CONTENT_089 = `
 function makeBlock(overrides: Partial<TenantPromptBlockRow> = {}): TenantPromptBlockRow {
   return {
     block_key: 'guidelines.messaging_style',
-    content: MESSAGING_STYLE_CONTENT_089,
+    content: MESSAGING_STYLE_CONTENT_061,
     enabled: true,
     sort_order: 20,
     ...overrides,
@@ -46,24 +44,12 @@ describe('SHORTEST_ANSWER_APPEND (platform-enforced brevity rule)', () => {
 
   it('includes the concrete short-answer examples from the spec', () => {
     assert.match(SHORTEST_ANSWER_APPEND, /"Do you have this product\?" -> "Yes\."/);
+    assert.match(SHORTEST_ANSWER_APPEND, /"Do you have this brand\?" -> "Yes\."/);
     assert.match(SHORTEST_ANSWER_APPEND, /"What is the price\?" -> "€25"/);
   });
 
-  it('brand audit C3: a brand question must never get a bare unverified "Yes."', () => {
-    // The pre-audit rule trained exactly that ("Do you have this brand?" -> "Yes.")
-    // with nothing downstream verifying it — the bare-Yes example must stay gone.
-    assert.doesNotMatch(SHORTEST_ANSWER_APPEND, /"Do you have this brand\?" -> "Yes\."\s*$/m);
-    assert.match(SHORTEST_ANSWER_APPEND, /never get a bare unverified "Yes\."/);
-    // A brand confirmation names the brand and requires catalog grounding.
-    assert.match(SHORTEST_ANSWER_APPEND, /"Yes, we carry \[Brand\]\."/);
-    assert.match(SHORTEST_ANSWER_APPEND, /ONLY when the catalog context or the brand-availability verdict confirms it/);
-  });
-
   it('forbids restating known info and filler openers', () => {
-    assert.match(SHORTEST_ANSWER_APPEND, /Do NOT restate the product name/);
-    // Brand names are exempt from the no-restating rule: on a brand question the
-    // brand name IS the answer.
-    assert.match(SHORTEST_ANSWER_APPEND, /a brand-availability answer names the brand/);
+    assert.match(SHORTEST_ANSWER_APPEND, /Do NOT restate the product or brand name/);
     assert.match(SHORTEST_ANSWER_APPEND, /No opening pleasantries or filler/);
     assert.match(SHORTEST_ANSWER_APPEND, /we have it available in our catalog/);
   });

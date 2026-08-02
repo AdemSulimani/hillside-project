@@ -93,10 +93,7 @@ export const KNOWN_GUIDELINE_BLOCK_KEYS: ReadonlySet<string> = new Set([
 /**
  * Blocks that must never be dropped by the budget: the language lock is the whole basis of
  * Albanian reply correctness, and catalog_integrity/order_flow are the safety-bearing rules.
- * These mirror the platform-locked set in the catalog. vision_product_images joined when
- * migration 090 locked it (brand audit C3): it carries the brand-accuracy ladder for image
- * turns, and it only renders when hasImages anyway — dropping it under budget pressure would
- * remove the brand rules from exactly the turn type that needs them.
+ * These mirror the platform-locked set in the catalog.
  */
 export const BUDGET_PROTECTED_BLOCK_KEYS: ReadonlySet<string> = new Set([
   'guidelines.language',
@@ -104,7 +101,6 @@ export const BUDGET_PROTECTED_BLOCK_KEYS: ReadonlySet<string> = new Set([
   'guidelines.order_flow_and_escalation',
   'guidelines.price_currency_visibility',
   'guidelines.category_product_aggregation',
-  'guidelines.vision_product_images',
 ]);
 
 /**
